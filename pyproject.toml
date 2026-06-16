@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "helix-chat-engine"
+version = "0.1.0"
+description = "WebSocket-based chat service with agent integration"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "Helix Collective", email = "collective@helix.ai"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
+dependencies = [
+    "helix-hub-shared>=0.1.0",
+    "pydantic>=2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Deathcharge/helix-chat-engine"
+Repository = "https://github.com/Deathcharge/helix-chat-engine.git"
+Issues = "https://github.com/Deathcharge/helix-chat-engine/issues"
