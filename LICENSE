@@ -1,21 +1,98 @@
-MIT License
+Business Source License 1.1
 
-Copyright (c) 2026 Helix Collective
+License text copyright (c) 2020 MariaDB plc, All Rights Reserved.
+"Business Source License" is a trademark of MariaDB plc.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+Parameters
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+Licensor:             Helix Collective
+Licensed Work:        Helix Licensing System
+                      The Licensed Work is (c) 2024 Helix Collective
+Additional Use Grant: None
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+Change Date:          June 16, 2027
+
+Change License:       Apache License, Version 2.0
+
+For information about alternative licensing arrangements for the Licensed Work,
+please contact licensing@helixcollective.dev
+
+Notice
+
+Business Source License 1.1
+
+This Business Source License (this "Agreement") sets forth the terms and conditions
+under which Helix Collective ("Licensor") makes available certain software made
+available by Licensor under this Agreement (the "Licensed Work"). BY INSTALLING,
+COPYING, CONFIGURING, ACCESSING, OR USING THE LICENSED WORK, YOU AGREE THAT YOU
+HAVE READ, UNDERSTOOD, AND AGREE TO BE BOUND BY ALL OF THE TERMS AND CONDITIONS
+OF THIS AGREEMENT. IF YOU DO NOT AGREE WITH ALL OF THE TERMS AND CONDITIONS OF
+THIS AGREEMENT, DO NOT INSTALL, COPY, CONFIGURE, ACCESS, OR USE THE LICENSED WORK.
+
+1. Licensor hereby grants you the right to copy, modify, create derivative works,
+redistribute, and make non-production use of the Licensed Work. The foregoing rights
+are granted for a term of three (3) years from the date of first distribution of a
+particular version of the Licensed Work (the "Initial Release Date"). Upon expiration
+of the foregoing term, all rights granted to you under this Agreement for that
+version of the Licensed Work shall terminate, and the terms of the Change License
+shall apply.
+
+2. In addition to the rights granted in Section 1, Licensor hereby grants you a
+limited license to make production use of the Licensed Work. Production use entails
+launching for off-premises commercial advantage or monetary revenue-generating
+endeavor with the Licensed Work, including as part of an application or service
+the output of which is used for commercial advantage or to generate monetary revenue.
+If, at any time (including at the time of initial deployment of production use),
+the monthly volume of such production use exceeds 1,000 API calls or equivalent
+usage metric, then you must secure a commercial license key from Licensor or pay
+the fees specified in the pricing schedule at https://helixcollective.dev/pricing.
+
+3. Failure to pay required fees does not relieve you of your obligation to pay such
+fees. If you do not pay the required fees, Licensor may, at its sole discretion,
+terminate your rights under this Agreement.
+
+4. The Licensed Work is provided on an "AS IS" basis. Licensor provides the Licensed
+Work (and each contributor provides its contributions) on an "AS IS" BASIS, WITHOUT
+WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied, including, without
+limitation, any warranties or conditions of TITLE, NON-INFRINGEMENT,
+MERCHANTABILITY, or FITNESS FOR A PARTICULAR PURPOSE. You are solely responsible
+for determining the appropriateness of using or redistributing the Licensed Work
+and assume all risks associated with your exercise of permissions under this License.
+
+5. In no event and under no legal theory, whether in tort (including negligence),
+contract, or otherwise, unless required by applicable law (such as deliberate and
+grossly negligent acts) or agreed to in writing, shall any Licensor be liable to
+you for damages, including any direct, indirect, special, incidental, or
+consequential damages of any character arising as a result of this Agreement or
+out of the use or inability to use the Licensed Work (including but not limited to
+damages for loss of goodwill, work stoppage, computer failure or malfunction, or
+any and all other commercial damages or losses), even if such Licensor has been
+advised of the possibility of such damages.
+
+6. This Agreement will be governed by and construed in accordance with the laws of
+the jurisdiction in which Licensor resides, excluding its conflicts of law
+provisions. If you are located in the United States, this Agreement shall be
+governed by the laws of the State of California, excluding its conflicts of law
+provisions. The application of the United Nations Convention on Contracts for the
+International Sale of Goods is expressly excluded.
+
+7. If any provision of this Agreement is found to be unenforceable or invalid by a
+court of competent jurisdiction, the remaining provisions shall continue in full
+force and effect, and the unenforceable provision shall be modified to the minimum
+extent necessary to make it enforceable.
+
+8. The Licensed Work may be subject to export laws and regulations of the United
+States and other countries. You agree to strictly comply with all such laws and
+regulations and acknowledge that You have the responsibility to obtain such
+authorizations as may be required.
+
+9. Licensor may assign its rights and obligations under this Agreement to any
+successor in interest, provided that such successor agrees to be bound by the terms
+of this Agreement.
+
+10. This Agreement, together with the exhibits and schedules attached hereto,
+constitutes the entire agreement between the parties with respect to the subject
+matter hereof and supersedes all prior negotiations, representations, and agreements,
+whether written or oral, relating to such subject matter.
+
+For commercial licensing inquiries, please contact: licensing@helixcollective.dev
