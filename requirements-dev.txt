@@ -48,7 +48,7 @@ pre-commit==3.5.0
 ipython==8.18.1
 ipdb==0.13.13
 jupyter==1.0.0
-notebook==7.0.6
+notebook==7.5.6
 
 # Performance profiling
 # =====================
@@ -63,9 +63,9 @@ safety==2.3.5
 # Build and distribution
 # ======================
 build==1.0.3
-wheel==0.42.0
+wheel==0.46.2
 twine==4.0.2
-setuptools==69.0.2
+setuptools==78.1.1
 
 # Debugging
 # =========
