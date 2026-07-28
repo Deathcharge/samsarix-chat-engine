@@ -1,32 +1,100 @@
 [build-system]
-requires = ["setuptools>=45", "wheel"]
+requires = ["setuptools>=83", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "helix-chat-engine"
-version = "0.1.0"
-description = "WebSocket-based chat service with agent integration"
+version = "0.2.0"
+description = "Local-first persisted room chat over HTTP and WebSockets"
 readme = "README.md"
-requires-python = ">=3.9"
-license = {text = "MIT"}
+requires-python = ">=3.10"
+license = "LicenseRef-Helix-Custom-BSL-1.1"
+license-files = ["LICENSE"]
 authors = [
-    {name = "Helix Collective", email = "collective@helix.ai"}
+    {name = "Helix Collective", email = "collective@helix.ai"},
 ]
+keywords = ["chat", "fastapi", "sqlite", "websocket"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Communications :: Chat",
 ]
 dependencies = [
-    "helix-hub-shared>=0.1.0",
-    "pydantic>=2.0",
+    "fastapi>=0.140,<1.0",
+    "uvicorn[standard]>=0.30,<1.0",
 ]
+
+[project.optional-dependencies]
+test = [
+    "httpx2>=2,<3",
+    "pytest>=8,<10",
+    "pytest-asyncio>=0.24,<2.0",
+    "pytest-cov>=5,<8",
+    "websockets>=13,<17",
+]
+dev = [
+    "build>=1.2,<2.0",
+    "httpx2>=2,<3",
+    "mypy>=1.11,<2.0",
+    "pip-audit>=2.10,<3.0",
+    "pytest>=8,<10",
+    "pytest-asyncio>=0.24,<2.0",
+    "pytest-cov>=5,<8",
+    "ruff>=0.8,<1.0",
+    "setuptools>=83",
+    "twine>=5,<7",
+    "websockets>=13,<17",
+]
+
+[project.scripts]
+helix-chat = "helix_chat_engine.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Deathcharge/helix-chat-engine"
 Repository = "https://github.com/Deathcharge/helix-chat-engine.git"
 Issues = "https://github.com/Deathcharge/helix-chat-engine/issues"
+
+[tool.setuptools.packages.find]
+include = ["helix_chat_engine*"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+branch = true
+source = ["helix_chat_engine"]
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+extend-exclude = ["build", "dist"]
+
+[tool.ruff.lint]
+select = ["ASYNC", "B", "E", "F", "I", "S", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S104", "S105", "S106"]
+
+[tool.mypy]
+python_version = "3.10"
+check_untyped_defs = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_return_any = true
+warn_unused_ignores = true
+exclude = "^(build|dist)/"

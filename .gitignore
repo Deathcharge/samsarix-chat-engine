@@ -3,6 +3,11 @@ __pycache__/
 *$py.class
 *.so
 .Python
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
 build/
 develop-eggs/
 dist/
@@ -19,6 +24,7 @@ wheels/
 .installed.cfg
 *.egg
 .venv
+.venv*/
 env/
 venv/
 ENV/
@@ -30,3 +36,7 @@ venv.bak/
 *.swo
 *~
 .DS_Store
+data/
+*.db
+*.db-shm
+*.db-wal
