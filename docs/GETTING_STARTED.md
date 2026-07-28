@@ -1,6 +1,6 @@
 # Getting started
 
-This walkthrough starts one local Helix Chat Engine, creates a room, exchanges a live message, and verifies that history survives a restart.
+This walkthrough starts one local Samsarix Chat Engine, creates a room, exchanges a live message, and verifies that history survives a restart.
 
 ## 1. Install
 
@@ -20,7 +20,7 @@ python -m pip install ".[test]"
 ## 2. Start safely on loopback
 
 ```bash
-helix-chat serve
+samsarix-chat serve
 ```
 
 Expected startup address: `http://127.0.0.1:8000`. Open `/docs` for the generated OpenAPI explorer. `GET /healthz` checks the process; `GET /readyz` checks SQLite.
@@ -60,24 +60,24 @@ The server sends `ready`, `history`, and then `message.created`. You can instead
 
 ## 5. Verify restart recovery
 
-Stop the service with Ctrl+C, run `helix-chat serve` again, and request:
+Stop the service with Ctrl+C, run `samsarix-chat serve` again, and request:
 
 ```bash
 curl http://127.0.0.1:8000/v1/rooms/general/messages
 ```
 
-The response contains the committed messages because the default database is `data/helix-chat.db`.
+The response contains the committed messages because the default database is `data/samsarix-chat.db`.
 
 ## Add authentication
 
 Set a secret of at least 16 characters before starting the service:
 
 ```bash
-export HELIX_CHAT_API_KEY="replace-with-a-random-secret"
-helix-chat serve
+export SAMSARIX_CHAT_API_KEY="replace-with-a-random-secret"
+samsarix-chat serve
 ```
 
-In PowerShell, use `$env:HELIX_CHAT_API_KEY = "replace-with-a-random-secret"`. HTTP clients send either `X-API-Key` or `Authorization: Bearer ...`.
+In PowerShell, use `$env:SAMSARIX_CHAT_API_KEY = "replace-with-a-random-secret"`. HTTP clients send either `X-API-Key` or `Authorization: Bearer ...`.
 
 Browser WebSockets do not expose arbitrary handshake headers, so the server sends `auth.required`. Reply before the configured five-second deadline:
 
@@ -100,4 +100,8 @@ Do not put API keys in WebSocket URLs: query strings are routinely recorded by s
 - WebSocket close `4404`: create the room before connecting.
 - WebSocket close `1013`: the configured connection cap is full; retry with backoff.
 - `503 storage_unavailable` or `/readyz` returning 503: check the database directory permissions and available disk.
-- CLI refuses a public bind: set `HELIX_CHAT_API_KEY`, or bind to loopback. The insecure override is only for isolated development networks.
+- CLI refuses a public bind: set `SAMSARIX_CHAT_API_KEY`, or bind to loopback. The insecure override is only for isolated development networks.
+
+## Upgrading from 0.2
+
+Use `samsarix_chat_engine`, `samsarix-chat`, and `SAMSARIX_CHAT_*` in new integrations. The old `helix_chat_engine`, `helix-chat`, and `HELIX_CHAT_*` names remain deprecated aliases in 0.3. If the new default database does not exist but `data/helix-chat.db` does, the CLI opens the legacy file and emits a deprecation warning.

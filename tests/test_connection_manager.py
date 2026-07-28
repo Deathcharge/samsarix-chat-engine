@@ -5,7 +5,7 @@ from typing import cast
 import pytest
 from fastapi import WebSocket
 
-from helix_chat_engine import ConnectionManager
+from samsarix_chat_engine import ConnectionManager
 
 
 class FakeWebSocket:

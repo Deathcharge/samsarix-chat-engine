@@ -4,7 +4,7 @@ The canonical machine-readable contract is generated at `/openapi.json`; interac
 
 ## Authentication
 
-When `HELIX_CHAT_API_KEY` is unset, `/v1` is unauthenticated and the CLI binds to loopback by default. When configured, every `/v1` HTTP request must send one of:
+When `SAMSARIX_CHAT_API_KEY` is unset, `/v1` is unauthenticated and the CLI binds to loopback by default. When configured, every `/v1` HTTP request must send one of:
 
 ```text
 X-API-Key: <secret>
@@ -57,7 +57,7 @@ Persists a message, broadcasts it to the room, and returns 201:
 }
 ```
 
-`sender` is 1–64 characters. `content` is nonblank and subject to `HELIX_CHAT_MAX_MESSAGE_CHARS`. `client_message_id` is optional and at most 128 characters. `Idempotency-Key` can be used instead; if both are present, they must match. Replaying an ID returns the first persisted message with HTTP 200 and does not broadcast it again.
+`sender` is 1–64 characters. `content` is nonblank and subject to `SAMSARIX_CHAT_MAX_MESSAGE_CHARS`. `client_message_id` is optional and at most 128 characters. `Idempotency-Key` can be used instead; if both are present, they must match. Replaying an ID returns the first persisted message with HTTP 200 and does not broadcast it again.
 
 ### `GET /v1/rooms/{room_id}/messages?limit=50&before={message_id}`
 
@@ -99,7 +99,7 @@ HTTP request bodies are byte-bounded in addition to field validation. The derive
 /v1/rooms/{room_id}/ws?username={display_name}
 ```
 
-`username` is 1–64 characters. Only JSON text frames are supported. The CLI configures its WebSocket implementation to reject frames larger than `HELIX_CHAT_WS_MAX_BYTES`; the application also checks accepted text commands.
+`username` is 1–64 characters. Only JSON text frames are supported. The CLI configures its WebSocket implementation to reject frames larger than `SAMSARIX_CHAT_WS_MAX_BYTES`; the application also checks accepted text commands.
 
 ### Authentication sequence
 

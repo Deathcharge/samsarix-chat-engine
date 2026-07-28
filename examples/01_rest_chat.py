@@ -8,11 +8,11 @@ from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-BASE_URL = os.getenv("HELIX_CHAT_URL", "http://127.0.0.1:8000")
-API_KEY = os.getenv("HELIX_CHAT_API_KEY")
+BASE_URL = os.getenv("SAMSARIX_CHAT_URL", "http://127.0.0.1:8000")
+API_KEY = os.getenv("SAMSARIX_CHAT_API_KEY")
 
 if urlparse(BASE_URL).scheme not in {"http", "https"}:
-    raise ValueError("HELIX_CHAT_URL must use http or https")
+    raise ValueError("SAMSARIX_CHAT_URL must use http or https")
 
 
 def request(method: str, path: str, payload: dict[str, str] | None = None) -> tuple[int, object]:

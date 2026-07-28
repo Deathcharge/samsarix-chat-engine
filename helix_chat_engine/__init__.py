@@ -1,23 +1,14 @@
-"""Public API for Helix Chat Engine."""
+# Copyright (c) 2026 Samsarix LLC
+# SPDX-License-Identifier: MPL-2.0
+"""Backward-compatible import alias for :mod:`samsarix_chat_engine`."""
 
-from .app import create_app
-from .config import ConfigurationError, Settings
-from .models import Message, MessageCreate, MessagePage, Room, RoomCreate
-from .store import ChatStore
-from .websocket_manager import ConnectionManager
+import warnings
 
-__version__ = "0.2.0"
+warnings.warn(
+    "helix_chat_engine is deprecated; import samsarix_chat_engine instead",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
-__all__ = [
-    "ChatStore",
-    "ConfigurationError",
-    "ConnectionManager",
-    "Message",
-    "MessageCreate",
-    "MessagePage",
-    "Room",
-    "RoomCreate",
-    "Settings",
-    "__version__",
-    "create_app",
-]
+from samsarix_chat_engine import *  # noqa: E402,F401,F403
+from samsarix_chat_engine import __all__, __version__  # noqa: E402,F401

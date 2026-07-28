@@ -26,13 +26,13 @@ Commands run before implementation:
 
 ## Product definition
 
-Helix Chat Engine is a local-first, single-instance room chat service and embeddable FastAPI application. It gives Python developers a narrow, inspectable way to add durable text-room chat to a prototype, internal tool, local collaboration utility, or reference implementation.
+Samsarix Chat Engine is a local-first, single-instance room chat service and embeddable FastAPI application. It gives Python developers a narrow, inspectable way to add durable text-room chat to a prototype, internal tool, local collaboration utility, or reference implementation.
 
-- Target user: a Python developer who needs persisted HTTP/WebSocket chat without adopting the flagship Helix application or operating Redis/Postgres.
+- Target user: a Python developer who needs persisted HTTP/WebSocket chat without adopting a full collaboration platform or operating Redis/Postgres.
 - Primary use case: create a room, connect one or more clients, commit and broadcast messages, then reconnect and recover history.
-- Independent reason to exist: a small reusable service with no private Helix dependency and a conventional protocol.
-- Product form: installable Python package, `helix-chat` CLI, and ASGI app factory.
-- Distribution: source checkout or Python wheel after the owner resolves the license gate; no cloud resources are required.
+- Independent reason to exist: a small reusable service with no private repository dependency and a conventional protocol.
+- Product form: installable `samsarix-chat-engine` Python package, `samsarix-chat` CLI, and ASGI app factory.
+- Distribution: source checkout or Python wheel under MPL-2.0; no cloud resources are required.
 - Sustainability: maintenance/support or commercial embedding can be offered, but no demand or willingness-to-pay is assumed. Default operation incurs no metered API cost.
 
 ## Decisions and current research
@@ -45,7 +45,10 @@ Helix Chat Engine is a local-first, single-instance room chat service and embedd
 - Keep one process. SQLite plus an in-process connection manager is coherent at this scale; adding Redis merely for a scaling claim would expand operations and failure modes.
 - Use a shared API key only as an optional deployment boundary. User accounts and room authorization remain out of scope rather than being superficially implemented.
 
-Primary references checked on 2026-07-28: [FastAPI's official WebSocket documentation](https://fastapi.tiangolo.com/advanced/websockets/), the [Python Packaging User Guide](https://packaging.python.org/en/latest/guides/writing-pyproject-toml/), [Starlette's TestClient documentation](https://www.starlette.io/testclient/), FastAPI/Pydantic/HTTPX2 PyPI metadata, and [Centrifugo's official channel documentation](https://centrifugal.dev/docs/server/channels).
+- Make Samsarix LLC the canonical owner identity in v0.3 while retaining the v0.2 import, command, environment, and database names as tested migration aliases.
+- Use the unmodified MPL-2.0: file-level copyleft protects distributed changes to covered files and notice preservation while allowing the engine to be combined with separate proprietary files. AGPL-3.0 would cover network use more strongly but materially narrows embedding adoption; Apache-2.0 would permit closed downstream modifications.
+
+Primary references checked on 2026-07-28: [FastAPI's official WebSocket documentation](https://fastapi.tiangolo.com/advanced/websockets/), the [Python Packaging User Guide](https://packaging.python.org/en/latest/guides/writing-pyproject-toml/), [Starlette's TestClient documentation](https://www.starlette.io/testclient/), FastAPI/Pydantic/HTTPX2 PyPI metadata, [Centrifugo's official channel documentation](https://centrifugal.dev/docs/server/channels), [Mozilla's MPL-2.0 FAQ](https://www.mozilla.org/MPL/2.0/FAQ/), the [official MPL-2.0 text](https://www.mozilla.org/MPL/2.0/), and the [GNU license overview](https://www.gnu.org/licenses/).
 
 ## Architecture and trust boundaries
 
@@ -63,7 +66,7 @@ Deployment owners control TLS/proxying, the API secret, allowed browser origins,
 - [x] Implement the room/message/reconnect path with persistence and failure contracts.
 - [x] Replace mock-only tests with production integration coverage.
 - [x] Correct false “production ready,” CI, documentation, and license claims in the README.
-- [ ] Owner/legal gate: correct or confirm `LICENSE`, which names “Helix Licensing System” rather than this repository and adds a commercial threshold to BSL terms.
+- [x] Replace the mismatched customized BSL text with the standard MPL-2.0 and align package metadata, copyright notices, company identity, and contact channels.
 
 ### P1
 
@@ -100,12 +103,12 @@ Deployment owners control TLS/proxying, the API secret, allowed browser origins,
 ## Release acceptance criteria
 
 - Fresh install from the built wheel succeeds without another repository.
-- `helix-chat --help`, `--version`, and loopback startup work.
+- `samsarix-chat --help`, `--version`, and loopback startup work; the deprecated `helix-chat` alias remains functional.
 - The documented room → message → WebSocket → reconnect journey passes end to end.
 - Lint, format, type check, tests with the configured coverage floor, build, and wheel metadata checks pass.
 - No locally actionable P0 remains.
 - Documentation contains no private-infrastructure requirement or unimplemented capability claim.
-- Owner confirms the legal identity and intended terms in `LICENSE` before public package publication.
+- License text, source notices, copyright identity, and wheel metadata all agree on MPL-2.0 and Samsarix LLC.
 
 ## Completed work
 
@@ -113,7 +116,9 @@ The copied multi-agent/UCF/Discord/Redis/LLM implementation was removed because 
 
 The adversarial pass additionally found and fixed a SQLite connection-handle leak, unbounded streamed HTTP request bodies, a WebSocket cancellation race exposed by the current Starlette/HTTPX2 backend, stale license metadata, a dead per-message `Location` link, and an inefficient retention query. The transport and persistence limits now have direct tests.
 
-## Final verification evidence
+Version 0.3 completed the Helix-to-Samsarix product migration. The distribution, canonical Python package, CLI, environment variables, service metadata, documentation, support policy, and examples now use Samsarix. Compatibility shims preserve v0.2 imports and the old CLI/environment names, and the default database migration logic avoids silently hiding an existing `data/helix-chat.db`.
+
+## Version 0.2 verification evidence
 
 All source checks below ran in a newly created `.venv-productization` environment installed only from `.[dev]`. That install resolved FastAPI 0.140.7, Starlette 1.3.1, Pydantic 2.13.4, Uvicorn 0.51.0, HTTPX2 2.9.1, and the declared quality tools without a resolver error.
 
@@ -136,15 +141,33 @@ The first advisory scan identified only the system Python's inherited `setuptool
 
 Locally available verification was Windows 10/11 with CPython 3.11.9. The configured GitHub Actions matrix for Linux CPython 3.10–3.14 and Windows CPython 3.12 was not executed locally and remains the normal pre-release merge gate. No sustained load/soak test, external security assessment, or multi-process test was run; those unsupported scopes are listed as P1 work rather than implied as passing.
 
+## Version 0.3 verification evidence
+
+The Samsarix migration was verified again from source and from the final wheel on 2026-07-28:
+
+| Check | Actual result |
+| --- | --- |
+| `python -m ruff check .` / `ruff format --check .` | Passed; 31 Python files formatted |
+| `python -m mypy samsarix_chat_engine` | Passed; no issues in 8 canonical source files |
+| `pytest --cov=samsarix_chat_engine` | 27 passed in 19.68s; 91.70% total branch coverage |
+| runtime-only `pip-audit` | No known vulnerabilities; unpublished local package skipped |
+| `python -m build` / `twine check` | Source archive and universal wheel built and passed |
+| `python -m compileall` / `pip check` / `git diff --check` | Passed |
+| official MPL comparison | Local `LICENSE` matched Mozilla's official MPL-2.0 text after line-ending/trailing-space normalization |
+
+The source archive contains the security policy, documentation, examples, license, notice, and both Python package names. A fresh `.venv-samsarix-runtime` installed only the final wheel and its runtime dependencies. Both commands returned 0.3.0, both imports resolved from `site-packages`, the legacy import emitted its deprecation warning, metadata reported `MPL-2.0` with `LICENSE` and `NOTICE`, and `pip check` passed. The installed `samsarix-chat` command then started on loopback, created a room and persisted message over real HTTP, returned that history, wrote its SQLite database, and shut down gracefully.
+
+This v0.3 verification was local on Windows with CPython 3.11.9. The configured GitHub Actions matrix remains the cross-platform merge gate and had not run before the branch push.
+
 ## Deferred and blocked work
 
 Per-user authorization, multi-instance fan-out, administrative deletion/export, and load testing are genuine next-stage local engineering, ordered above. They are not needed to evaluate the single-instance developer service but are gates for broader or regulated deployments.
 
-Public publishing, hosted deployment, domains, credentials, signing, pricing, and legal approval are owner-controlled. No external accounts, infrastructure, releases, or spending were created. The exact legal action is: review `LICENSE`, set the correct Licensed Work identity and intended grant/threshold/change terms, then verify wheel metadata and README wording against counsel-approved text.
+Public package publication, hosted deployment, domains, credentials, signing, and pricing remain owner-controlled. No external accounts, infrastructure, releases, or spending were created as part of the local productization work.
 
 ## Release disposition
 
-**Release candidate with an owner/legal publication gate.** The single-instance developer product has no known locally actionable P0, and its source, package, primary journey, limits, error states, and documentation are coherent and verified. Do not publish the package or rely on its commercial terms until the owner corrects or confirms `LICENSE`. Deployments involving mutually untrusted users also require the named P1 per-user/per-room authorization work.
+**Alpha release candidate.** The single-instance developer product has no known locally actionable P0, and its source, package, primary journey, limits, error states, documentation, brand identity, and standard open-source license are coherent. Deployments involving mutually untrusted users still require the named P1 per-user/per-room authorization work.
 
 ## Known risks
 

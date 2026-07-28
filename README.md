@@ -1,8 +1,8 @@
-# Helix Chat Engine
+# Samsarix Chat Engine
 
-Helix Chat Engine is a small, local-first room chat service for developers who need persisted messages and live WebSocket delivery without adopting a full collaboration platform. It runs as a standalone FastAPI service or as an embeddable ASGI application, stores data in SQLite, and has no dependency on `helix-unified`, Redis, an LLM provider, or any private Helix package.
+Samsarix Chat Engine is a small, local-first room chat service from Samsarix LLC for developers who need persisted messages and live WebSocket delivery without adopting a full collaboration platform. It runs as a standalone FastAPI service or as an embeddable ASGI application, stores data in SQLite, and has no dependency on Redis, an LLM provider, or any private package.
 
-Version 0.2.0 is an alpha release candidate. The core single-instance journey is implemented and tested; public distribution is blocked on owner review of the repository's existing license text.
+Version 0.3.0 is an alpha release candidate. The core single-instance journey is implemented and tested, and the project is licensed under the standard Mozilla Public License 2.0.
 
 ## What works
 
@@ -32,10 +32,10 @@ Activate the environment with `.venv\Scripts\Activate.ps1` on PowerShell or `sou
 ```bash
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install .
-helix-chat serve
+samsarix-chat serve
 ```
 
-The service binds to `127.0.0.1:8000` and creates `data/helix-chat.db`. In another terminal, create a room and send a message:
+The service binds to `127.0.0.1:8000` and creates `data/samsarix-chat.db`. In another terminal, create a room and send a message:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/rooms \
@@ -78,7 +78,7 @@ The server sends `ready` and `history`, then accepts these JSON commands:
 {"type":"ping"}
 ```
 
-Clients receive `message.created`, `presence.joined`, `presence.left`, `pong`, and structured `error` events. When `HELIX_CHAT_API_KEY` is set, non-browser clients can send `X-API-Key` or `Authorization: Bearer ...` during the handshake; browser clients first receive `auth.required` and reply with `{"type":"auth","api_key":"..."}`. API keys are never accepted in query strings.
+Clients receive `message.created`, `presence.joined`, `presence.left`, `pong`, and structured `error` events. When `SAMSARIX_CHAT_API_KEY` is set, non-browser clients can send `X-API-Key` or `Authorization: Bearer ...` during the handshake; browser clients first receive `auth.required` and reply with `{"type":"auth","api_key":"..."}`. API keys are never accepted in query strings.
 
 The exact HTTP and event contracts are in [API reference](docs/API_REFERENCE.md).
 
@@ -88,28 +88,28 @@ All settings are optional for loopback development. Copy [.env.example](.env.exa
 
 | Variable | Default | Purpose |
 | --- | ---: | --- |
-| `HELIX_CHAT_DATABASE` | `data/helix-chat.db` | SQLite database path |
-| `HELIX_CHAT_API_KEY` | unset | Shared secret protecting all `/v1` data; minimum 16 characters |
-| `HELIX_CHAT_ALLOWED_ORIGINS` | unset | Comma-separated exact browser origins for CORS/WebSockets |
-| `HELIX_CHAT_MAX_MESSAGE_CHARS` | `4000` | Per-message character limit |
-| `HELIX_CHAT_MESSAGES_PER_MINUTE` | `60` | Per-client HTTP and per-connection WebSocket message rate |
-| `HELIX_CHAT_MAX_CONNECTIONS` | `200` | Process-wide WebSocket cap |
-| `HELIX_CHAT_MAX_CONNECTIONS_PER_ROOM` | `100` | Per-room WebSocket cap |
-| `HELIX_CHAT_MAX_ROOMS` | `1000` | Persisted room cap |
-| `HELIX_CHAT_MAX_STORED_MESSAGES` | `100000` | Global retained-message cap |
-| `HELIX_CHAT_MAX_STORED_MESSAGES_PER_ROOM` | `10000` | Per-room retained-message cap |
-| `HELIX_CHAT_WS_AUTH_TIMEOUT` | `5` | Browser authentication deadline in seconds |
-| `HELIX_CHAT_WS_SEND_TIMEOUT` | `2` | Slow-client send timeout in seconds |
-| `HELIX_CHAT_WS_MAX_BYTES` | `16384` | WebSocket command frame cap used by the CLI server |
+| `SAMSARIX_CHAT_DATABASE` | `data/samsarix-chat.db` | SQLite database path |
+| `SAMSARIX_CHAT_API_KEY` | unset | Shared secret protecting all `/v1` data; minimum 16 characters |
+| `SAMSARIX_CHAT_ALLOWED_ORIGINS` | unset | Comma-separated exact browser origins for CORS/WebSockets |
+| `SAMSARIX_CHAT_MAX_MESSAGE_CHARS` | `4000` | Per-message character limit |
+| `SAMSARIX_CHAT_MESSAGES_PER_MINUTE` | `60` | Per-client HTTP and per-connection WebSocket message rate |
+| `SAMSARIX_CHAT_MAX_CONNECTIONS` | `200` | Process-wide WebSocket cap |
+| `SAMSARIX_CHAT_MAX_CONNECTIONS_PER_ROOM` | `100` | Per-room WebSocket cap |
+| `SAMSARIX_CHAT_MAX_ROOMS` | `1000` | Persisted room cap |
+| `SAMSARIX_CHAT_MAX_STORED_MESSAGES` | `100000` | Global retained-message cap |
+| `SAMSARIX_CHAT_MAX_STORED_MESSAGES_PER_ROOM` | `10000` | Per-room retained-message cap |
+| `SAMSARIX_CHAT_WS_AUTH_TIMEOUT` | `5` | Browser authentication deadline in seconds |
+| `SAMSARIX_CHAT_WS_SEND_TIMEOUT` | `2` | Slow-client send timeout in seconds |
+| `SAMSARIX_CHAT_WS_MAX_BYTES` | `16384` | WebSocket command frame cap used by the CLI server |
 
-The CLI refuses `--host 0.0.0.0` or another non-loopback bind unless `HELIX_CHAT_API_KEY` is configured. `--allow-insecure-public` is an explicit development escape hatch, not a production recommendation.
+The CLI refuses `--host 0.0.0.0` or another non-loopback bind unless `SAMSARIX_CHAT_API_KEY` is configured. `--allow-insecure-public` is an explicit development escape hatch, not a production recommendation.
 
 ## Embed it
 
 ```python
 from pathlib import Path
 
-from helix_chat_engine import Settings, create_app
+from samsarix_chat_engine import Settings, create_app
 
 app = create_app(Settings(database_path=Path("data/chat.db")))
 ```
@@ -147,9 +147,9 @@ python -m pip install --upgrade pip setuptools wheel
 python -m pip install -e ".[dev]"
 python -m ruff check .
 python -m ruff format --check .
-python -m mypy helix_chat_engine
+python -m mypy samsarix_chat_engine
 python -m pip_audit
-python -m pytest --cov=helix_chat_engine --cov-report=term-missing
+python -m pytest --cov=samsarix_chat_engine --cov-report=term-missing
 python -m build
 python -m twine check dist/*
 ```
@@ -162,4 +162,8 @@ This is a coherent single-instance MVP, not a hosted chat platform. The highest-
 
 ## License
 
-The existing [LICENSE](LICENSE) contains customized Business Source License 1.1 terms, a June 16, 2027 change date, and a commercial-use threshold. It also identifies the licensed work as “Helix Licensing System,” which may not describe this repository. The package metadata points to that file without reinterpreting it. The owner should obtain legal review and correct the licensed-work identity before public distribution or commercial reliance.
+Copyright (c) 2026 Samsarix LLC. The source is licensed under the [Mozilla Public License 2.0](LICENSE). MPL-2.0 keeps distributed modifications to covered source files open and preserves license notices, while allowing those files to be combined with separate proprietary files in a larger work.
+
+The canonical Python package, command, and environment prefix are `samsarix_chat_engine`, `samsarix-chat`, and `SAMSARIX_CHAT_*`. Version 0.3 keeps `helix_chat_engine`, `helix-chat`, and `HELIX_CHAT_*` as deprecated compatibility aliases. If only `data/helix-chat.db` exists, the CLI reuses it so the rename does not hide existing data.
+
+For general inquiries, email contact@samsarix.com. For product support and private security reports, email support@samsarix.com or read [SECURITY.md](SECURITY.md).

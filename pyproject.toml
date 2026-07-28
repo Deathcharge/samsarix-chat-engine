@@ -3,15 +3,18 @@ requires = ["setuptools>=83", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "helix-chat-engine"
-version = "0.2.0"
+name = "samsarix-chat-engine"
+version = "0.3.0"
 description = "Local-first persisted room chat over HTTP and WebSockets"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "LicenseRef-Helix-Custom-BSL-1.1"
-license-files = ["LICENSE"]
+license = "MPL-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [
-    {name = "Helix Collective", email = "collective@helix.ai"},
+    {name = "Samsarix LLC", email = "contact@samsarix.com"},
+]
+maintainers = [
+    {name = "Samsarix Support", email = "support@samsarix.com"},
 ]
 keywords = ["chat", "fastapi", "sqlite", "websocket"]
 classifiers = [
@@ -53,15 +56,17 @@ dev = [
 ]
 
 [project.scripts]
-helix-chat = "helix_chat_engine.cli:main"
+samsarix-chat = "samsarix_chat_engine.cli:main"
+helix-chat = "samsarix_chat_engine.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/Deathcharge/helix-chat-engine"
+Homepage = "https://samsarix.com"
 Repository = "https://github.com/Deathcharge/helix-chat-engine.git"
 Issues = "https://github.com/Deathcharge/helix-chat-engine/issues"
+Support = "https://samsarix.com"
 
 [tool.setuptools.packages.find]
-include = ["helix_chat_engine*"]
+include = ["samsarix_chat_engine*", "helix_chat_engine*"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
@@ -71,7 +76,7 @@ asyncio_mode = "auto"
 
 [tool.coverage.run]
 branch = true
-source = ["helix_chat_engine"]
+source = ["samsarix_chat_engine"]
 
 [tool.coverage.report]
 fail_under = 85

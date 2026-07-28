@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from helix_chat_engine import Settings, create_app
+from samsarix_chat_engine import Settings, create_app
 
 settings = Settings(
     database_path=Path("data/embedded-chat.db"),

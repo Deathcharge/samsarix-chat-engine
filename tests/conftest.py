@@ -6,7 +6,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from helix_chat_engine import Settings, create_app
+from samsarix_chat_engine import Settings, create_app
 
 
 @pytest.fixture

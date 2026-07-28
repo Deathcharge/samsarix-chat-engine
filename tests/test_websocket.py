@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from helix_chat_engine import Settings, create_app
+from samsarix_chat_engine import Settings, create_app
 
 
 def test_websocket_message_is_broadcast_and_recovered(client: TestClient, room: dict[str, str]) -> None:

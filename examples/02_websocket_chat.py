@@ -8,10 +8,10 @@ import os
 
 from websockets.asyncio.client import connect
 
-ROOM_ID = os.getenv("HELIX_CHAT_ROOM", "general")
-USERNAME = os.getenv("HELIX_CHAT_USERNAME", "example")
-API_KEY = os.getenv("HELIX_CHAT_API_KEY")
-WS_URL = os.getenv("HELIX_CHAT_WS_URL", "ws://127.0.0.1:8000")
+ROOM_ID = os.getenv("SAMSARIX_CHAT_ROOM", "general")
+USERNAME = os.getenv("SAMSARIX_CHAT_USERNAME", "example")
+API_KEY = os.getenv("SAMSARIX_CHAT_API_KEY")
+WS_URL = os.getenv("SAMSARIX_CHAT_WS_URL", "ws://127.0.0.1:8000")
 
 
 async def chat() -> None:
@@ -20,7 +20,7 @@ async def chat() -> None:
         event = json.loads(await websocket.recv())
         if event["type"] == "auth.required":
             if not API_KEY:
-                raise RuntimeError("The service requires HELIX_CHAT_API_KEY")
+                raise RuntimeError("The service requires SAMSARIX_CHAT_API_KEY")
             await websocket.send(json.dumps({"type": "auth", "api_key": API_KEY}))
             event = json.loads(await websocket.recv())
         print(event)  # ready

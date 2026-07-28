@@ -1,6 +1,6 @@
 # Contributing
 
-Helix Chat Engine is an alpha, single-instance chat service. Keep changes focused on its documented HTTP/WebSocket and SQLite product rather than reintroducing dependencies on private Helix repositories.
+Samsarix Chat Engine is an alpha, single-instance chat service. Keep changes focused on its documented HTTP/WebSocket and SQLite product rather than reintroducing dependencies on unrelated private repositories.
 
 ## Setup
 
@@ -20,9 +20,9 @@ python -m pip install -e ".[dev]"
 ```bash
 python -m ruff check .
 python -m ruff format --check .
-python -m mypy helix_chat_engine
+python -m mypy samsarix_chat_engine
 python -m pip_audit
-python -m pytest --cov=helix_chat_engine --cov-report=term-missing
+python -m pytest --cov=samsarix_chat_engine --cov-report=term-missing
 python -m build
 python -m twine check dist/*
 ```
@@ -32,9 +32,9 @@ Add tests that exercise production code. Do not use mocks as a substitute for th
 ## Pull requests
 
 - Explain the user problem and compatibility impact.
-- Keep public behavior backward-compatible within the 0.2 protocol where practical.
+- Keep public behavior backward-compatible within the 0.x protocol where practical.
 - Never commit API keys, chat databases, message content, or generated build artifacts.
 - Call out migration, retention, security, privacy, and operating-cost changes.
 - Confirm that documentation describes behavior you ran, not planned behavior.
 
-The existing repository license is owner/legal-review blocked as described in the README. Contributions do not resolve or reinterpret that gate.
+Contributions are accepted under the repository's Mozilla Public License 2.0 terms. By submitting a contribution, you represent that you have the right to do so under those terms.
