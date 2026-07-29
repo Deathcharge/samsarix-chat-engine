@@ -1,124 +1,107 @@
-# Getting Started with Helix Chat Engine
+# Getting started
 
-## Installation
+This walkthrough starts one local Samsarix Chat Engine, creates a room, exchanges a live message, and verifies that history survives a restart.
+
+## 1. Install
+
+Use Python 3.10 or newer from the repository root:
 
 ```bash
-pip install helix-chat-engine
+python -m venv .venv
 ```
 
-## Quick Start
+Activate `.venv\Scripts\Activate.ps1` on PowerShell or `source .venv/bin/activate` on POSIX, then install:
 
-```python
-from helix_chat_engine import ChatServer, WebSocketManager
-
-# Create server
-server = ChatServer(host="localhost", port=8000)
-
-# Create WebSocket manager
-ws_manager = WebSocketManager()
-
-# Start server
-server.start()
+```bash
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install ".[test]"
 ```
 
-## Basic Usage
+## 2. Start safely on loopback
 
-### Create a Chat Room
-
-```python
-room = server.create_room(
-    name="General",
-    description="General discussion",
-    max_users=100
-)
+```bash
+samsarix-chat serve
 ```
 
-### Send a Message
+Expected startup address: `http://127.0.0.1:8000`. Open `/docs` for the generated OpenAPI explorer. `GET /healthz` checks the process; `GET /readyz` checks SQLite.
 
-```python
-message = server.send_message(
-    room_id=room.id,
-    user_id="user-1",
-    content="Hello everyone!"
-)
+## 3. Create a room and seed history
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/rooms \
+  -H "Content-Type: application/json" \
+  -d '{"id":"general","name":"General","description":"Local chat"}'
+
+curl -X POST http://127.0.0.1:8000/v1/rooms/general/messages \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: seed-1" \
+  -d '{"sender":"setup","content":"The room is ready"}'
 ```
 
-### Join a Room
+Repeating the second request with the same idempotency key returns the original message with HTTP 200 rather than creating a duplicate.
 
-```python
-server.join_room(
-    room_id=room.id,
-    user_id="user-1"
-)
+## 4. Connect a browser client
+
+Run this in the browser developer console on a page served from localhost:
+
+```javascript
+const socket = new WebSocket(
+  "ws://127.0.0.1:8000/v1/rooms/general/ws?username=Browser"
+);
+socket.onmessage = (event) => console.log(JSON.parse(event.data));
+socket.onopen = () => socket.send(JSON.stringify({
+  type: "message",
+  content: "Hello from the browser",
+  client_message_id: crypto.randomUUID()
+}));
 ```
 
-## WebSocket Integration
+The server sends `ready`, `history`, and then `message.created`. You can instead run `python examples/02_websocket_chat.py`.
 
-```python
-from fastapi import FastAPI, WebSocket
+## 5. Verify restart recovery
 
-app = FastAPI()
-manager = WebSocketManager()
+Stop the service with Ctrl+C, run `samsarix-chat serve` again, and request:
 
-@app.websocket("/ws/{room_id}/{user_id}")
-async def websocket_endpoint(websocket: WebSocket, room_id: str, user_id: str):
-    await manager.connect(websocket, room_id, user_id)
-    try:
-        while True:
-            data = await websocket.receive_text()
-            await manager.broadcast(room_id, data)
-    finally:
-        manager.disconnect(websocket, room_id, user_id)
+```bash
+curl http://127.0.0.1:8000/v1/rooms/general/messages
 ```
 
-## Common Patterns
+The response contains the committed messages because the default database is `data/samsarix-chat.db`.
 
-### 1. Private Rooms
+## Add authentication
 
-```python
-room = server.create_room(
-    name="Private",
-    is_private=True,
-    allowed_users=["user-1", "user-2"]
-)
+Set a secret of at least 16 characters before starting the service:
+
+```bash
+export SAMSARIX_CHAT_API_KEY="replace-with-a-random-secret"
+samsarix-chat serve
 ```
 
-### 2. Message History
+In PowerShell, use `$env:SAMSARIX_CHAT_API_KEY = "replace-with-a-random-secret"`. HTTP clients send either `X-API-Key` or `Authorization: Bearer ...`.
 
-```python
-history = server.get_room_messages(
-    room_id=room.id,
-    limit=50,
-    offset=0
-)
+Browser WebSockets do not expose arbitrary handshake headers, so the server sends `auth.required`. Reply before the configured five-second deadline:
+
+```javascript
+socket.onmessage = (event) => {
+  const message = JSON.parse(event.data);
+  if (message.type === "auth.required") {
+    socket.send(JSON.stringify({type: "auth", api_key: "replace-with-a-random-secret"}));
+  }
+};
 ```
 
-### 3. User Status
+Do not put API keys in WebSocket URLs: query strings are routinely recorded by servers and proxies.
 
-```python
-server.set_user_status(
-    user_id="user-1",
-    status="online"  # or "away", "offline"
-)
-```
+## Troubleshooting
 
-## Error Handling
+- `401 authentication_required`: the HTTP API requires the configured shared key.
+- WebSocket close `4401`: authentication was missing, invalid, or late.
+- WebSocket close `4403`: the browser `Origin` is not allowed.
+- WebSocket close `4404`: create the room before connecting.
+- WebSocket close `1013`: the configured connection cap is full; retry with backoff.
+- `503 storage_unavailable` or `/readyz` returning 503: check the database directory permissions and available disk.
+- CLI refuses a public bind: set `SAMSARIX_CHAT_API_KEY`, or bind to loopback. The insecure override is only for isolated development networks.
 
-```python
-try:
-    message = server.send_message(
-        room_id=room.id,
-        user_id="user-1",
-        content="Hello"
-    )
-except RoomNotFoundError:
-    print("Room not found")
-except UserNotInRoomError:
-    print("User not in room")
-```
+## Upgrading from 0.2
 
-## Next Steps
-
-- Read the [API Reference](API_REFERENCE.md)
-- Check out [examples](../examples/)
-- Review [architecture](ARCHITECTURE.md)
+Use `samsarix_chat_engine`, `samsarix-chat`, and `SAMSARIX_CHAT_*` in new integrations. The old `helix_chat_engine`, `helix-chat`, and `HELIX_CHAT_*` names remain deprecated aliases in 0.3. If the new default database does not exist but `data/helix-chat.db` does, the CLI opens the legacy file and emits a deprecation warning.

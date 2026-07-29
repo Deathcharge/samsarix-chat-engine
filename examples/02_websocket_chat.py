@@ -1,24 +1,32 @@
-"""WebSocket chat example."""
+"""Connect, authenticate if configured, send a message, and print events."""
 
-from fastapi import FastAPI, WebSocket
-from helix_chat_engine import WebSocketManager
+from __future__ import annotations
 
-app = FastAPI()
-manager = WebSocketManager()
+import asyncio
+import json
+import os
 
-@app.websocket("/ws/{room_id}/{user_id}")
-async def websocket_endpoint(websocket: WebSocket, room_id: str, user_id: str):
-    """WebSocket endpoint for chat."""
-    await manager.connect(websocket, room_id, user_id)
-    try:
-        while True:
-            data = await websocket.receive_text()
-            await manager.broadcast(room_id, data)
-    except Exception as e:
-        print(f"Error: {e}")
-    finally:
-        manager.disconnect(websocket, room_id, user_id)
+from websockets.asyncio.client import connect
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+ROOM_ID = os.getenv("SAMSARIX_CHAT_ROOM", "general")
+USERNAME = os.getenv("SAMSARIX_CHAT_USERNAME", "example")
+API_KEY = os.getenv("SAMSARIX_CHAT_API_KEY")
+WS_URL = os.getenv("SAMSARIX_CHAT_WS_URL", "ws://127.0.0.1:8000")
+
+
+async def chat() -> None:
+    uri = f"{WS_URL}/v1/rooms/{ROOM_ID}/ws?username={USERNAME}"
+    async with connect(uri, max_size=16_384) as websocket:
+        event = json.loads(await websocket.recv())
+        if event["type"] == "auth.required":
+            if not API_KEY:
+                raise RuntimeError("The service requires SAMSARIX_CHAT_API_KEY")
+            await websocket.send(json.dumps({"type": "auth", "api_key": API_KEY}))
+            event = json.loads(await websocket.recv())
+        print(event)  # ready
+        print(json.loads(await websocket.recv()))  # history
+        await websocket.send(json.dumps({"type": "message", "content": "Hello over WebSocket"}))
+        print(json.loads(await websocket.recv()))  # message.created
+
+
+asyncio.run(chat())

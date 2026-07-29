@@ -1,93 +1,169 @@
-# helix-chat-engine
+# Samsarix Chat Engine
 
-Chat and conversation system
+Samsarix Chat Engine is a small, local-first room chat service from Samsarix LLC for developers who need persisted messages and live WebSocket delivery without adopting a full collaboration platform. It runs as a standalone FastAPI service or as an embeddable ASGI application, stores data in SQLite, and has no dependency on Redis, an LLM provider, or any private package.
 
-## 🎯 Overview
+Version 0.3.0 is an alpha release candidate. The core single-instance journey is implemented and tested, and the project is licensed under the standard Mozilla Public License 2.0.
 
-This repository is part of the [Helix Collective](https://github.com/Deathcharge/helix-platform), a comprehensive ecosystem for building intelligent, multi-agent systems with consciousness frameworks and advanced LLM integration.
+## What works
 
-## 🚀 Quick Start
+- Create and inspect rooms over HTTP.
+- Post validated messages over HTTP or WebSocket.
+- Persist room history in SQLite and recover it after reconnect or restart.
+- Broadcast messages and lightweight join/leave presence within one process.
+- Retry message submission safely with `Idempotency-Key` or `client_message_id`.
+- Protect all chat data with an optional shared API key.
+- Bound message size, send rate, connections, room count, and retained history.
+- Check liveness at `/healthz`, storage readiness at `/readyz`, and OpenAPI docs at `/docs`.
 
-### Installation
+It deliberately does not provide user accounts, per-room authorization, attachments, moderation, end-to-end encryption, federation, multi-instance fan-out, or AI agents.
 
-\`\`\`bash
+## Quick start
+
+Prerequisites: Python 3.10 or newer and Git.
+
+```bash
 git clone https://github.com/Deathcharge/helix-chat-engine.git
 cd helix-chat-engine
-pip install -r requirements.txt
-\`\`\`
+python -m venv .venv
+```
 
-### Basic Usage
+Activate the environment with `.venv\Scripts\Activate.ps1` on PowerShell or `source .venv/bin/activate` on POSIX, then:
 
-See the [examples/](examples/) directory for working examples and integration patterns.
+```bash
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install .
+samsarix-chat serve
+```
 
-## 📚 Documentation
+The service binds to `127.0.0.1:8000` and creates `data/samsarix-chat.db`. In another terminal, create a room and send a message:
 
-- **[Architecture](docs/ARCHITECTURE.md)** - System design and components
-- **[API Reference](docs/API.md)** - Complete API documentation
-- **[Integration Guide](docs/INTEGRATION.md)** - How to integrate with other Helix repos
-- **[Deployment](docs/DEPLOYMENT.md)** - Production deployment guide
-- **[Contributing](CONTRIBUTING.md)** - How to contribute
+```bash
+curl -X POST http://127.0.0.1:8000/v1/rooms \
+  -H "Content-Type: application/json" \
+  -d '{"id":"general","name":"General"}'
 
-## 🔗 Related Repositories
+curl -X POST http://127.0.0.1:8000/v1/rooms/general/messages \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: getting-started-1" \
+  -d '{"sender":"Andrew","content":"Hello, room"}'
 
-- **[helix-platform](https://github.com/Deathcharge/helix-platform)** - Central hub and integration guide
-- **[helix-unified](https://github.com/Deathcharge/helix-unified)** - Main unified codebase
-- **[helix-core](https://github.com/Deathcharge/helix-core)** - Core utilities and LLM integration
+curl http://127.0.0.1:8000/v1/rooms/general/messages
+```
 
-See [HELIX_REPOSITORY_INDEX.md](https://github.com/Deathcharge/helix-platform/blob/main/HELIX_REPOSITORY_INDEX.md) for the complete ecosystem map.
+For a complete WebSocket client, install the test extra and run the examples after creating `general`:
 
-## 🧪 Testing
+```bash
+python -m pip install ".[test]"
+python examples/01_rest_chat.py
+python examples/02_websocket_chat.py
+```
 
-Run tests with pytest:
+See [Getting started](docs/GETTING_STARTED.md) for authentication and browser examples.
 
-\`\`\`bash
-pytest tests/ -v --cov=src
-\`\`\`
+## WebSocket protocol
 
-## 🔄 CI/CD
+Connect to:
 
-This repository uses GitHub Actions for:
-- ✅ Automated testing (Python 3.9, 3.10, 3.11)
-- ✅ Code linting (flake8)
-- ✅ Type checking (mypy)
-- ✅ Security scanning (bandit, safety)
-- ✅ Coverage reporting (Codecov)
+```text
+ws://127.0.0.1:8000/v1/rooms/{room_id}/ws?username={display_name}
+```
 
-See [.github/workflows/ci.yml](.github/workflows/ci.yml) for details.
+The server sends `ready` and `history`, then accepts these JSON commands:
 
-## 📋 Requirements
+```json
+{"type":"message","content":"Hello","client_message_id":"browser-42"}
+```
 
-- Python 3.9+
-- Dependencies listed in requirements.txt
-- Development dependencies in requirements-dev.txt
+```json
+{"type":"ping"}
+```
 
-## 🤝 Contributing
+Clients receive `message.created`, `presence.joined`, `presence.left`, `pong`, and structured `error` events. When `SAMSARIX_CHAT_API_KEY` is set, non-browser clients can send `X-API-Key` or `Authorization: Bearer ...` during the handshake; browser clients first receive `auth.required` and reply with `{"type":"auth","api_key":"..."}`. API keys are never accepted in query strings.
 
-We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for:
-- Development setup
-- Code style guide
-- Testing requirements
-- Pull request process
+The exact HTTP and event contracts are in [API reference](docs/API_REFERENCE.md).
 
-## 📄 License
+## Configuration
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+All settings are optional for loopback development. Copy [.env.example](.env.example) as a reference; the service reads process environment variables directly and does not automatically load `.env` files.
 
-## 🆘 Support
+| Variable | Default | Purpose |
+| --- | ---: | --- |
+| `SAMSARIX_CHAT_DATABASE` | `data/samsarix-chat.db` | SQLite database path |
+| `SAMSARIX_CHAT_API_KEY` | unset | Shared secret protecting all `/v1` data; minimum 16 characters |
+| `SAMSARIX_CHAT_ALLOWED_ORIGINS` | unset | Comma-separated exact browser origins for CORS/WebSockets |
+| `SAMSARIX_CHAT_MAX_MESSAGE_CHARS` | `4000` | Per-message character limit |
+| `SAMSARIX_CHAT_MESSAGES_PER_MINUTE` | `60` | Per-client HTTP and per-connection WebSocket message rate |
+| `SAMSARIX_CHAT_MAX_CONNECTIONS` | `200` | Process-wide WebSocket cap |
+| `SAMSARIX_CHAT_MAX_CONNECTIONS_PER_ROOM` | `100` | Per-room WebSocket cap |
+| `SAMSARIX_CHAT_MAX_ROOMS` | `1000` | Persisted room cap |
+| `SAMSARIX_CHAT_MAX_STORED_MESSAGES` | `100000` | Global retained-message cap |
+| `SAMSARIX_CHAT_MAX_STORED_MESSAGES_PER_ROOM` | `10000` | Per-room retained-message cap |
+| `SAMSARIX_CHAT_WS_AUTH_TIMEOUT` | `5` | Browser authentication deadline in seconds |
+| `SAMSARIX_CHAT_WS_SEND_TIMEOUT` | `2` | Slow-client send timeout in seconds |
+| `SAMSARIX_CHAT_WS_MAX_BYTES` | `16384` | WebSocket command frame cap used by the CLI server |
 
-- **Issues**: Report bugs or request features via [GitHub Issues](https://github.com/Deathcharge/helix-chat-engine/issues)
-- **Discussions**: Ask questions in [GitHub Discussions](https://github.com/Deathcharge/helix-chat-engine/discussions)
-- **Documentation**: See the [docs/](docs/) directory
-- **Ecosystem**: Visit [helix-platform](https://github.com/Deathcharge/helix-platform)
+The CLI refuses `--host 0.0.0.0` or another non-loopback bind unless `SAMSARIX_CHAT_API_KEY` is configured. `--allow-insecure-public` is an explicit development escape hatch, not a production recommendation.
 
-## 🎓 Learn More
+## Embed it
 
-- [Helix Collective Repository Index](https://github.com/Deathcharge/helix-platform/blob/main/HELIX_REPOSITORY_INDEX.md)
-- [Architecture Guide](https://github.com/Deathcharge/helix-platform/blob/main/docs/ARCHITECTURE.md)
-- [Integration Examples](https://github.com/Deathcharge/helix-platform/tree/main/examples)
+```python
+from pathlib import Path
 
----
+from samsarix_chat_engine import Settings, create_app
 
-**Status**: ✅ Production Ready  
-**Last Updated**: June 19, 2026  
-**Maintainer**: Helix Collective Contributors
+app = create_app(Settings(database_path=Path("data/chat.db")))
+```
+
+`create_app()` returns a complete FastAPI application. Mounting it under another application is supported, but the parent deployment owns proxy limits, TLS, process topology, and graceful-shutdown behavior.
+
+## Architecture and guarantees
+
+```text
+HTTP / WebSocket clients
+          |
+       FastAPI  -- validation, shared-key auth, error contracts, rate limits
+          |
+    ConnectionManager -- bounded, in-process room broadcast
+          |
+       ChatStore -- SQLite transactions, idempotency, bounded retention
+```
+
+- SQLite writes are serialized within one process and use `BEGIN IMMEDIATE`; foreign keys, WAL mode, and a five-second busy timeout are enabled.
+- A message is persisted before `message.created` is broadcast. An HTTP success therefore means the local database committed it.
+- WebSocket delivery and presence events are best-effort/at-most-once. Reconnecting clients recover the last 50 messages and can page older history over HTTP.
+- Running multiple worker processes is not supported: each process would have an independent connection registry and rate limiter. Use one process or add a real broker in a future release.
+- Retention is count-based. Old messages are deleted after successful inserts once configured caps are exceeded.
+
+## Security, privacy, and operating cost
+
+The default loopback bind avoids accidental network exposure. If the shared API key is enabled, it protects all chat data but does not distinguish users or rooms; put the service behind an identity-aware gateway when different users need different permissions. Configure TLS at a reverse proxy for any network deployment. Browser origins are exact-match when configured, and unauthenticated local mode rejects non-loopback browser origins.
+
+Messages and display names are stored as plaintext in the configured SQLite file. The engine does not collect telemetry, call external APIs, or log message bodies or API keys. Backups, filesystem permissions, retention policy, user consent, and deletion workflows are deployment-owner responsibilities. Default operation has no metered API cost; its operating costs are compute, disk, backup, and network transfer only.
+
+## Development and release checks
+
+```bash
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -e ".[dev]"
+python -m ruff check .
+python -m ruff format --check .
+python -m mypy samsarix_chat_engine
+python -m pip_audit
+python -m pytest --cov=samsarix_chat_engine --cov-report=term-missing
+python -m build
+python -m twine check dist/*
+```
+
+CI runs the tests on CPython 3.10–3.14 on Linux and CPython 3.12 on Windows. See [Contributing](CONTRIBUTING.md) and the living [productization record](docs/PRODUCTIZATION.md).
+
+## Limitations and project status
+
+This is a coherent single-instance MVP, not a hosted chat platform. The highest-value future work is per-user/per-room authorization, deletion/export administration, a multi-instance broker adapter, and load/soak testing. Those are intentionally not presented as current capabilities.
+
+## License
+
+Copyright (c) 2026 Samsarix LLC. The source is licensed under the [Mozilla Public License 2.0](LICENSE). MPL-2.0 keeps distributed modifications to covered source files open and preserves license notices, while allowing those files to be combined with separate proprietary files in a larger work.
+
+The canonical Python package, command, and environment prefix are `samsarix_chat_engine`, `samsarix-chat`, and `SAMSARIX_CHAT_*`. Version 0.3 keeps `helix_chat_engine`, `helix-chat`, and `HELIX_CHAT_*` as deprecated compatibility aliases. If only `data/helix-chat.db` exists, the CLI reuses it so the rename does not hide existing data.
+
+For general inquiries, email contact@samsarix.com. For product support and private security reports, email support@samsarix.com or read [SECURITY.md](SECURITY.md).

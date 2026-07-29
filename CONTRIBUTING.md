@@ -1,49 +1,40 @@
-# Contributing to Helix Chat Engine
+# Contributing
 
-We welcome contributions! Here's how to get started.
+Samsarix Chat Engine is an alpha, single-instance chat service. Keep changes focused on its documented HTTP/WebSocket and SQLite product rather than reintroducing dependencies on unrelated private repositories.
 
-## Getting Started
-
-1. Fork the repository
-2. Clone your fork
-3. Create a branch: `git checkout -b feature/your-feature`
-4. Make changes and commit: `git commit -am 'Add feature'`
-5. Push to branch: `git push origin feature/your-feature`
-6. Submit a pull request
-
-## Development Setup
+## Setup
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/helix-chat-engine.git
-cd helix-chat-engine
-pip install -e ".[dev]"
-pip install -r requirements-test.txt
+python -m venv .venv
 ```
 
-## Running Tests
+Activate `.venv\Scripts\Activate.ps1` on PowerShell or `source .venv/bin/activate` on POSIX, then install:
 
 ```bash
-pytest tests/ -v
-pytest tests/ --cov
-pytest tests/ -m websocket  # Run specific marker
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -e ".[dev]"
 ```
 
-## Coding Standards
+## Required checks
 
-- Follow PEP 8
-- Use type hints
-- Write comprehensive docstrings
-- Minimum 80% test coverage
-- Keep lines under 100 characters
+```bash
+python -m ruff check .
+python -m ruff format --check .
+python -m mypy samsarix_chat_engine
+python -m pip_audit
+python -m pytest --cov=samsarix_chat_engine --cov-report=term-missing
+python -m build
+python -m twine check dist/*
+```
 
-## Pull Request Process
+Add tests that exercise production code. Do not use mocks as a substitute for the primary SQLite, HTTP, or WebSocket behavior. Update `docs/API_REFERENCE.md` for protocol changes and `docs/PRODUCTIZATION.md` when a P0/P1 decision or release gate changes.
 
-1. Ensure all tests pass
-2. Add tests for new functionality
-3. Update documentation
-4. Provide clear description
-5. Wait for review
+## Pull requests
 
-## Code of Conduct
+- Explain the user problem and compatibility impact.
+- Keep public behavior backward-compatible within the 0.x protocol where practical.
+- Never commit API keys, chat databases, message content, or generated build artifacts.
+- Call out migration, retention, security, privacy, and operating-cost changes.
+- Confirm that documentation describes behavior you ran, not planned behavior.
 
-Please follow our [Code of Conduct](CODE_OF_CONDUCT.md).
+Contributions are accepted under the repository's Mozilla Public License 2.0 terms. By submitting a contribution, you represent that you have the right to do so under those terms.
