@@ -61,8 +61,8 @@ helix-chat = "samsarix_chat_engine.cli:main"
 
 [project.urls]
 Homepage = "https://samsarix.com"
-Repository = "https://github.com/Deathcharge/helix-chat-engine.git"
-Issues = "https://github.com/Deathcharge/helix-chat-engine/issues"
+Repository = "https://github.com/Deathcharge/samsarix-chat-engine.git"
+Issues = "https://github.com/Deathcharge/samsarix-chat-engine/issues"
 Support = "https://samsarix.com"
 
 [tool.setuptools.packages.find]

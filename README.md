@@ -22,7 +22,7 @@ It deliberately does not provide user accounts, per-room authorization, attachme
 Prerequisites: Python 3.10 or newer and Git.
 
 ```bash
-git clone https://github.com/Deathcharge/helix-chat-engine.git
+git clone https://github.com/Deathcharge/samsarix-chat-engine.git
 cd helix-chat-engine
 python -m venv .venv
 ```
