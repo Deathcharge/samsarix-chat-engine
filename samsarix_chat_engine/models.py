@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ROOM_ID_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,63}$"
 
@@ -38,7 +38,7 @@ class Room(APIModel):
 class MessageCreate(APIModel):
     """Payload for posting a message over HTTP."""
 
-    sender: str = Field(min_length=1, max_length=64)
+    sender: str | None = Field(default=None, min_length=1, max_length=64)
     content: str = Field(min_length=1, max_length=100_000)
     client_message_id: str | None = Field(default=None, min_length=1, max_length=128)
 
@@ -93,4 +93,11 @@ class WebSocketAuth(APIModel):
     """First-message authentication command used by browser clients."""
 
     type: Literal["auth"]
-    api_key: str = Field(min_length=1, max_length=4_096)
+    token: str | None = Field(default=None, min_length=1, max_length=8_192)
+    api_key: str | None = Field(default=None, min_length=1, max_length=4_096)
+
+    @model_validator(mode="after")
+    def require_one_credential(self) -> WebSocketAuth:
+        if (self.token is None) == (self.api_key is None):
+            raise ValueError("exactly one of token or api_key is required")
+        return self

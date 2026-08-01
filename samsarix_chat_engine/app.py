@@ -7,24 +7,25 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import secrets
 import sqlite3
 import time
 import uuid
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, FastAPI, Header, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import TypeAdapter, ValidationError
 from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.types import Message as ASGIMessage
 
+from .auth import AccessTokenService, AuthenticationError, Permission, Principal, credentials_match
 from .config import Settings
 from .models import (
     Message,
@@ -48,6 +49,8 @@ from .websocket_manager import ConnectionManager
 logger = logging.getLogger(__name__)
 _WS_COMMAND: TypeAdapter[WebSocketMessage | WebSocketPing] = TypeAdapter(WebSocketMessage | WebSocketPing)
 _WS_AUTH: TypeAdapter[WebSocketAuth] = TypeAdapter(WebSocketAuth)
+_API_KEY_SCHEME = APIKeyHeader(name="X-API-Key", scheme_name="OperatorKey", auto_error=False)
+_BEARER_SCHEME = HTTPBearer(scheme_name="AccessToken", auto_error=False)
 
 
 class APIError(Exception):
@@ -144,10 +147,7 @@ class RequestBodyLimitMiddleware:
         await response(scope, receive, send)
 
 
-def _api_key_from_headers(headers: Mapping[str, str]) -> str | None:
-    explicit = headers.get("x-api-key")
-    if explicit:
-        return explicit
+def _bearer_from_headers(headers: Mapping[str, str]) -> str | None:
     authorization = headers.get("authorization", "")
     scheme, _, value = authorization.partition(" ")
     if scheme.lower() == "bearer" and value:
@@ -155,18 +155,54 @@ def _api_key_from_headers(headers: Mapping[str, str]) -> str | None:
     return None
 
 
-def _matches_api_key(provided: str | None, expected: str | None) -> bool:
-    return expected is None or (provided is not None and secrets.compare_digest(provided, expected))
+def _authenticate_credentials(
+    *,
+    api_key: str | None,
+    bearer: str | None,
+    settings: Settings,
+    token_service: AccessTokenService | None,
+) -> Principal:
+    if settings.api_key is None and token_service is None:
+        return Principal.local_operator()
+    operator_credential = api_key or bearer
+    if credentials_match(operator_credential, settings.api_key):
+        return Principal.api_key_operator()
+    if bearer is not None and token_service is not None:
+        return token_service.verify(bearer)
+    raise AuthenticationError("invalid credential")
 
 
 def _client_key(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-async def _require_api_key(request: Request) -> None:
+APIKeyCredential = Annotated[str | None, Depends(_API_KEY_SCHEME)]
+BearerCredential = Annotated[HTTPAuthorizationCredentials | None, Depends(_BEARER_SCHEME)]
+
+
+async def _request_principal(
+    request: Request,
+    api_key: APIKeyCredential,
+    bearer: BearerCredential,
+) -> Principal:
     settings: Settings = request.app.state.settings
-    if not _matches_api_key(_api_key_from_headers(request.headers), settings.api_key):
-        raise APIError(401, "authentication_required", "A valid API key is required")
+    try:
+        return _authenticate_credentials(
+            api_key=api_key,
+            bearer=bearer.credentials if bearer is not None else None,
+            settings=settings,
+            token_service=request.app.state.token_service,
+        )
+    except AuthenticationError as exc:
+        raise APIError(401, "authentication_required", "A valid API key or access token is required") from exc
+
+
+PrincipalDependency = Annotated[Principal, Depends(_request_principal)]
+
+
+def _authorize(principal: Principal, permission: Permission, room_id: str | None = None) -> None:
+    if not principal.allows(permission, room_id):
+        raise APIError(403, "authorization_denied", "This credential does not grant the required access")
 
 
 def _error_payload(code: str, message: str, **details: Any) -> dict[str, Any]:
@@ -187,8 +223,6 @@ def _websocket_origin_allowed(websocket: WebSocket, settings: Settings) -> bool:
     normalized = origin.rstrip("/")
     if settings.allowed_origins:
         return normalized in settings.allowed_origins
-    if settings.api_key:
-        return True
     try:
         hostname = urlparse(normalized).hostname
     except ValueError:
@@ -196,17 +230,33 @@ def _websocket_origin_allowed(websocket: WebSocket, settings: Settings) -> bool:
     return hostname in {"localhost", "127.0.0.1", "::1"}
 
 
-async def _authenticate_websocket(websocket: WebSocket, settings: Settings) -> bool:
-    if settings.api_key is None:
-        return True
-    if _matches_api_key(_api_key_from_headers(websocket.headers), settings.api_key):
-        return True
+async def _authenticate_websocket(
+    websocket: WebSocket,
+    settings: Settings,
+    token_service: AccessTokenService | None,
+) -> Principal | None:
+    header_api_key = websocket.headers.get("x-api-key")
+    header_bearer = _bearer_from_headers(websocket.headers)
+    if settings.api_key is None and token_service is None:
+        return Principal.local_operator()
+    if header_api_key is not None or header_bearer is not None:
+        try:
+            return _authenticate_credentials(
+                api_key=header_api_key,
+                bearer=header_bearer,
+                settings=settings,
+                token_service=token_service,
+            )
+        except AuthenticationError:
+            await websocket.send_json(_event("error", code="authentication_failed", message="Authentication failed"))
+            await websocket.close(code=4401, reason="Authentication required")
+            return None
 
     await websocket.send_json(
         _event(
             "auth.required",
             message="Send an auth command before any chat commands",
-            example={"type": "auth", "api_key": "..."},
+            example={"type": "auth", "token": "..."},
         )
     )
     try:
@@ -218,12 +268,18 @@ async def _authenticate_websocket(websocket: WebSocket, settings: Settings) -> b
     except (TimeoutError, ValidationError, ValueError, WebSocketDisconnect):
         await websocket.send_json(_event("error", code="authentication_failed", message="Authentication failed"))
         await websocket.close(code=4401, reason="Authentication required")
-        return False
-    if not _matches_api_key(command.api_key, settings.api_key):
+        return None
+    try:
+        return _authenticate_credentials(
+            api_key=command.api_key,
+            bearer=command.token,
+            settings=settings,
+            token_service=token_service,
+        )
+    except AuthenticationError:
         await websocket.send_json(_event("error", code="authentication_failed", message="Authentication failed"))
         await websocket.close(code=4401, reason="Authentication required")
-        return False
-    return True
+        return None
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -242,6 +298,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         send_timeout=resolved.websocket_send_timeout_seconds,
     )
     limiter = MessageRateLimiter(resolved.messages_per_minute)
+    token_service = (
+        AccessTokenService(
+            resolved.token_signing_secret,
+            issuer=resolved.token_issuer,
+            audience=resolved.token_audience,
+            max_lifetime_seconds=resolved.token_max_lifetime_seconds,
+            clock_skew_seconds=resolved.token_clock_skew_seconds,
+        )
+        if resolved.token_signing_secret is not None
+        else None
+    )
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -250,12 +317,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         application.state.store = store
         application.state.connections = manager
         application.state.message_limiter = limiter
+        application.state.token_service = token_service
         yield
         await manager.close_all()
 
     application = FastAPI(
         title="Samsarix Chat Engine",
-        version="0.3.0",
+        version="0.4.0",
         summary="A small persisted room-chat service with WebSocket delivery",
         lifespan=lifespan,
     )
@@ -263,6 +331,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.store = store
     application.state.connections = manager
     application.state.message_limiter = limiter
+    application.state.token_service = token_service
 
     application.add_middleware(
         RequestBodyLimitMiddleware,
@@ -317,7 +386,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def index() -> dict[str, Any]:
         return {
             "name": "Samsarix Chat Engine",
-            "version": "0.3.0",
+            "version": "0.4.0",
             "status": "ok",
             "docs": "/docs",
             "health": "/healthz",
@@ -332,10 +401,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ready = await store.check_ready()
         return JSONResponse(status_code=200 if ready else 503, content={"status": "ready" if ready else "not_ready"})
 
-    router = APIRouter(prefix="/v1", dependencies=[Depends(_require_api_key)])
+    router = APIRouter(prefix="/v1")
 
     @router.post("/rooms", response_model=Room, status_code=201, tags=["rooms"])
-    async def create_room(payload: RoomCreate, response: Response) -> Room:
+    async def create_room(payload: RoomCreate, response: Response, principal: PrincipalDependency) -> Room:
+        _authorize(principal, "admin")
         try:
             room = await store.create_room(payload)
         except RoomAlreadyExistsError as exc:
@@ -346,11 +416,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return room
 
     @router.get("/rooms", response_model=list[Room], tags=["rooms"])
-    async def list_rooms(limit: int = Query(default=100, ge=1, le=100)) -> list[Room]:
+    async def list_rooms(principal: PrincipalDependency, limit: int = Query(default=100, ge=1, le=100)) -> list[Room]:
+        _authorize(principal, "admin")
         return await store.list_rooms(limit=limit)
 
     @router.get("/rooms/{room_id}", response_model=Room, tags=["rooms"])
-    async def get_room(room_id: str) -> Room:
+    async def get_room(room_id: str, principal: PrincipalDependency) -> Room:
+        _authorize(principal, "room:read", room_id)
         room = await store.get_room(room_id)
         if room is None:
             raise APIError(404, "room_not_found", "Room not found")
@@ -359,9 +431,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @router.get("/rooms/{room_id}/messages", response_model=MessagePage, tags=["messages"])
     async def list_messages(
         room_id: str,
+        principal: PrincipalDependency,
         limit: int = Query(default=50, ge=1, le=100),
         before: str | None = Query(default=None, min_length=1, max_length=128),
     ) -> MessagePage:
+        _authorize(principal, "room:read", room_id)
         try:
             items, next_before = await store.list_messages(room_id, limit=limit, before=before)
         except RoomNotFoundError as exc:
@@ -376,8 +450,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         payload: MessageCreate,
         response: Response,
         request: Request,
+        principal: PrincipalDependency,
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", min_length=1, max_length=128),
     ) -> Message:
+        _authorize(principal, "room:write", room_id)
+        sender = payload.sender
+        if principal.subject is not None:
+            if sender is not None and sender != principal.subject:
+                raise APIError(403, "identity_mismatch", "Message sender must match the authenticated subject")
+            sender = principal.subject
+        if sender is None:
+            raise APIError(422, "sender_required", "sender is required when using operator or local access")
         if len(payload.content) > resolved.max_message_chars:
             raise APIError(
                 413,
@@ -390,7 +473,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "idempotency_conflict",
                 "Idempotency-Key and client_message_id must match when both are supplied",
             )
-        if not await limiter.allow(f"http:{_client_key(request)}"):
+        rate_subject = principal.subject or _client_key(request)
+        if not await limiter.allow(f"http:{rate_subject}"):
             raise APIError(
                 429,
                 "rate_limit_exceeded",
@@ -400,7 +484,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             message, created = await store.create_message(
                 room_id=room_id,
-                sender=payload.sender,
+                sender=sender,
                 content=payload.content,
                 client_message_id=idempotency_key or payload.client_message_id,
             )
@@ -413,20 +497,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return message
 
     @router.get("/stats", tags=["operations"])
-    async def stats() -> dict[str, int]:
+    async def stats(principal: PrincipalDependency) -> dict[str, int]:
+        _authorize(principal, "admin")
         return {"active_connections": manager.active_connections}
 
     application.include_router(router)
 
     @application.websocket("/v1/rooms/{room_id}/ws")
     async def room_websocket(
-        websocket: WebSocket, room_id: str, username: str = Query(min_length=1, max_length=64)
+        websocket: WebSocket,
+        room_id: str,
+        username: str | None = Query(default=None, min_length=1, max_length=64),
     ) -> None:
         if not _websocket_origin_allowed(websocket, resolved):
             await websocket.close(code=4403, reason="Origin not allowed")
             return
         await websocket.accept()
-        if not await _authenticate_websocket(websocket, resolved):
+        principal = await _authenticate_websocket(websocket, resolved, token_service)
+        if principal is None:
+            return
+
+        if not principal.allows("room:read", room_id):
+            await websocket.send_json(_event("error", code="authorization_denied", message="Room access denied"))
+            await websocket.close(code=4403, reason="Room access denied")
+            return
+        if principal.subject is not None:
+            if username is not None and username != principal.subject:
+                await websocket.send_json(_event("error", code="identity_mismatch", message="Username mismatch"))
+                await websocket.close(code=4403, reason="Username mismatch")
+                return
+            username = principal.subject
+        if username is None:
+            await websocket.send_json(_event("error", code="username_required", message="Username is required"))
+            await websocket.close(code=1008, reason="Username required")
             return
 
         room = await store.get_room(room_id)
@@ -506,6 +609,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 invalid_commands = 0
                 if isinstance(command, WebSocketPing):
                     await manager.send(websocket, _event("pong"))
+                    continue
+                if not principal.allows("room:write", room_id):
+                    await manager.send(
+                        websocket,
+                        _event("error", code="authorization_denied", message="Message publishing is not allowed"),
+                    )
                     continue
                 if len(command.content) > resolved.max_message_chars:
                     await manager.send(
