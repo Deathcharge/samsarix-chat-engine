@@ -14,6 +14,7 @@ from pathlib import Path
 
 from . import __version__
 from .app import create_app
+from .auth import AccessTokenService, Permission
 from .config import ConfigurationError, Settings
 
 
@@ -31,12 +32,30 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument(
         "--allow-insecure-public",
         action="store_true",
-        help="allow a non-loopback bind without SAMSARIX_CHAT_API_KEY (unsafe)",
+        help="allow a non-loopback bind without an API key or token signing secret (unsafe)",
     )
     serve.add_argument(
         "--log-level",
         choices=("critical", "error", "warning", "info", "debug"),
         default="info",
+    )
+    token = subparsers.add_parser("token", help="manage short-lived application access tokens")
+    token_commands = token.add_subparsers(dest="token_command", required=True)
+    issue = token_commands.add_parser("issue", help="issue a signed access token")
+    issue.add_argument("--subject", required=True, help="authenticated application user ID")
+    issue.add_argument("--room", action="append", default=[], help="allowed room ID (repeatable)")
+    issue.add_argument(
+        "--permission",
+        action="append",
+        choices=("room:read", "room:write", "admin"),
+        help="granted permission (repeatable; defaults to room read and write)",
+    )
+    issue.add_argument(
+        "--expires-in",
+        type=int,
+        default=3_600,
+        metavar="SECONDS",
+        help="token lifetime in seconds (default: 3600)",
     )
     return parser
 
@@ -61,21 +80,45 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         settings = Settings.from_env()
-        if args.database is not None:
+        if args.command == "serve" and args.database is not None:
             settings = settings.with_database_path(args.database)
     except ConfigurationError as exc:
         parser.error(str(exc))
 
+    if args.command == "token":
+        if settings.token_signing_secret is None:
+            parser.error("SAMSARIX_CHAT_TOKEN_SIGNING_SECRET is required to issue tokens")
+        permissions: list[Permission] = args.permission or ["room:read", "room:write"]
+        service = AccessTokenService(
+            settings.token_signing_secret,
+            issuer=settings.token_issuer,
+            audience=settings.token_audience,
+            max_lifetime_seconds=settings.token_max_lifetime_seconds,
+            clock_skew_seconds=settings.token_clock_skew_seconds,
+        )
+        try:
+            issued = service.issue(
+                args.subject,
+                rooms=args.room,
+                permissions=permissions,
+                expires_in_seconds=args.expires_in,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        print(issued)
+        return 0
+
     if not 1 <= args.port <= 65_535:
         parser.error("--port must be between 1 and 65535")
-    if not _is_loopback_host(args.host) and settings.api_key is None and not args.allow_insecure_public:
+    authentication_configured = settings.api_key is not None or settings.token_signing_secret is not None
+    if not _is_loopback_host(args.host) and not authentication_configured and not args.allow_insecure_public:
         parser.error(
-            "refusing an unauthenticated public bind; set SAMSARIX_CHAT_API_KEY or explicitly pass "
-            "--allow-insecure-public"
+            "refusing an unauthenticated public bind; configure an API key or token signing secret, "
+            "or explicitly pass --allow-insecure-public"
         )
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper()))
-    if not _is_loopback_host(args.host) and settings.api_key is None:
+    if not _is_loopback_host(args.host) and not authentication_configured:
         logging.warning("Starting an unauthenticated service on a non-loopback interface")
     import uvicorn
 

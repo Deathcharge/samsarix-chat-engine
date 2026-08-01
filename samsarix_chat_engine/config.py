@@ -93,6 +93,11 @@ class Settings:
 
     database_path: Path = Path("data/samsarix-chat.db")
     api_key: str | None = None
+    token_signing_secret: str | None = None
+    token_issuer: str = "samsarix-chat-engine"  # noqa: S105 - public JWT issuer identifier
+    token_audience: str = "samsarix-chat"  # noqa: S105 - public JWT audience identifier
+    token_max_lifetime_seconds: int = 86_400
+    token_clock_skew_seconds: int = 30
     allowed_origins: tuple[str, ...] = ()
     max_message_chars: int = 4_000
     max_connections: int = 200
@@ -108,6 +113,16 @@ class Settings:
     def __post_init__(self) -> None:
         if self.api_key is not None and not 16 <= len(self.api_key) <= 4_096:
             raise ConfigurationError("SAMSARIX_CHAT_API_KEY must be between 16 and 4096 characters")
+        if self.token_signing_secret is not None:
+            secret_bytes = len(self.token_signing_secret.encode("utf-8"))
+            if not 32 <= secret_bytes <= 4_096:
+                raise ConfigurationError("SAMSARIX_CHAT_TOKEN_SIGNING_SECRET must be between 32 and 4096 bytes")
+        for claim_name, claim_value in {
+            "token issuer": self.token_issuer,
+            "token audience": self.token_audience,
+        }.items():
+            if not 1 <= len(claim_value) <= 256 or claim_value != claim_value.strip():
+                raise ConfigurationError(f"{claim_name} must be 1 to 256 non-whitespace-padded characters")
         checks = {
             "max_message_chars": (self.max_message_chars, 1, 100_000),
             "max_connections": (self.max_connections, 1, 100_000),
@@ -117,6 +132,8 @@ class Settings:
             "max_stored_messages": (self.max_stored_messages, 1, 10_000_000),
             "max_stored_messages_per_room": (self.max_stored_messages_per_room, 1, 1_000_000),
             "websocket_max_bytes": (self.websocket_max_bytes, 256, 16_777_216),
+            "token_max_lifetime_seconds": (self.token_max_lifetime_seconds, 60, 604_800),
+            "token_clock_skew_seconds": (self.token_clock_skew_seconds, 0, 300),
         }
         for name, (value, minimum, maximum) in checks.items():
             if not minimum <= value <= maximum:
@@ -152,10 +169,16 @@ class Settings:
         """Load settings from ``SAMSARIX_CHAT_*`` variables and legacy aliases."""
 
         api_key = _read_env("API_KEY") or None
+        token_signing_secret = _read_env("TOKEN_SIGNING_SECRET") or None
         configured_database = _read_env("DATABASE")
         return cls(
             database_path=Path(configured_database) if configured_database else _default_database_path(),
             api_key=api_key,
+            token_signing_secret=token_signing_secret,
+            token_issuer=_read_env("TOKEN_ISSUER") or "samsarix-chat-engine",
+            token_audience=_read_env("TOKEN_AUDIENCE") or "samsarix-chat",
+            token_max_lifetime_seconds=_read_int("TOKEN_MAX_LIFETIME", 86_400, minimum=60, maximum=604_800),
+            token_clock_skew_seconds=_read_int("TOKEN_CLOCK_SKEW", 30, minimum=0, maximum=300),
             allowed_origins=_read_origins(),
             max_message_chars=_read_int("MAX_MESSAGE_CHARS", 4_000, minimum=1, maximum=100_000),
             max_connections=_read_int("MAX_CONNECTIONS", 200, minimum=1, maximum=100_000),

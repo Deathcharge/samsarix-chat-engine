@@ -1,6 +1,6 @@
 # Productization record
 
-Last updated: 2026-07-28
+Last updated: 2026-08-01
 
 ## Repository assessment
 
@@ -26,10 +26,10 @@ Commands run before implementation:
 
 ## Product definition
 
-Samsarix Chat Engine is a local-first, single-instance room chat service and embeddable FastAPI application. It gives Python developers a narrow, inspectable way to add durable text-room chat to a prototype, internal tool, local collaboration utility, or reference implementation.
+Samsarix Chat Engine is a self-hosted, single-instance room chat backend and embeddable FastAPI application. It gives Python developers a narrow, inspectable way to add authorized private rooms, durable text history, and live delivery to a product, support workflow, private community, internal tool, or prototype.
 
-- Target user: a Python developer who needs persisted HTTP/WebSocket chat without adopting a full collaboration platform or operating Redis/Postgres.
-- Primary use case: create a room, connect one or more clients, commit and broadcast messages, then reconnect and recover history.
+- Target user: a Python application team that already authenticates users and needs embedded room chat without adopting a full collaboration platform or operating Redis/Postgres.
+- Primary use case: an operator creates a room, a host application issues a short-lived room token to its authenticated user, the user commits and receives messages, and reconnect recovers authorized history.
 - Independent reason to exist: a small reusable service with no private repository dependency and a conventional protocol.
 - Product form: installable `samsarix-chat-engine` Python package, `samsarix-chat` CLI, and ASGI app factory.
 - Distribution: source checkout or Python wheel under MPL-2.0; no cloud resources are required.
@@ -43,7 +43,13 @@ Samsarix Chat Engine is a local-first, single-instance room chat service and emb
 - Persist before broadcast and support idempotency. This makes an acknowledged HTTP message durable and makes ordinary client retry safe.
 - Keep presence in memory and explicitly label it best effort. Current Centrifugo guidance likewise treats presence as additional state with cost and privacy implications; this product does not pretend to match Centrifugo's multi-node broker/recovery scope.
 - Keep one process. SQLite plus an in-process connection manager is coherent at this scale; adding Redis merely for a scaling claim would expand operations and failure modes.
-- Use a shared API key only as an optional deployment boundary. User accounts and room authorization remain out of scope rather than being superficially implemented.
+- Keep identity ownership in the host application. v0.4 accepts a narrowly profiled signed assertion, derives sender identity from it, and enforces room/action authorization on every request and WebSocket publish.
+- Retain the shared API key only as an operator and compatibility credential. It is intentionally all-room and must not be distributed to ordinary browser clients.
+- Require exact non-local browser origins even for authenticated deployments; credentials do not remove cross-site WebSocket-hijacking risk.
+
+Current official product research checked on 2026-08-01 established the practical feature floor without changing the narrow product boundary: [Sendbird Chat](https://sendbird.com/docs/chat) documents channels, receipts, presence, reactions, files, threads, search, moderation, export, webhooks, and privacy controls; [Ably Chat](https://ably.com/chat) emphasizes support/community embeds plus rooms, presence, typing, reactions, edits, moderation, and receipts. [Centrifugo authorization](https://centrifugal.dev/docs/server/authentication) uses signed identities or application-proxy decisions and per-channel permissions, while its [recovery guidance](https://centrifugal.dev/docs/server/history_and_recovery) distinguishes broker recovery from the application's source of truth. These comparisons support an identity/authorization-first v0.4, data lifecycle next, and broker work only after measured single-instance demand.
+
+The security design follows the [OWASP API Security Top 10](https://owasp.org/www-project-api-security/) emphasis on object authorization, authentication, and bounded resource use; the [OWASP Authorization Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html) guidance to deny by default and validate every request; the [OWASP WebSocket Security Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/WebSocket_Security_Cheat_Sheet.html) guidance on Origin validation, message authorization, and avoiding URL tokens; and [RFC 8725](https://www.rfc-editor.org/info/rfc8725/) requirements for explicit JWT algorithms, issuer/audience validation, mutually exclusive token rules, and strong secrets. PyJWT 2.13 is the bounded implementation dependency.
 
 - Make Samsarix LLC the canonical owner identity in v0.3 while retaining the v0.2 import, command, environment, and database names as tested migration aliases.
 - Use the unmodified MPL-2.0: file-level copyleft protects distributed changes to covered files and notice preservation while allowing the engine to be combined with separate proprietary files. AGPL-3.0 would cover network use more strongly but materially narrows embedding adoption; Apache-2.0 would permit closed downstream modifications.
@@ -52,9 +58,9 @@ Primary references checked on 2026-07-28: [FastAPI's official WebSocket document
 
 ## Architecture and trust boundaries
 
-Untrusted HTTP and WebSocket payloads enter FastAPI/Pydantic validation. A configured shared key gates all `/v1` HTTP data and the WebSocket protocol. The service commits validated messages to a local SQLite path and then sends them to the in-process room registry. It makes no outbound requests.
+Untrusted HTTP and WebSocket payloads enter FastAPI/Pydantic validation. A configured operator key grants administrative access; signed short-lived tokens bind an application subject to rooms and read/write permissions. The server, not the payload, chooses authenticated sender identity. The service commits validated messages to a local SQLite path and then sends them to the in-process room registry. It makes no outbound requests.
 
-Deployment owners control TLS/proxying, the API secret, allowed browser origins, filesystem permissions, backups, deletion obligations, and access to the SQLite file. Any client holding the shared key can read and write every room. Display names are claims, not authenticated identities. Multi-process deployment breaks real-time fan-out and per-process rate-limit accounting, so it is unsupported.
+Deployment owners control login, membership decisions, TLS/proxying, operator and signing secrets, allowed browser origins, filesystem permissions, backups, deletion obligations, and access to the SQLite file. Any client holding the operator key or signing secret can access every room. Multi-process deployment breaks real-time fan-out and per-process rate-limit accounting, so it is unsupported.
 
 ## Findings and disposition
 
@@ -76,7 +82,7 @@ Deployment owners control TLS/proxying, the API secret, allowed browser origins,
 - [x] Add idempotency, SQLite transactions/WAL/busy timeout, readiness, and graceful WebSocket shutdown.
 - [x] Add Linux/Windows CI, lint, format, typing, coverage, build, and package checks.
 - [x] Accurately document security, privacy, cost, recovery, and single-process behavior.
-- [ ] Add real user identity and server-side per-room authorization before use with mutually untrusted users.
+- [x] Add host-asserted user identity and server-side per-room authorization before use with mutually untrusted users.
 - [ ] Add room/message export and deletion administration for deployments with data-subject or retention obligations.
 - [ ] Add a broker/presence adapter and cross-instance integration tests before multiple workers or hosts are supported.
 - [ ] Run sustained concurrent load/soak tests and publish measured limits before capacity claims.
@@ -99,6 +105,7 @@ Deployment owners control TLS/proxying, the API secret, allowed browser origins,
 - [x] Exact quick start, API reference, runnable examples, and contribution commands.
 - [x] Real unit/integration/CLI/package-oriented tests and CI.
 - [x] Final clean-environment verification and adversarial review.
+- [x] Strict signed access tokens, operator separation, per-room/action authorization, and server-enforced sender identity.
 
 ## Release acceptance criteria
 
@@ -117,6 +124,25 @@ The copied multi-agent/UCF/Discord/Redis/LLM implementation was removed because 
 The adversarial pass additionally found and fixed a SQLite connection-handle leak, unbounded streamed HTTP request bodies, a WebSocket cancellation race exposed by the current Starlette/HTTPX2 backend, stale license metadata, a dead per-message `Location` link, and an inefficient retention query. The transport and persistence limits now have direct tests.
 
 Version 0.3 completed the Helix-to-Samsarix product migration. The distribution, canonical Python package, CLI, environment variables, service metadata, documentation, support policy, and examples now use Samsarix. Compatibility shims preserve v0.2 imports and the old CLI/environment names, and the default database migration logic avoids silently hiding an existing `data/helix-chat.db`.
+
+Version 0.4 establishes the product's first credible multi-user trust boundary. Host applications can issue short-lived room tokens through Python or the CLI; HTTP and WebSocket handlers validate token type, fixed algorithm, issuer, audience, required time/identity/authorization claims, maximum lifetime, and room/action access. Signed identity overrides display-name input, read-only WebSockets cannot publish, non-local browser origins require an explicit allowlist, and the administrative API key remains backwards compatible.
+
+Initial v0.4 verification on 2026-08-01: the unchanged v0.3 baseline had 27 passing tests; after implementation and review hardening, `pytest --cov=samsarix_chat_engine --cov-report=term-missing` passed 59 tests in 33.02 seconds with 92.86% branch coverage. The new authorization tests cover tampering, expiry, issuer/audience confusion, malformed signed claims, self-verifiable token size, room and action denial, sender spoofing, subject-wide WebSocket rate limits, OpenAPI security schemes, browser WebSocket authentication, read-only sessions, origin enforcement, and CLI issuance. Final artifact and installed-wheel evidence is recorded after exact-head verification.
+
+Final v0.4 local verification used CPython 3.11.9 and the newest resolved versions inside the declared bounds, including FastAPI 0.141.1, Uvicorn 0.52.1, PyJWT 2.13.0, and WebSockets 17.0.1:
+
+| Check | Actual result |
+| --- | --- |
+| `ruff check .` / `ruff format --check .` | Passed; 36 Python files formatted |
+| `mypy samsarix_chat_engine` | Passed; no issues in 9 source files |
+| `pytest --cov=samsarix_chat_engine --cov-report=term-missing` | 59 passed in 33.02s; 92.86% total branch coverage |
+| `pip check` | No broken requirements |
+| `pip-audit` | No known third-party vulnerabilities; unpublished local distributions skipped |
+| `python -m build` / `twine check` | Final sdist and universal wheel built from the sdist; both passed metadata checks |
+| final wheel installed outside the source tree | Version/import/metadata and `pip check` passed |
+| `scripts/smoke_installed_wheel.py` under final wheel runtime | Real operator room creation, token issuance, authenticated HTTP persistence/history, browser-style WebSocket auth/recovery/publish, SQLite creation, and graceful shutdown passed |
+
+Exact artifact digests are recorded with the pull request because embedding a digest inside its own source archive is self-referential. The GitHub Actions matrix, external security review, and sustained load/soak tests were not run locally and remain named gates rather than implied evidence.
 
 ## Version 0.2 verification evidence
 
@@ -161,17 +187,18 @@ This v0.3 verification was local on Windows with CPython 3.11.9. The configured 
 
 ## Deferred and blocked work
 
-Per-user authorization, multi-instance fan-out, administrative deletion/export, and load testing are genuine next-stage local engineering, ordered above. They are not needed to evaluate the single-instance developer service but are gates for broader or regulated deployments.
+Administrative deletion/export, time-based retention, moderation controls, multi-instance fan-out, and load testing are genuine next-stage local engineering, ordered in the roadmap. Data lifecycle is the highest-value next gate for support, education, and internal deployments.
 
 Public package publication, hosted deployment, domains, credentials, signing, and pricing remain owner-controlled. No external accounts, infrastructure, releases, or spending were created as part of the local productization work.
 
 ## Release disposition
 
-**Alpha release candidate.** The single-instance developer product has no known locally actionable P0, and its source, package, primary journey, limits, error states, documentation, brand identity, and standard open-source license are coherent. Deployments involving mutually untrusted users still require the named P1 per-user/per-room authorization work.
+**Alpha release candidate for controlled single-instance evaluation.** The developer product has no known locally actionable P0, and its source, package, authorized primary journey, limits, error states, documentation, brand identity, and standard open-source license are coherent. Production or regulated use still requires deployment-specific identity integration, lifecycle operations, capacity evidence, and external security review.
 
 ## Known risks
 
-- A shared API key is coarse-grained and rotation disconnects/rejects all clients.
+- The operator API key and HS256 signing secret are high-impact symmetric credentials; rotation invalidates all dependent access immediately.
+- Access tokens have bounded expiry but no per-token revocation list, asymmetric keys, or automatic key rotation.
 - SQLite and the in-process connection registry intentionally limit scale and topology.
 - Count-based deletion has no audit log and is unsuitable where legal holds are required.
 - Message content is plaintext at rest unless the deployment encrypts the filesystem.

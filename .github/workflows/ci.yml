@@ -28,8 +28,10 @@ jobs:
             python: "3.12"
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
           cache: pip
@@ -40,8 +42,10 @@ jobs:
   quality:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -54,3 +58,6 @@ jobs:
       - run: python -m pytest --cov=samsarix_chat_engine --cov-report=term-missing
       - run: python -m build
       - run: python -m twine check dist/*
+      - run: python -m venv .wheel-smoke
+      - run: .wheel-smoke/bin/python -m pip install dist/*.whl
+      - run: .wheel-smoke/bin/python scripts/smoke_installed_wheel.py
