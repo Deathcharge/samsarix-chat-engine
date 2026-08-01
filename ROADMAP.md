@@ -28,12 +28,12 @@ Acceptance gate: full lint, format, type, test/coverage, dependency audit, packa
 
 Highest-value next milestone for support, education, and internal-tool deployments:
 
-- room export in streaming NDJSON with stable schema/version metadata;
-- explicit room archive and irreversible-delete workflows protected by operator/admin access;
-- deletion events for connected clients and deterministic WebSocket teardown;
-- time-based retention in addition to current count caps;
-- append-only administrative audit records without message-body duplication;
-- backup, restore, export, and deletion runbooks with integration tests.
+- [x] room export in streaming NDJSON with stable schema/version metadata;
+- [x] explicit room archive and irreversible-delete workflows protected by operator/admin access;
+- [x] lifecycle events for connected clients and deterministic WebSocket teardown;
+- [x] time-based retention in addition to current count caps;
+- [x] bounded administrative audit records without message-body duplication;
+- [x] backup, restore, export, and deletion runbooks with integration tests.
 
 This closes the largest remaining privacy and operational gap. It does not claim regulatory compliance; deployment owners still determine policy and legal obligations.
 

@@ -2,7 +2,7 @@
 
 Samsarix Chat Engine is a small, local-first room chat service from Samsarix LLC for developers who need persisted messages and live WebSocket delivery without adopting a full collaboration platform. It runs as a standalone FastAPI service or as an embeddable ASGI application, stores data in SQLite, and has no dependency on Redis, an LLM provider, or any private package.
 
-Version 0.4.0 is an alpha release candidate. Its core single-instance journey and tenant-safe access boundary are implemented and tested, and the project is licensed under the standard Mozilla Public License 2.0.
+Version 0.5.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, and accountable data-lifecycle controls are implemented and tested. The project is licensed under the standard Mozilla Public License 2.0.
 
 ## What works
 
@@ -13,6 +13,9 @@ Version 0.4.0 is an alpha release candidate. Its core single-instance journey an
 - Retry message submission safely with `Idempotency-Key` or `client_message_id`.
 - Protect operator actions with an optional shared API key.
 - Give application users signed, expiring, per-room read/write access tokens.
+- Stream versioned room exports, archive/reopen rooms, and require two-step confirmed deletion.
+- Apply optional age-based retention and inspect a bounded metadata-only administrative audit trail.
+- Create integrity-checked SQLite backups and restore them through the CLI.
 - Bound message size, send rate, connections, room count, and retained history.
 - Check liveness at `/healthz`, storage readiness at `/readyz`, and OpenAPI docs at `/docs`.
 
@@ -59,7 +62,7 @@ python examples/01_rest_chat.py
 python examples/02_websocket_chat.py
 ```
 
-See [Getting started](docs/GETTING_STARTED.md) for authentication and browser examples.
+See [Getting started](docs/GETTING_STARTED.md) for authentication and browser examples, and [Data lifecycle operations](docs/OPERATIONS.md) for export, deletion, retention, backup, and restore.
 
 ## WebSocket protocol
 
@@ -104,6 +107,8 @@ All settings are optional for loopback development. Copy [.env.example](.env.exa
 | `SAMSARIX_CHAT_MAX_ROOMS` | `1000` | Persisted room cap |
 | `SAMSARIX_CHAT_MAX_STORED_MESSAGES` | `100000` | Global retained-message cap |
 | `SAMSARIX_CHAT_MAX_STORED_MESSAGES_PER_ROOM` | `10000` | Per-room retained-message cap |
+| `SAMSARIX_CHAT_MESSAGE_RETENTION_DAYS` | unset | Optional maximum message age, 1–3650 days |
+| `SAMSARIX_CHAT_MAX_AUDIT_EVENTS` | `100000` | Retained administrative audit-event cap |
 | `SAMSARIX_CHAT_WS_AUTH_TIMEOUT` | `5` | Browser authentication deadline in seconds |
 | `SAMSARIX_CHAT_WS_SEND_TIMEOUT` | `2` | Slow-client send timeout in seconds |
 | `SAMSARIX_CHAT_WS_MAX_BYTES` | `16384` | WebSocket command frame cap used by the CLI server |
@@ -131,20 +136,20 @@ HTTP / WebSocket clients
           |
     ConnectionManager -- bounded, in-process room broadcast
           |
-       ChatStore -- SQLite transactions, idempotency, bounded retention
+       ChatStore -- SQLite transactions, lifecycle audit, bounded retention
 ```
 
 - SQLite writes are serialized within one process and use `BEGIN IMMEDIATE`; foreign keys, WAL mode, and a five-second busy timeout are enabled.
 - A message is persisted before `message.created` is broadcast. An HTTP success therefore means the local database committed it.
 - WebSocket delivery and presence events are best-effort/at-most-once. Reconnecting clients recover the last 50 messages and can page older history over HTTP.
 - Running multiple worker processes is not supported: each process would have an independent connection registry and rate limiter. Use one process or add a real broker in a future release.
-- Retention is count-based. Old messages are deleted after successful inserts once configured caps are exceeded.
+- Retention always applies configured count caps and can additionally apply an operator-selected maximum age.
 
 ## Security, privacy, and operating cost
 
 The default loopback bind avoids accidental network exposure. The API key is an all-room operator credential; do not ship it to browsers. Host applications authenticate users and issue short-lived room tokens whose subject becomes the server-enforced sender identity. Configure TLS at a reverse proxy and exact allowed browser origins for any network deployment.
 
-Messages and display names are stored as plaintext in the configured SQLite file. The engine does not collect telemetry, call external APIs, or log message bodies or API keys. Backups, filesystem permissions, retention policy, user consent, and deletion workflows are deployment-owner responsibilities. Default operation has no metered API cost; its operating costs are compute, disk, backup, and network transfer only.
+Messages and display names are stored as plaintext in the configured SQLite file. The engine does not collect telemetry, call external APIs, or put message bodies or API keys in its administrative audit trail. Backups, exports, filesystem permissions, retention policy, user consent, and legal obligations remain the deployment owner's responsibility. Default operation has no metered API cost; its operating costs are compute, disk, backup, and network transfer only.
 
 ## Development and release checks
 
@@ -165,12 +170,12 @@ CI runs the tests on CPython 3.10–3.14 on Linux and CPython 3.12 on Windows. S
 
 ## Limitations and project status
 
-This is a coherent single-instance MVP, not a hosted chat platform. The highest-value future work is deletion/export administration, moderation primitives, a multi-instance broker adapter, and load/soak testing. Those are intentionally not presented as current capabilities.
+This is a coherent single-instance MVP, not a hosted chat platform. The highest-value future work is conversation moderation, a stable client SDK, a multi-instance broker adapter, and load/soak testing. Those are intentionally not presented as current capabilities.
 
 ## License
 
 Copyright (c) 2026 Samsarix LLC. The source is licensed under the [Mozilla Public License 2.0](LICENSE). MPL-2.0 keeps distributed modifications to covered source files open and preserves license notices, while allowing those files to be combined with separate proprietary files in a larger work.
 
-The canonical Python package, command, and environment prefix are `samsarix_chat_engine`, `samsarix-chat`, and `SAMSARIX_CHAT_*`. Version 0.4 keeps `helix_chat_engine`, `helix-chat`, and `HELIX_CHAT_*` as deprecated compatibility aliases. If only `data/helix-chat.db` exists, the CLI reuses it so the rename does not hide existing data.
+The canonical Python package, command, and environment prefix are `samsarix_chat_engine`, `samsarix-chat`, and `SAMSARIX_CHAT_*`. Version 0.5 keeps `helix_chat_engine`, `helix-chat`, and `HELIX_CHAT_*` as deprecated compatibility aliases. If only `data/helix-chat.db` exists, the CLI reuses it so the rename does not hide existing data.
 
 For general inquiries, email contact@samsarix.com. For product support and private security reports, email support@samsarix.com or read [SECURITY.md](SECURITY.md).

@@ -107,10 +107,11 @@ When using a token, connect without `?username=` because the server derives iden
 - WebSocket close `4401`: authentication was missing, invalid, or late.
 - WebSocket close `4403`: the browser `Origin` is not allowed, the token lacks room access, or the username conflicts with its signed subject.
 - WebSocket close `4404`: create the room before connecting.
+- WebSocket close `4409`: an operator archived the room; reconnect only after it is reopened.
 - WebSocket close `1013`: the configured connection cap is full; retry with backoff.
 - `503 storage_unavailable` or `/readyz` returning 503: check the database directory permissions and available disk.
 - CLI refuses a public bind: configure an API key or token signing secret, or bind to loopback. The insecure override is only for isolated development networks.
 
-## Upgrading from 0.3
+## Upgrading from 0.4
 
-The shared API-key and unauthenticated loopback behaviors remain available. `sender` and WebSocket `username` remain required for those legacy paths, but are optional for signed tokens. Browser WebSockets may continue sending `{"type":"auth","api_key":"..."}`; new application clients should use scoped tokens. Remote browser origins now require an explicit `SAMSARIX_CHAT_ALLOWED_ORIGINS` entry even when authentication is configured.
+Version 0.5 migrates the v0.4 SQLite schema in place while preserving rooms and messages. Take an integrity-checked backup first with `samsarix-chat database backup backups/pre-0.5.db`, then start v0.5. See [Data lifecycle operations](OPERATIONS.md) for migration, verification, and rollback details.

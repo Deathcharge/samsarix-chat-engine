@@ -1,6 +1,6 @@
 # API reference
 
-The canonical machine-readable contract is generated at `/openapi.json`; interactive documentation is at `/docs`. This document explains the stable v0.4 behavior that OpenAPI does not fully describe, especially WebSockets.
+The canonical machine-readable contract is generated at `/openapi.json`; interactive documentation is at `/docs`. This document explains the stable v0.5 behavior that OpenAPI does not fully describe, especially streaming export and WebSockets.
 
 ## Authentication
 
@@ -43,7 +43,19 @@ Lists up to 100 rooms in creation order.
 
 ### `GET /v1/rooms/{room_id}`
 
-Returns a room or `404 room_not_found`.
+Returns a room, including nullable `archived_at`, or `404 room_not_found`.
+
+### `PATCH /v1/rooms/{room_id}`
+
+Admin-only. Send `{"archived":true}` to make a room read-only and close active clients, or `{"archived":false}` to reopen it. Repeating the current state is idempotent and does not add a duplicate audit event.
+
+### `GET /v1/rooms/{room_id}/export`
+
+Admin-only. Streams `application/x-ndjson`: a `samsarix.room_export` metadata record with `schema_version: 1`, followed by one `message` record per line in chronological order. The response is an attachment and the operation records `room.export_requested`.
+
+### `DELETE /v1/rooms/{room_id}`
+
+Admin-only and irreversible. The room must first be archived, and `X-Confirm-Room-Delete` must exactly equal the room ID. Success returns 204 and transactionally deletes the room and messages while retaining a metadata-only deletion audit event.
 
 ### `POST /v1/rooms/{room_id}/messages`
 
@@ -57,7 +69,7 @@ Persists a message, broadcasts it to the room, and returns 201:
 }
 ```
 
-`sender` is 1–64 characters for operator or local access. Token clients may omit it; the signed subject is persisted. A conflicting value returns `403 identity_mismatch`. `content` is nonblank and subject to `SAMSARIX_CHAT_MAX_MESSAGE_CHARS`. `client_message_id` is optional and at most 128 characters. `Idempotency-Key` can be used instead; if both are present, they must match. Replaying an ID returns the first persisted message with HTTP 200 and does not broadcast it again.
+`sender` is 1–64 characters for operator or local access. Token clients may omit it; the signed subject is persisted. A conflicting value returns `403 identity_mismatch`. `content` is nonblank and subject to `SAMSARIX_CHAT_MAX_MESSAGE_CHARS`. `client_message_id` is optional and at most 128 characters. `Idempotency-Key` can be used instead; if both are present, they must match. Replaying an ID returns the first persisted message with HTTP 200 and does not broadcast it again. Archived rooms reject new messages with `409 room_archived`; their history remains readable until deletion.
 
 ### `GET /v1/rooms/{room_id}/messages?limit=50&before={message_id}`
 
@@ -75,6 +87,14 @@ Pages contain the newest matching messages. When `next_before` is non-null, pass
 ### `GET /v1/stats`
 
 Returns the current process's active WebSocket connection count.
+
+### `GET /v1/admin/audit-events?limit=50&before={event_id}`
+
+Admin-only. Returns chronological pages of room lifecycle, export-request, and explicit retention metadata. Events contain no message bodies or credentials. The shared API-key actor is `operator-api-key`; signed admin tokens use their subject.
+
+### `POST /v1/admin/retention/run`
+
+Admin-only. Deletes messages older than `SAMSARIX_CHAT_MESSAGE_RETENTION_DAYS`, returns the UTC cutoff and row count, and adds `retention.executed`. Returns `409 retention_not_configured` when maximum age is unset.
 
 ## Error envelope
 
@@ -124,7 +144,7 @@ After authentication and room validation, events begin with:
 ```json
 {
   "type": "ready",
-  "room": {"id":"general","name":"General","description":"","created_at":"..."},
+  "room": {"id":"general","name":"General","description":"","created_at":"...","archived_at":null},
   "username": "Andrew",
   "active_connections": 1,
   "max_message_chars": 4000
@@ -141,6 +161,7 @@ Live events are:
 - `presence.joined` / `presence.left`: contains `username` and the current room connection count; best effort only.
 - `pong`: response to an application-level ping command.
 - `error`: contains a stable `code` and human-readable `message`.
+- `room.archived`: final room metadata before the server closes the connection with 4409.
 
 ### Client commands
 
@@ -156,4 +177,4 @@ Every WebSocket publish checks `room:write`; read-only sessions receive `authori
 
 ## Delivery semantics
 
-A `message.created` event is emitted only after SQLite commits the message. Broadcast is in-process and at-most-once; slow or failed clients are removed after the configured send timeout. Clients should reconnect with backoff, consume the initial history event, and use the HTTP cursor endpoint for older messages. Multi-worker or multi-host fan-out is not implemented in v0.4.
+A `message.created` event is emitted only after SQLite commits the message. Broadcast is in-process and at-most-once; slow or failed clients are removed after the configured send timeout. Clients should reconnect with backoff, consume the initial history event, and use the HTTP cursor endpoint for older messages. Multi-worker or multi-host fan-out is not implemented in v0.5; archive teardown is deterministic only within the supported single process.

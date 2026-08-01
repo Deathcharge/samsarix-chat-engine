@@ -47,7 +47,9 @@ Samsarix Chat Engine is a self-hosted, single-instance room chat backend and emb
 - Retain the shared API key only as an operator and compatibility credential. It is intentionally all-room and must not be distributed to ordinary browser clients.
 - Require exact non-local browser origins even for authenticated deployments; credentials do not remove cross-site WebSocket-hijacking risk.
 
-Current official product research checked on 2026-08-01 established the practical feature floor without changing the narrow product boundary: [Sendbird Chat](https://sendbird.com/docs/chat) documents channels, receipts, presence, reactions, files, threads, search, moderation, export, webhooks, and privacy controls; [Ably Chat](https://ably.com/chat) emphasizes support/community embeds plus rooms, presence, typing, reactions, edits, moderation, and receipts. [Centrifugo authorization](https://centrifugal.dev/docs/server/authentication) uses signed identities or application-proxy decisions and per-channel permissions, while its [recovery guidance](https://centrifugal.dev/docs/server/history_and_recovery) distinguishes broker recovery from the application's source of truth. These comparisons support an identity/authorization-first v0.4, data lifecycle next, and broker work only after measured single-instance demand.
+Current official product research checked on 2026-08-01 established the practical feature floor without changing the narrow product boundary: [Sendbird Chat](https://sendbird.com/docs/chat) documents channels, receipts, presence, reactions, files, threads, search, moderation, export, webhooks, and privacy controls; [Ably Chat](https://ably.com/chat) emphasizes support/community embeds plus rooms, presence, typing, reactions, edits, moderation, and receipts. [Centrifugo authorization](https://centrifugal.dev/docs/server/authentication) uses signed identities or application-proxy decisions and per-channel permissions, while its [recovery guidance](https://centrifugal.dev/docs/server/history_and_recovery) distinguishes broker recovery from the application's source of truth. These comparisons support the identity/authorization-first v0.4, the accountable data-lifecycle v0.5, conversation controls next, and broker work only after measured single-instance demand.
+
+The v0.5 lifecycle contract follows [RFC 9110 DELETE semantics](https://www.rfc-editor.org/rfc/rfc9110.html): successful deletion returns 204, repeat requests remain safe with respect to final resource state, and confirmation is carried in a header rather than relying on undefined DELETE request-body semantics. The [OWASP Logging Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html) supports recording administrative data changes and exports while excluding access tokens, secrets, and sensitive content. Mattermost's [compliance export documentation](https://docs.mattermost.com/administration-guide/comply/compliance-export.html) reinforces versioned, reconstructable administrative export as a real deployment need without implying compliance. Backup uses SQLite's official [online backup API](https://sqlite.org/backup.html), and the CLI verifies each generated snapshot before atomic placement.
 
 The security design follows the [OWASP API Security Top 10](https://owasp.org/www-project-api-security/) emphasis on object authorization, authentication, and bounded resource use; the [OWASP Authorization Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html) guidance to deny by default and validate every request; the [OWASP WebSocket Security Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/WebSocket_Security_Cheat_Sheet.html) guidance on Origin validation, message authorization, and avoiding URL tokens; and [RFC 8725](https://www.rfc-editor.org/info/rfc8725/) requirements for explicit JWT algorithms, issuer/audience validation, mutually exclusive token rules, and strong secrets. PyJWT 2.13 is the bounded implementation dependency.
 
@@ -83,15 +85,15 @@ Deployment owners control login, membership decisions, TLS/proxying, operator an
 - [x] Add Linux/Windows CI, lint, format, typing, coverage, build, and package checks.
 - [x] Accurately document security, privacy, cost, recovery, and single-process behavior.
 - [x] Add host-asserted user identity and server-side per-room authorization before use with mutually untrusted users.
-- [ ] Add room/message export and deletion administration for deployments with data-subject or retention obligations.
+- [x] Add room/message export and deletion administration for deployments with data-subject or retention obligations.
 - [ ] Add a broker/presence adapter and cross-instance integration tests before multiple workers or hosts are supported.
 - [ ] Run sustained concurrent load/soak tests and publish measured limits before capacity claims.
 
 ### P2
 
-- [ ] Add optional room metadata updates and explicit archival.
+- [x] Add explicit room archive/reopen lifecycle state.
 - [ ] Add a small framework-neutral TypeScript protocol client.
-- [ ] Add time-based retention in addition to count-based caps.
+- [x] Add time-based retention in addition to count-based caps.
 - [ ] Add OpenTelemetry hooks only if operators demonstrate a need; keep telemetry off by default.
 - [ ] Add conditional HTTP caching/ETags for room lists if read load warrants it.
 
@@ -106,6 +108,7 @@ Deployment owners control login, membership decisions, TLS/proxying, operator an
 - [x] Real unit/integration/CLI/package-oriented tests and CI.
 - [x] Final clean-environment verification and adversarial review.
 - [x] Strict signed access tokens, operator separation, per-room/action authorization, and server-enforced sender identity.
+- [x] Streaming room export, archive/reopen, confirmed deletion, age retention, metadata-only audit, and backup/restore.
 
 ## Release acceptance criteria
 
@@ -126,6 +129,22 @@ The adversarial pass additionally found and fixed a SQLite connection-handle lea
 Version 0.3 completed the Helix-to-Samsarix product migration. The distribution, canonical Python package, CLI, environment variables, service metadata, documentation, support policy, and examples now use Samsarix. Compatibility shims preserve v0.2 imports and the old CLI/environment names, and the default database migration logic avoids silently hiding an existing `data/helix-chat.db`.
 
 Version 0.4 establishes the product's first credible multi-user trust boundary. Host applications can issue short-lived room tokens through Python or the CLI; HTTP and WebSocket handlers validate token type, fixed algorithm, issuer, audience, required time/identity/authorization claims, maximum lifetime, and room/action access. Signed identity overrides display-name input, read-only WebSockets cannot publish, non-local browser origins require an explicit allowlist, and the administrative API key remains backwards compatible.
+
+Version 0.5 closes the primary operational privacy gap for controlled single-instance deployments. Operators can stream versioned NDJSON exports, archive and reopen rooms, and irreversibly delete only an already archived room with an exact confirmation header. Archive is enforced at persistence and protocol layers and deterministically notifies/closes connected clients. Optional age retention complements count caps; a bounded administrative audit trail records actors and lifecycle metadata without duplicating message bodies or credentials. The CLI now creates integrity-checked online SQLite backups and atomically restores them with explicit replacement. Schema version 1 migrates in place to version 2, while unknown future versions are refused without mutation.
+
+Initial v0.5 verification on 2026-08-01 used CPython 3.14.6 on Windows and the newest resolved runtime versions inside the declared bounds:
+
+| Check | Actual result |
+| --- | --- |
+| `ruff check .` / `ruff format --check .` | Passed; 28 Python files formatted |
+| `mypy samsarix_chat_engine` | Passed; no issues in 9 source files |
+| `pytest --cov=samsarix_chat_engine --cov-report=term-missing` | 69 passed in 70.03s; 91.74% total branch coverage |
+| `pip check` / isolated wheel-runtime `pip-audit` | No broken requirements; no known third-party vulnerabilities |
+| `python -m build` / `twine check` | Source archive and universal wheel built from the sdist; both passed metadata checks |
+| final wheel installed outside the source tree | Version/import/metadata and `pip check` passed |
+| expanded installed-wheel smoke | Authorized HTTP/WebSocket persistence plus NDJSON export, archive/delete, online backup, SQLite creation, and graceful shutdown passed |
+
+The lifecycle tests cover admin authorization, audit-content exclusion, idempotent archive, read-only enforcement, active-client teardown/reopen, confirmation failures, 1005-message streaming across batches, retention counts, v1 migration/data preservation, future-schema refusal, and Windows-safe backup/restore replacement. Exact final artifact digests are recorded in the pull request because including them in the packaged source would change those digests.
 
 Initial v0.4 verification on 2026-08-01: the unchanged v0.3 baseline had 27 passing tests; after implementation and review hardening, `pytest --cov=samsarix_chat_engine --cov-report=term-missing` passed 59 tests in 33.02 seconds with 92.86% branch coverage. The new authorization tests cover tampering, expiry, issuer/audience confusion, malformed signed claims, self-verifiable token size, room and action denial, sender spoofing, subject-wide WebSocket rate limits, OpenAPI security schemes, browser WebSocket authentication, read-only sessions, origin enforcement, and CLI issuance. Final artifact and installed-wheel evidence is recorded after exact-head verification.
 
@@ -187,7 +206,7 @@ This v0.3 verification was local on Windows with CPython 3.11.9. The configured 
 
 ## Deferred and blocked work
 
-Administrative deletion/export, time-based retention, moderation controls, multi-instance fan-out, and load testing are genuine next-stage local engineering, ordered in the roadmap. Data lifecycle is the highest-value next gate for support, education, and internal deployments.
+Moderation controls, a stable client SDK, multi-instance fan-out, and load testing are genuine next-stage local engineering, ordered in the roadmap. Conversation controls are the highest-value next gate for support, education, and private-community deployments.
 
 Public package publication, hosted deployment, domains, credentials, signing, and pricing remain owner-controlled. No external accounts, infrastructure, releases, or spending were created as part of the local productization work.
 
