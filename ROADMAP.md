@@ -1,42 +1,69 @@
 # Samsarix Chat Engine roadmap
 
-This roadmap separates four gates: merge, release, publication, and flagship adoption. Passing one does not imply the next.
+This roadmap turns the engine into a credible embedded-chat backend without pretending to be a complete collaboration suite. Merge, release, package publication, hosted operation, and flagship adoption are separate gates.
 
 ## Product boundary
 
-Portfolio role: **reference implementation**. Keep this as a bounded reference implementation unless a real consumer proves a stronger role. Avoid turning it into a second canonical backend or user-facing platform.
-Planned repository identity: `Deathcharge/samsarix-chat-engine` (ready).
+Samsarix Chat Engine is a self-hosted, local-first backend for applications that need private text rooms, durable history, and live delivery without operating a full chat platform. Its most plausible early uses are:
 
-Current disposition: Merge the productization branch after exact-head verification and rollback-ref creation; release and adoption remain separate decisions.
+- an authenticated support or customer-success room embedded in a product;
+- private cohort, classroom, game-guild, or community rooms whose membership is decided by a host application;
+- incident, field-team, or internal operations chat for a small single-instance deployment;
+- a transparent FastAPI/SQLite reference backend for teams prototyping their own chat UI.
 
-## Stabilize the productized default
+Its wedge is operational simplicity and inspectable source, not feature parity with Sendbird, Ably, Mattermost, or Slack. The host application owns login and room membership; this engine enforces the short-lived authorization result, commits messages, and delivers room events.
 
-- Keep the default branch buildable from a clean checkout and preserve exact-head CI evidence.
-- Keep Samsarix LLC branding, package identity, license metadata, and compatibility aliases internally consistent.
-- Preserve the pre-productization default under a rollback ref before merging; do not delete legacy history.
-- Review priority: Create a review PR, run cross-platform CI and a two-client installed-wheel acceptance test, then decide whether to publish-and-freeze or name a real consumer.
+## v0.4 — tenant-safe access boundary
 
-## Release candidate
+- [x] Signed, expiring application-user access tokens with fixed HS256 verification rules.
+- [x] Server-enforced token subject, room IDs, and read/write/admin permissions.
+- [x] HTTP and browser WebSocket token flows without URL credentials.
+- [x] Operator API-key compatibility and safe unauthenticated loopback compatibility.
+- [x] CLI and Python token issuance, migration guidance, strict claim validation, and adversarial tests.
+- [x] Exact browser-origin allowlisting for non-local origins, including authenticated deployments.
 
-- Tag a reproducible reference snapshot with truthful support status.
-- Add one end-to-end example that runs from the distributed artifact.
-- Freeze feature growth unless a named consumer adopts the contract.
+Acceptance gate: full lint, format, type, test/coverage, dependency audit, package build, installed-wheel smoke, and GitHub matrix checks on the exact merge head.
 
-Current hardening backlog:
+## v0.5 — data lifecycle and accountable administration
 
-- No real identities, per-room authorization, moderation, deletion/export, attachments, or end-to-end encryption.
-- No supported multi-worker topology, broker, distributed rate limits, or load/soak measurements.
-- Public deployment creates an ongoing security/operations burden disproportionate to demonstrated demand.
-- The flagship already has broad chat capabilities; no consumer validates this separate protocol.
-- Version/package publication, remote matrix, support, and data-governance commitments remain unresolved.
+Highest-value next milestone for support, education, and internal-tool deployments:
 
-## Samsarix adoption
+- room export in streaming NDJSON with stable schema/version metadata;
+- explicit room archive and irreversible-delete workflows protected by operator/admin access;
+- deletion events for connected clients and deterministic WebSocket teardown;
+- time-based retention in addition to current count caps;
+- append-only administrative audit records without message-body duplication;
+- backup, restore, export, and deletion runbooks with integration tests.
 
-- Define a public API, event, schema, artifact, or deployment contract before connecting to Samsarix Unified.
-- Add a consumer-owned contract fixture covering authentication, privacy, limits, errors, and version compatibility.
-- Make one implementation canonical; remove or freeze duplicate behavior only after parity and rollback are proven.
-- Record an owner, support level, compatibility window, and measurable adoption signal.
+This closes the largest remaining privacy and operational gap. It does not claim regulatory compliance; deployment owners still determine policy and legal obligations.
 
-## Completion evidence
+## v0.6 — conversation controls for real communities
 
-A milestone is complete only when its exact commit, commands and results, artifact digest, consumer or deployment, and rollback path are recorded in a pull request or release record. README claims must not exceed that evidence.
+- message edit and deletion with author/operator authorization and persisted event semantics;
+- room freeze plus user mute/ban primitives for moderation;
+- read cursors/unread counts and typing indicators with explicit privacy/cost limits;
+- webhooks for committed message and moderation events with signing, timeouts, retry caps, and idempotency;
+- a small framework-neutral TypeScript protocol client after the protocol stabilizes.
+
+Attachments, search, reactions, threads, and mentions should be added only against a named consumer journey. Binary files should use operator-provided object storage rather than SQLite blobs.
+
+## v0.7 — measured multi-instance operation
+
+- define a broker/history adapter boundary without changing the single-instance default;
+- implement and test cross-worker fan-out, presence, distributed rate limits, and reconnect recovery;
+- run sustained load/soak and reconnect-storm tests and publish measured limits;
+- add OpenTelemetry hooks only when an operator needs them, with telemetry disabled by default.
+
+No horizontal-scale claim is acceptable before those tests pass. SQLite remains a coherent default for one process; a broker or external database must solve a demonstrated topology rather than decorate the architecture.
+
+## Deliberate non-goals
+
+- no built-in password database, social graph, billing, or end-user frontend;
+- no AI agents, content generation, or metered model dependency;
+- no end-to-end encryption claim without a separately reviewed key-management protocol;
+- no federation or Slack-compatible protocol emulation;
+- no production hosting, package publication, domain, pricing, or support-SLA commitment without owner approval.
+
+## Evidence required for every milestone
+
+A milestone is complete only when its exact commit, verification commands/results, artifact digest, migration impact, rollback path, and remaining risks are recorded in its pull request or release notes. README claims must not exceed that evidence.

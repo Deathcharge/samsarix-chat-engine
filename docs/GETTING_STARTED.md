@@ -68,16 +68,23 @@ curl http://127.0.0.1:8000/v1/rooms/general/messages
 
 The response contains the committed messages because the default database is `data/samsarix-chat.db`.
 
-## Add authentication
+## Add application-user authorization
 
-Set a secret of at least 16 characters before starting the service:
+Use an operator API key to administer rooms and a signing secret to mint short-lived user tokens:
 
 ```bash
-export SAMSARIX_CHAT_API_KEY="replace-with-a-random-secret"
+export SAMSARIX_CHAT_API_KEY="replace-with-a-random-operator-secret"
+export SAMSARIX_CHAT_TOKEN_SIGNING_SECRET="replace-with-at-least-32-random-bytes"
 samsarix-chat serve
 ```
 
-In PowerShell, use `$env:SAMSARIX_CHAT_API_KEY = "replace-with-a-random-secret"`. HTTP clients send either `X-API-Key` or `Authorization: Bearer ...`.
+In PowerShell, assign the same names through `$env:...`. Keep both values on trusted backends. Create rooms with `X-API-Key`, then issue a room token for an already-authenticated application user:
+
+```bash
+samsarix-chat token issue --subject user-123 --room general --expires-in 900
+```
+
+HTTP application clients send `Authorization: Bearer <token>`. They can omit `sender`; the engine persists the signed subject and rejects spoofed identities. The default issued permissions are `room:read` and `room:write`.
 
 Browser WebSockets do not expose arbitrary handshake headers, so the server sends `auth.required`. Reply before the configured five-second deadline:
 
@@ -85,23 +92,25 @@ Browser WebSockets do not expose arbitrary handshake headers, so the server send
 socket.onmessage = (event) => {
   const message = JSON.parse(event.data);
   if (message.type === "auth.required") {
-    socket.send(JSON.stringify({type: "auth", api_key: "replace-with-a-random-secret"}));
+    socket.send(JSON.stringify({type: "auth", token: accessToken}));
   }
 };
 ```
 
-Do not put API keys in WebSocket URLs: query strings are routinely recorded by servers and proxies.
+When using a token, connect without `?username=` because the server derives identity from the token. Do not put credentials in WebSocket URLs: query strings are routinely recorded by servers and proxies. See [Identity and room authorization](AUTHORIZATION.md) for the permission matrix, token profile, and backend issuance example.
 
 ## Troubleshooting
 
-- `401 authentication_required`: the HTTP API requires the configured shared key.
+- `401 authentication_required`: the HTTP API requires a valid operator key or access token.
+- `403 authorization_denied`: the token lacks the action or room permission.
+- `403 identity_mismatch`: a client-provided sender or username conflicts with the signed subject.
 - WebSocket close `4401`: authentication was missing, invalid, or late.
 - WebSocket close `4403`: the browser `Origin` is not allowed.
 - WebSocket close `4404`: create the room before connecting.
 - WebSocket close `1013`: the configured connection cap is full; retry with backoff.
 - `503 storage_unavailable` or `/readyz` returning 503: check the database directory permissions and available disk.
-- CLI refuses a public bind: set `SAMSARIX_CHAT_API_KEY`, or bind to loopback. The insecure override is only for isolated development networks.
+- CLI refuses a public bind: configure an API key or token signing secret, or bind to loopback. The insecure override is only for isolated development networks.
 
-## Upgrading from 0.2
+## Upgrading from 0.3
 
-Use `samsarix_chat_engine`, `samsarix-chat`, and `SAMSARIX_CHAT_*` in new integrations. The old `helix_chat_engine`, `helix-chat`, and `HELIX_CHAT_*` names remain deprecated aliases in 0.3. If the new default database does not exist but `data/helix-chat.db` does, the CLI opens the legacy file and emits a deprecation warning.
+The shared API-key and unauthenticated loopback behaviors remain available. `sender` and WebSocket `username` remain required for those legacy paths, but are optional for signed tokens. Browser WebSockets may continue sending `{"type":"auth","api_key":"..."}`; new application clients should use scoped tokens. Remote browser origins now require an explicit `SAMSARIX_CHAT_ALLOWED_ORIGINS` entry even when authentication is configured.
