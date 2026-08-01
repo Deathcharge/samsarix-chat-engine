@@ -5,15 +5,27 @@
 from .app import create_app
 from .auth import AccessTokenService, AuthenticationError, Principal
 from .config import ConfigurationError, Settings
-from .models import Message, MessageCreate, MessagePage, Room, RoomCreate
+from .models import (
+    AuditEvent,
+    AuditEventPage,
+    Message,
+    MessageCreate,
+    MessagePage,
+    RetentionResult,
+    Room,
+    RoomCreate,
+    RoomUpdate,
+)
 from .store import ChatStore
 from .websocket_manager import ConnectionManager
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     "AccessTokenService",
     "AuthenticationError",
+    "AuditEvent",
+    "AuditEventPage",
     "ChatStore",
     "ConfigurationError",
     "ConnectionManager",
@@ -21,8 +33,10 @@ __all__ = [
     "MessageCreate",
     "MessagePage",
     "Principal",
+    "RetentionResult",
     "Room",
     "RoomCreate",
+    "RoomUpdate",
     "Settings",
     "__version__",
     "create_app",

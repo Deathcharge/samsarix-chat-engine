@@ -28,14 +28,26 @@ def _available_port() -> int:
         return int(candidate.getsockname()[1])
 
 
-def _request(url: str, *, method: str = "GET", credential: tuple[str, str] | None = None, body: Any = None) -> Any:
-    headers = {"Content-Type": "application/json"}
+def _request(
+    url: str,
+    *,
+    method: str = "GET",
+    credential: tuple[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+    body: Any = None,
+) -> Any:
+    request_headers = {"Content-Type": "application/json", **(headers or {})}
     if credential is not None:
-        headers[credential[0]] = credential[1]
+        request_headers[credential[0]] = credential[1]
     encoded = json.dumps(body).encode() if body is not None else None
-    request = Request(url, data=encoded, headers=headers, method=method)  # noqa: S310 - loopback URL only
+    request = Request(url, data=encoded, headers=request_headers, method=method)  # noqa: S310 - loopback URL only
     with urlopen(request, timeout=5) as response:  # noqa: S310 - loopback URL only
-        return json.load(response)
+        content = response.read()
+        if not content:
+            return None
+        if response.headers.get_content_type() == "application/json":
+            return json.loads(content)
+        return content.decode()
 
 
 async def _websocket_round_trip(base_url: str, token: str) -> str:
@@ -72,6 +84,7 @@ def main() -> int:
                 "SAMSARIX_CHAT_TOKEN_AUDIENCE": "samsarix-chat",
                 "SAMSARIX_CHAT_TOKEN_MAX_LIFETIME": "86400",
                 "SAMSARIX_CHAT_TOKEN_CLOCK_SKEW": "30",
+                "SAMSARIX_CHAT_DATABASE": str(database),
             }
         )
         token_result = subprocess.run(  # noqa: S603 - fixed interpreter/module and controlled arguments
@@ -148,9 +161,44 @@ def main() -> int:
             websocket_sender = asyncio.run(_websocket_round_trip(base_url, token))
             if room["id"] != "wheel-room" or message["sender"] != "wheel-user" or len(history["items"]) != 1:
                 raise RuntimeError("installed-wheel HTTP journey mismatch")
+            exported = _request(
+                base_url + "/v1/rooms/wheel-room/export",
+                credential=("X-API-Key", operator_key),
+            )
+            export_lines = [json.loads(line) for line in exported.splitlines()]
+            if (
+                export_lines[0]["schema_version"] != 1
+                or export_lines[1]["message"]["content"] != "installed wheel HTTP"
+            ):
+                raise RuntimeError("installed-wheel export journey mismatch")
+            backup = Path(temporary) / "smoke-backup.db"
+            subprocess.run(  # noqa: S603 - fixed interpreter/module and controlled arguments
+                [sys.executable, "-m", "samsarix_chat_engine", "database", "backup", str(backup)],
+                env=environment,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            archived = _request(
+                base_url + "/v1/rooms/wheel-room",
+                method="PATCH",
+                credential=("X-API-Key", operator_key),
+                body={"archived": True},
+            )
+            deleted = _request(
+                base_url + "/v1/rooms/wheel-room",
+                method="DELETE",
+                credential=("X-API-Key", operator_key),
+                headers={"X-Confirm-Room-Delete": "wheel-room"},
+            )
+            if archived["archived_at"] is None or deleted is not None or not backup.is_file():
+                raise RuntimeError("installed-wheel lifecycle or backup journey mismatch")
             if not database.is_file() or database.stat().st_size == 0:
                 raise RuntimeError("installed-wheel database was not persisted")
-            print(f"http=ok websocket=ok sender={websocket_sender} history={len(history['items'])}")
+            print(
+                f"http=ok websocket=ok export=ok lifecycle=ok backup=ok "
+                f"sender={websocket_sender} history={len(history['items'])}"
+            )
         finally:
             server.should_exit = True
             server_thread.join(timeout=10)

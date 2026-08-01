@@ -1,7 +1,9 @@
 """Configuration, CLI safety, and public-package tests."""
 
 import importlib
+import sqlite3
 import sys
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,7 +15,7 @@ from samsarix_chat_engine.config import ConfigurationError, Settings
 
 
 def test_public_api_and_parser_help() -> None:
-    assert samsarix_chat_engine.__version__ == "0.4.0"
+    assert samsarix_chat_engine.__version__ == "0.5.0"
     assert callable(samsarix_chat_engine.create_app)
     help_text = build_parser().format_help()
     assert "serve" in help_text
@@ -24,11 +26,15 @@ def test_settings_from_env_and_validation(monkeypatch: pytest.MonkeyPatch, tmp_p
     monkeypatch.setenv("SAMSARIX_CHAT_DATABASE", str(tmp_path / "configured.db"))
     monkeypatch.setenv("SAMSARIX_CHAT_ALLOWED_ORIGINS", "https://one.example/, https://two.example")
     monkeypatch.setenv("SAMSARIX_CHAT_MAX_MESSAGE_CHARS", "123")
+    monkeypatch.setenv("SAMSARIX_CHAT_MESSAGE_RETENTION_DAYS", "30")
+    monkeypatch.setenv("SAMSARIX_CHAT_MAX_AUDIT_EVENTS", "500")
     settings = Settings.from_env()
 
     assert settings.database_path == tmp_path / "configured.db"
     assert settings.allowed_origins == ("https://one.example", "https://two.example")
     assert settings.max_message_chars == 123
+    assert settings.message_retention_days == 30
+    assert settings.max_audit_events == 500
 
     monkeypatch.setenv("SAMSARIX_CHAT_MAX_CONNECTIONS", "not-a-number")
     with pytest.raises(ConfigurationError, match="must be an integer"):
@@ -39,6 +45,8 @@ def test_settings_from_env_and_validation(monkeypatch: pytest.MonkeyPatch, tmp_p
         Settings(max_connections=1, max_connections_per_room=2)
     with pytest.raises(ConfigurationError, match="exact http"):
         Settings(allowed_origins=("https://chat.example/path",))
+    with pytest.raises(ConfigurationError, match="between 1 and 3650"):
+        Settings(message_retention_days=0)
 
     monkeypatch.delenv("SAMSARIX_CHAT_MAX_CONNECTIONS")
     monkeypatch.setenv("SAMSARIX_CHAT_WS_AUTH_TIMEOUT", "slow")
@@ -97,12 +105,32 @@ def test_cli_passes_safe_configuration_to_uvicorn(monkeypatch: pytest.MonkeyPatc
     assert calls[0][1]["ws_max_size"] == 16_384
 
 
+def test_cli_backup_and_restore_use_consistent_snapshots(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    source = tmp_path / "source.db"
+    backup = tmp_path / "backups" / "snapshot.db"
+    restored = tmp_path / "restored.db"
+    with closing(sqlite3.connect(source)) as connection, connection:
+        connection.execute("CREATE TABLE values_for_test (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO values_for_test VALUES ('preserved')")
+
+    assert main(["database", "--database", str(source), "backup", str(backup)]) == 0
+    assert Path(capsys.readouterr().out.strip()) == backup.resolve()
+    assert main(["database", "--database", str(restored), "restore", str(backup)]) == 0
+    with closing(sqlite3.connect(restored)) as connection:
+        assert connection.execute("SELECT value FROM values_for_test").fetchone()[0] == "preserved"
+
+    with pytest.raises(SystemExit) as protected:
+        main(["database", "--database", str(restored), "restore", str(backup)])
+    assert protected.value.code == 2
+    assert main(["database", "--database", str(restored), "restore", str(backup), "--replace"]) == 0
+
+
 def test_legacy_import_and_environment_aliases(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     sys.modules.pop("helix_chat_engine", None)
     with pytest.warns(DeprecationWarning, match="import samsarix_chat_engine"):
         legacy_package = importlib.import_module("helix_chat_engine")
     assert legacy_package.Settings is Settings
-    assert legacy_package.__version__ == "0.4.0"
+    assert legacy_package.__version__ == "0.5.0"
     assert importlib.import_module("helix_chat_engine.app").create_app is samsarix_chat_engine.create_app
     assert importlib.import_module("helix_chat_engine.cli").main is main
     assert importlib.import_module("helix_chat_engine.config").Settings is Settings

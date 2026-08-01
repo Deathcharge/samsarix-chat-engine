@@ -11,37 +11,45 @@ import sqlite3
 import time
 import uuid
 from collections import defaultdict, deque
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Annotated, Any
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, FastAPI, Header, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import TypeAdapter, ValidationError
+from starlette.background import BackgroundTask
 from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.types import Message as ASGIMessage
 
 from .auth import AccessTokenService, AuthenticationError, Permission, Principal, credentials_match
 from .config import Settings
 from .models import (
+    AuditEventPage,
     Message,
     MessageCreate,
     MessagePage,
+    RetentionResult,
     Room,
     RoomCreate,
+    RoomUpdate,
     WebSocketAuth,
     WebSocketMessage,
     WebSocketPing,
 )
 from .store import (
     ChatStore,
+    InvalidAuditCursorError,
     InvalidCursorError,
     RoomAlreadyExistsError,
+    RoomArchivedError,
     RoomCapacityError,
+    RoomNotArchivedError,
     RoomNotFoundError,
 )
 from .websocket_manager import ConnectionManager
@@ -176,6 +184,12 @@ def _client_key(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def _audit_actor(principal: Principal) -> str:
+    if principal.subject is not None:
+        return principal.subject
+    return "operator-api-key" if principal.authentication == "api_key" else "local-operator"
+
+
 APIKeyCredential = Annotated[str | None, Depends(_API_KEY_SCHEME)]
 BearerCredential = Annotated[HTTPAuthorizationCredentials | None, Depends(_BEARER_SCHEME)]
 
@@ -291,6 +305,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         max_rooms=resolved.max_rooms,
         max_stored_messages=resolved.max_stored_messages,
         max_stored_messages_per_room=resolved.max_stored_messages_per_room,
+        message_retention_days=resolved.message_retention_days,
+        max_audit_events=resolved.max_audit_events,
     )
     manager = ConnectionManager(
         max_connections=resolved.max_connections,
@@ -323,7 +339,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     application = FastAPI(
         title="Samsarix Chat Engine",
-        version="0.4.0",
+        version="0.5.0",
         summary="A small persisted room-chat service with WebSocket delivery",
         lifespan=lifespan,
     )
@@ -343,8 +359,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             CORSMiddleware,
             allow_origins=list(resolved.allowed_origins),
             allow_credentials=False,
-            allow_methods=["GET", "POST"],
-            allow_headers=["Authorization", "Content-Type", "Idempotency-Key", "X-API-Key"],
+            allow_methods=["GET", "POST", "PATCH", "DELETE"],
+            allow_headers=[
+                "Authorization",
+                "Content-Type",
+                "Idempotency-Key",
+                "X-API-Key",
+                "X-Confirm-Room-Delete",
+            ],
         )
 
     @application.middleware("http")
@@ -386,7 +408,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def index() -> dict[str, Any]:
         return {
             "name": "Samsarix Chat Engine",
-            "version": "0.4.0",
+            "version": "0.5.0",
             "status": "ok",
             "docs": "/docs",
             "health": "/healthz",
@@ -407,7 +429,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def create_room(payload: RoomCreate, response: Response, principal: PrincipalDependency) -> Room:
         _authorize(principal, "admin")
         try:
-            room = await store.create_room(payload)
+            room = await store.create_room(payload, actor=_audit_actor(principal))
         except RoomAlreadyExistsError as exc:
             raise APIError(409, "room_already_exists", "A room with that ID already exists") from exc
         except RoomCapacityError as exc:
@@ -427,6 +449,83 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if room is None:
             raise APIError(404, "room_not_found", "Room not found")
         return room
+
+    @router.patch("/rooms/{room_id}", response_model=Room, tags=["rooms"])
+    async def update_room(room_id: str, payload: RoomUpdate, principal: PrincipalDependency) -> Room:
+        _authorize(principal, "admin")
+        try:
+            room, changed = await store.set_room_archived(
+                room_id,
+                archived=payload.archived,
+                actor=_audit_actor(principal),
+            )
+        except RoomNotFoundError as exc:
+            raise APIError(404, "room_not_found", "Room not found") from exc
+        if changed and payload.archived:
+            await manager.close_room(
+                room_id,
+                _event("room.archived", room=room.model_dump(mode="json")),
+            )
+        return room
+
+    @router.delete("/rooms/{room_id}", status_code=204, tags=["rooms"])
+    async def delete_room(
+        room_id: str,
+        principal: PrincipalDependency,
+        confirmation: str | None = Header(default=None, alias="X-Confirm-Room-Delete", max_length=64),
+    ) -> Response:
+        _authorize(principal, "admin")
+        if confirmation != room_id:
+            raise APIError(
+                400,
+                "deletion_confirmation_required",
+                "Repeat the room ID in X-Confirm-Room-Delete",
+            )
+        try:
+            await store.delete_room(room_id, actor=_audit_actor(principal))
+        except RoomNotFoundError as exc:
+            raise APIError(404, "room_not_found", "Room not found") from exc
+        except RoomNotArchivedError as exc:
+            raise APIError(409, "room_not_archived", "Archive the room before deleting it") from exc
+        return Response(status_code=204)
+
+    @router.get("/rooms/{room_id}/export", tags=["rooms"])
+    async def export_room(room_id: str, principal: PrincipalDependency) -> StreamingResponse:
+        _authorize(principal, "admin")
+        room = await store.get_room(room_id)
+        if room is None:
+            raise APIError(404, "room_not_found", "Room not found")
+        exported_at = datetime.now(timezone.utc)
+        try:
+            await store.record_export_requested(room_id, actor=_audit_actor(principal))
+        except RoomNotFoundError as exc:
+            raise APIError(404, "room_not_found", "Room not found") from exc
+        messages = store.iter_messages(room_id)
+
+        def export_lines() -> Iterator[str]:
+            metadata = {
+                "type": "samsarix.room_export",
+                "schema_version": 1,
+                "exported_at": exported_at.isoformat(),
+                "room": room.model_dump(mode="json"),
+            }
+            yield json.dumps(metadata, separators=(",", ":"), sort_keys=True) + "\n"
+            for message in messages:
+                yield (
+                    json.dumps(
+                        {"type": "message", "message": message.model_dump(mode="json")},
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+
+        return StreamingResponse(
+            export_lines(),
+            media_type="application/x-ndjson",
+            headers={"Content-Disposition": f'attachment; filename="{room_id}-messages.ndjson"'},
+            background=BackgroundTask(messages.close),
+        )
 
     @router.get("/rooms/{room_id}/messages", response_model=MessagePage, tags=["messages"])
     async def list_messages(
@@ -490,6 +589,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         except RoomNotFoundError as exc:
             raise APIError(404, "room_not_found", "Room not found") from exc
+        except RoomArchivedError as exc:
+            raise APIError(409, "room_archived", "Archived rooms are read-only") from exc
         response.status_code = 201 if created else 200
         event = _event("message.created", message=message.model_dump(mode="json"))
         if created:
@@ -500,6 +601,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def stats(principal: PrincipalDependency) -> dict[str, int]:
         _authorize(principal, "admin")
         return {"active_connections": manager.active_connections}
+
+    @router.get("/admin/audit-events", response_model=AuditEventPage, tags=["operations"])
+    async def list_audit_events(
+        principal: PrincipalDependency,
+        limit: int = Query(default=50, ge=1, le=100),
+        before: str | None = Query(default=None, min_length=1, max_length=128),
+    ) -> AuditEventPage:
+        _authorize(principal, "admin")
+        try:
+            items, next_before = await store.list_audit_events(limit=limit, before=before)
+        except InvalidAuditCursorError as exc:
+            raise APIError(400, "invalid_cursor", "The audit cursor is not valid") from exc
+        return AuditEventPage(items=items, next_before=next_before)
+
+    @router.post("/admin/retention/run", response_model=RetentionResult, tags=["operations"])
+    async def run_retention(principal: PrincipalDependency) -> RetentionResult:
+        _authorize(principal, "admin")
+        if resolved.message_retention_days is None:
+            raise APIError(409, "retention_not_configured", "Message retention is not configured")
+        deleted_messages, cutoff = await store.run_retention(actor=_audit_actor(principal))
+        return RetentionResult(deleted_messages=deleted_messages, cutoff=cutoff)
 
     application.include_router(router)
 
@@ -537,11 +659,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await websocket.send_json(_event("error", code="room_not_found", message="Room not found"))
             await websocket.close(code=4404, reason="Room not found")
             return
+        if room.archived_at is not None:
+            await websocket.send_json(_event("error", code="room_archived", message="Archived rooms are read-only"))
+            await websocket.close(code=4409, reason="Room archived")
+            return
         if not await manager.register(websocket, room_id, username):
             await websocket.send_json(
                 _event("error", code="connection_capacity_reached", message="Connection capacity reached")
             )
             await websocket.close(code=1013, reason="Try again later")
+            return
+
+        room = await store.get_room(room_id)
+        if room is None or room.archived_at is not None:
+            await manager.unregister(websocket)
+            code = "room_not_found" if room is None else "room_archived"
+            status_message = "Room not found" if room is None else "Archived rooms are read-only"
+            await websocket.send_json(_event("error", code=code, message=status_message))
+            await websocket.close(code=4404 if room is None else 4409, reason=status_message)
             return
 
         history, next_before = await store.list_messages(room_id, limit=50)
@@ -633,12 +768,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         _event("error", code="rate_limit_exceeded", message="Message rate limit exceeded"),
                     )
                     continue
-                message, created = await store.create_message(
-                    room_id=room_id,
-                    sender=username,
-                    content=command.content,
-                    client_message_id=command.client_message_id,
-                )
+                try:
+                    message, created = await store.create_message(
+                        room_id=room_id,
+                        sender=username,
+                        content=command.content,
+                        client_message_id=command.client_message_id,
+                    )
+                except (RoomArchivedError, RoomNotFoundError) as exc:
+                    archived = isinstance(exc, RoomArchivedError)
+                    await manager.send(
+                        websocket,
+                        _event(
+                            "error",
+                            code="room_archived" if archived else "room_not_found",
+                            message="Archived rooms are read-only" if archived else "Room not found",
+                        ),
+                    )
+                    await websocket.close(
+                        code=4409 if archived else 4404,
+                        reason="Room archived" if archived else "Room not found",
+                    )
+                    break
                 message_event = _event(
                     "message.created",
                     message=message.model_dump(mode="json"),

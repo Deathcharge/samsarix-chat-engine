@@ -86,6 +86,25 @@ class ConnectionManager:
             self._rooms.clear()
         await asyncio.gather(*(self._close(connection) for connection in connections))
 
+    async def close_room(
+        self,
+        room_id: str,
+        event: dict[str, Any],
+        *,
+        code: int = 4409,
+        reason: str = "Room archived",
+    ) -> None:
+        """Notify, remove, and deterministically close every socket in one room."""
+
+        async with self._lock:
+            connections = tuple(self._rooms.pop(room_id, ()))
+            for connection in connections:
+                self._metadata.pop(connection, None)
+        if connections:
+            await asyncio.gather(
+                *(self._notify_and_close(connection, event, code=code, reason=reason) for connection in connections)
+            )
+
     async def _close(self, websocket: WebSocket) -> None:
         try:
             await asyncio.wait_for(
@@ -94,6 +113,20 @@ class ConnectionManager:
             )
         except Exception:
             logger.debug("WebSocket was already closed during shutdown")
+
+    async def _notify_and_close(
+        self,
+        websocket: WebSocket,
+        event: dict[str, Any],
+        *,
+        code: int,
+        reason: str,
+    ) -> None:
+        try:
+            await asyncio.wait_for(websocket.send_json(event), timeout=self.send_timeout)
+            await asyncio.wait_for(websocket.close(code=code, reason=reason), timeout=self.send_timeout)
+        except Exception:
+            logger.debug("WebSocket was already closed during room lifecycle change")
 
     @property
     def active_connections(self) -> int:
