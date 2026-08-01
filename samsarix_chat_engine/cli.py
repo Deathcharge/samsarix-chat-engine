@@ -32,7 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument(
         "--allow-insecure-public",
         action="store_true",
-        help="allow a non-loopback bind without SAMSARIX_CHAT_API_KEY (unsafe)",
+        help="allow a non-loopback bind without an API key or token signing secret (unsafe)",
     )
     serve.add_argument(
         "--log-level",

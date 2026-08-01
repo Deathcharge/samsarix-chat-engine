@@ -105,7 +105,7 @@ When using a token, connect without `?username=` because the server derives iden
 - `403 authorization_denied`: the token lacks the action or room permission.
 - `403 identity_mismatch`: a client-provided sender or username conflicts with the signed subject.
 - WebSocket close `4401`: authentication was missing, invalid, or late.
-- WebSocket close `4403`: the browser `Origin` is not allowed.
+- WebSocket close `4403`: the browser `Origin` is not allowed, the token lacks room access, or the username conflicts with its signed subject.
 - WebSocket close `4404`: create the room before connecting.
 - WebSocket close `1013`: the configured connection cap is full; retry with backoff.
 - `503 storage_unavailable` or `/readyz` returning 503: check the database directory permissions and available disk.

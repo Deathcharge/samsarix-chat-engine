@@ -626,7 +626,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         ),
                     )
                     continue
-                if not await limiter.allow(f"ws:{id(websocket)}"):
+                rate_subject = principal.subject or (websocket.client.host if websocket.client else "unknown")
+                if not await limiter.allow(f"ws:{rate_subject}"):
                     await manager.send(
                         websocket,
                         _event("error", code="rate_limit_exceeded", message="Message rate limit exceeded"),

@@ -24,7 +24,9 @@ def request(
     operator: bool = False,
 ) -> tuple[int, object]:
     headers = {"Content-Type": "application/json"}
-    if operator and API_KEY:
+    if operator:
+        if not API_KEY:
+            raise RuntimeError("SAMSARIX_CHAT_API_KEY is required for operator room administration")
         headers["X-API-Key"] = API_KEY
     elif ACCESS_TOKEN:
         headers["Authorization"] = f"Bearer {ACCESS_TOKEN}"

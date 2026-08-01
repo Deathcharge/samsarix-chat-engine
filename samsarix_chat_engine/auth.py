@@ -213,4 +213,8 @@ class AccessTokenService:
 def credentials_match(provided: str | None, expected: str | None) -> bool:
     """Compare operator credentials without a data-dependent early return."""
 
-    return expected is not None and provided is not None and secrets.compare_digest(provided, expected)
+    return (
+        expected is not None
+        and provided is not None
+        and secrets.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
+    )

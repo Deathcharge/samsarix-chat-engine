@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from samsarix_chat_engine import AccessTokenService, AuthenticationError, Principal, Settings, create_app
-from samsarix_chat_engine.auth import TOKEN_TYPE
+from samsarix_chat_engine.auth import TOKEN_TYPE, credentials_match
 from samsarix_chat_engine.cli import main
 
 SIGNING_SECRET = "test-only-signing-secret-that-is-long-enough"
@@ -54,6 +54,8 @@ def test_token_round_trip_and_principal_permissions() -> None:
     assert admin.allows("room:write", "any-room")
     assert Principal.api_key_operator().is_admin
     assert Principal.local_operator().authentication == "none"
+    assert credentials_match("pässphrase", "pässphrase")
+    assert not credentials_match("pässphrase", "different")
 
 
 @pytest.mark.parametrize(
@@ -137,6 +139,9 @@ def test_token_verification_rejects_tampering_expiry_and_context_confusion() -> 
     wrong_type = jwt.encode(payload, SIGNING_SECRET, algorithm="HS256", headers={"typ": "JWT"})
     with pytest.raises(AuthenticationError):
         service.verify(wrong_type)
+    unsigned = jwt.encode(payload, key="", algorithm="none", headers={"typ": TOKEN_TYPE})
+    with pytest.raises(AuthenticationError):
+        service.verify(unsigned)
 
 
 @pytest.mark.parametrize(
@@ -241,6 +246,21 @@ def test_rest_tokens_enforce_room_permissions_and_identity(
     )
     assert [item["content"] for item in history.json()["items"]] == ["trusted identity"]
 
+    missing_operator_sender = client.post(
+        "/v1/rooms/alpha/messages",
+        headers={"X-API-Key": OPERATOR_KEY},
+        json={"content": "missing sender"},
+    )
+    operator_message = client.post(
+        "/v1/rooms/alpha/messages",
+        headers={"X-API-Key": OPERATOR_KEY},
+        json={"sender": "operator", "content": "operator message"},
+    )
+    assert missing_operator_sender.status_code == 422
+    assert missing_operator_sender.json()["error"]["code"] == "sender_required"
+    assert operator_message.status_code == 201
+    assert operator_message.json()["sender"] == "operator"
+
 
 def test_openapi_advertises_both_security_schemes(
     secured_client: tuple[TestClient, AccessTokenService],
@@ -299,6 +319,30 @@ def test_websocket_rejects_room_and_identity_escalation(
             assert websocket.receive_json()["code"] == "authorization_denied"
             websocket.receive_json()
     assert denied.value.code == 4403
+
+
+def test_websocket_rate_limit_is_shared_by_authenticated_subject(
+    secured_client: tuple[TestClient, AccessTokenService],
+) -> None:
+    client, service = secured_client
+    token = _token(service)
+    client.app.state.message_limiter.limit = 1
+
+    with client.websocket_connect("/v1/rooms/alpha/ws") as first:
+        first.receive_json()
+        first.send_json({"type": "auth", "token": token})
+        first.receive_json()
+        first.receive_json()
+        first.send_json({"type": "message", "content": "first socket"})
+        assert first.receive_json()["type"] == "message.created"
+
+    with client.websocket_connect("/v1/rooms/alpha/ws") as second:
+        second.receive_json()
+        second.send_json({"type": "auth", "token": token})
+        second.receive_json()
+        second.receive_json()
+        second.send_json({"type": "message", "content": "second socket"})
+        assert second.receive_json()["code"] == "rate_limit_exceeded"
 
 
 def test_cli_issues_verifiable_token(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

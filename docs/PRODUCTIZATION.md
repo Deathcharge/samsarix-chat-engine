@@ -127,7 +127,7 @@ Version 0.3 completed the Helix-to-Samsarix product migration. The distribution,
 
 Version 0.4 establishes the product's first credible multi-user trust boundary. Host applications can issue short-lived room tokens through Python or the CLI; HTTP and WebSocket handlers validate token type, fixed algorithm, issuer, audience, required time/identity/authorization claims, maximum lifetime, and room/action access. Signed identity overrides display-name input, read-only WebSockets cannot publish, non-local browser origins require an explicit allowlist, and the administrative API key remains backwards compatible.
 
-Initial v0.4 verification on 2026-08-01: the unchanged v0.3 baseline had 27 passing tests; after implementation, `pytest --cov=samsarix_chat_engine --cov-report=term-missing` passed 58 tests in 47.58 seconds with 92.59% branch coverage. The new authorization tests cover tampering, expiry, issuer/audience confusion, malformed signed claims, self-verifiable token size, room and action denial, sender spoofing, OpenAPI security schemes, browser WebSocket authentication, read-only sessions, origin enforcement, and CLI issuance. Final artifact and installed-wheel evidence is recorded after exact-head verification.
+Initial v0.4 verification on 2026-08-01: the unchanged v0.3 baseline had 27 passing tests; after implementation and review hardening, `pytest --cov=samsarix_chat_engine --cov-report=term-missing` passed 59 tests in 33.02 seconds with 92.86% branch coverage. The new authorization tests cover tampering, expiry, issuer/audience confusion, malformed signed claims, self-verifiable token size, room and action denial, sender spoofing, subject-wide WebSocket rate limits, OpenAPI security schemes, browser WebSocket authentication, read-only sessions, origin enforcement, and CLI issuance. Final artifact and installed-wheel evidence is recorded after exact-head verification.
 
 Final v0.4 local verification used CPython 3.11.9 and the newest resolved versions inside the declared bounds, including FastAPI 0.141.1, Uvicorn 0.52.1, PyJWT 2.13.0, and WebSockets 17.0.1:
 
@@ -135,7 +135,7 @@ Final v0.4 local verification used CPython 3.11.9 and the newest resolved versio
 | --- | --- |
 | `ruff check .` / `ruff format --check .` | Passed; 36 Python files formatted |
 | `mypy samsarix_chat_engine` | Passed; no issues in 9 source files |
-| `pytest --cov=samsarix_chat_engine --cov-report=term-missing` | 58 passed in 53.83s; 92.59% total branch coverage |
+| `pytest --cov=samsarix_chat_engine --cov-report=term-missing` | 59 passed in 33.02s; 92.86% total branch coverage |
 | `pip check` | No broken requirements |
 | `pip-audit` | No known third-party vulnerabilities; unpublished local distributions skipped |
 | `python -m build` / `twine check` | Final sdist and universal wheel built from the sdist; both passed metadata checks |

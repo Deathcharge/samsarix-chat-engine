@@ -68,6 +68,10 @@ def main() -> int:
             {
                 "SAMSARIX_CHAT_API_KEY": operator_key,
                 "SAMSARIX_CHAT_TOKEN_SIGNING_SECRET": signing_secret,
+                "SAMSARIX_CHAT_TOKEN_ISSUER": "samsarix-chat-engine",
+                "SAMSARIX_CHAT_TOKEN_AUDIENCE": "samsarix-chat",
+                "SAMSARIX_CHAT_TOKEN_MAX_LIFETIME": "86400",
+                "SAMSARIX_CHAT_TOKEN_CLOCK_SKEW": "30",
             }
         )
         token_result = subprocess.run(  # noqa: S603 - fixed interpreter/module and controlled arguments
@@ -94,6 +98,10 @@ def main() -> int:
             database_path=database,
             api_key=operator_key,
             token_signing_secret=signing_secret,
+            token_issuer=environment["SAMSARIX_CHAT_TOKEN_ISSUER"],
+            token_audience=environment["SAMSARIX_CHAT_TOKEN_AUDIENCE"],
+            token_max_lifetime_seconds=86_400,
+            token_clock_skew_seconds=30,
         )
         server = uvicorn.Server(
             uvicorn.Config(
