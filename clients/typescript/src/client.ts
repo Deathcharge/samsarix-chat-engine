@@ -34,6 +34,7 @@ export class SamsarixChatClient {
   readonly webSocketFactory?: WebSocketFactory;
   private readonly credentialProvider: CredentialProvider;
   private readonly fetchImplementation: typeof globalThis.fetch;
+  private pendingCredential: Promise<Credential> | undefined;
 
   constructor(options: SamsarixClientOptions) {
     this.baseUrl = normalizeBaseUrl(options.baseUrl);
@@ -49,10 +50,23 @@ export class SamsarixChatClient {
   }
 
   async credential(): Promise<Credential> {
-    const value =
-      typeof this.credentialProvider === "function" ? await this.credentialProvider() : this.credentialProvider;
-    validateCredential(value);
-    return value;
+    if (typeof this.credentialProvider !== "function") {
+      validateCredential(this.credentialProvider);
+      return this.credentialProvider;
+    }
+    if (this.pendingCredential === undefined) {
+      const provider = this.credentialProvider;
+      this.pendingCredential = Promise.resolve()
+        .then(() => provider())
+        .then((value) => {
+          validateCredential(value);
+          return value;
+        })
+        .finally(() => {
+          this.pendingCredential = undefined;
+        });
+    }
+    return this.pendingCredential;
   }
 
   async createRoom(payload: RoomCreate): Promise<Room> {
@@ -81,11 +95,7 @@ export class SamsarixChatClient {
   async exportRoom(roomId: string): Promise<Response> {
     const credential = await this.credential();
     const headers = new Headers({ Accept: "application/x-ndjson" });
-    if ("token" in credential) {
-      headers.set("Authorization", `Bearer ${credential.token}`);
-    } else {
-      headers.set("X-API-Key", credential.apiKey);
-    }
+    this.applyAuthHeaders(headers, credential);
     const response = await this.fetchImplementation(
       `${this.baseUrl}/v1/rooms/${encodeURIComponent(roomId)}/export`,
       { headers },
@@ -149,11 +159,7 @@ export class SamsarixChatClient {
     const credential = await this.credential();
     const headers = new Headers(options.headers);
     headers.set("Accept", "application/json");
-    if ("token" in credential) {
-      headers.set("Authorization", `Bearer ${credential.token}`);
-    } else {
-      headers.set("X-API-Key", credential.apiKey);
-    }
+    this.applyAuthHeaders(headers, credential);
     let body: string | undefined;
     if (options.body !== undefined) {
       headers.set("Content-Type", "application/json");
@@ -171,6 +177,14 @@ export class SamsarixChatClient {
       return undefined as T;
     }
     return (await response.json()) as T;
+  }
+
+  private applyAuthHeaders(headers: Headers, credential: Credential): void {
+    if ("token" in credential) {
+      headers.set("Authorization", `Bearer ${credential.token}`);
+    } else {
+      headers.set("X-API-Key", credential.apiKey);
+    }
   }
 }
 

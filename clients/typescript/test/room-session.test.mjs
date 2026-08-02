@@ -6,6 +6,15 @@ import test from "node:test";
 
 import { SamsarixChatClient, SamsarixConnectionError } from "../dist/index.js";
 
+const ROOM = {
+  id: "general",
+  name: "General",
+  description: "",
+  created_at: "2026-08-01T00:00:00Z",
+  archived_at: null,
+  frozen_at: null,
+};
+
 class FakeSocket {
   readyState = 0;
   onopen = null;
@@ -79,7 +88,7 @@ test("browser authentication, typed events, publish, ping, and close", async () 
   assert.deepEqual(sockets[0].sent[0], { type: "auth", token: "token-1" });
   sockets[0].receive({
     type: "ready",
-    room: {},
+    room: ROOM,
     username: "user",
     active_connections: 1,
     max_message_chars: 10,
@@ -125,7 +134,7 @@ test("unexpected loss refreshes credentials and reconnects with bounded state", 
   const connected = session.connect();
   await waitFor(() => sockets.length === 1);
   sockets[0].receive({ type: "auth.required", message: "authenticate" });
-  sockets[0].receive({ type: "ready", room: {}, username: "user", active_connections: 1, max_message_chars: 4000 });
+  sockets[0].receive({ type: "ready", room: ROOM, username: "user", active_connections: 1, max_message_chars: 4000 });
   await connected;
 
   sockets[0].serverClose(1006, "network loss");
@@ -133,7 +142,7 @@ test("unexpected loss refreshes credentials and reconnects with bounded state", 
   await waitFor(() => sockets.length === 2, "reconnect");
   sockets[1].receive({ type: "auth.required", message: "authenticate" });
   assert.deepEqual(sockets[1].sent[0], { type: "auth", token: "token-2" });
-  sockets[1].receive({ type: "ready", room: {}, username: "user", active_connections: 1, max_message_chars: 4000 });
+  sockets[1].receive({ type: "ready", room: ROOM, username: "user", active_connections: 1, max_message_chars: 4000 });
   await reconnected;
 
   assert.equal(credentialCalls, 2);
@@ -191,7 +200,7 @@ test("API-key sessions require username and authenticate without URL credentials
   assert.ok(!urls[0].includes("operator-secret"));
   sockets[0].receive({ type: "auth.required", message: "authenticate" });
   assert.deepEqual(sockets[0].sent[0], { type: "auth", api_key: "operator-secret" });
-  sockets[0].receive({ type: "ready", room: {}, username: "Operator", active_connections: 1, max_message_chars: 4000 });
+  sockets[0].receive({ type: "ready", room: ROOM, username: "Operator", active_connections: 1, max_message_chars: 4000 });
   await connected;
   session.close();
 
@@ -201,6 +210,9 @@ test("API-key sessions require username and authenticate without URL credentials
     assert.match(error.message, /username must be/);
     return true;
   });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(sockets.length, 1);
+  assert.equal(invalid.state, "closed");
 });
 
 test("invalid server frames close with protocol error and disconnected sends fail", async () => {
@@ -244,6 +256,58 @@ test("malformed event envelopes close cleanly with a protocol error", async () =
   assert.deepEqual(sockets[0].closes[0], [1002, "Invalid event envelope"]);
 });
 
+test("known event types must include their required payload", async () => {
+  const sockets = [];
+  const client = new SamsarixChatClient({
+    baseUrl: "https://chat.example",
+    credential: { token: "token" },
+    fetch: async () => new Response(),
+    webSocketFactory: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+  });
+  const session = client.roomSession("general", { reconnect: { enabled: false } });
+  const connected = session.connect();
+  await waitFor(() => sockets.length === 1);
+  sockets[0].receive({ type: "message.created" });
+  await assert.rejects(connected, SamsarixConnectionError);
+  assert.deepEqual(sockets[0].closes[0], [1002, "Invalid event envelope"]);
+});
+
+test("a manual connect after exhaustion receives a fresh retry budget", async () => {
+  const sockets = [];
+  const client = new SamsarixChatClient({
+    baseUrl: "https://chat.example",
+    credential: { token: "token" },
+    fetch: async () => new Response(),
+    webSocketFactory: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+  });
+  const session = client.roomSession("general", {
+    reconnect: { initialDelayMs: 0, maxDelayMs: 0, maxAttempts: 1, jitter: 0 },
+  });
+
+  const firstCycle = session.connect();
+  await waitFor(() => sockets.length === 1);
+  sockets[0].serverClose(1006, "first loss");
+  await assert.rejects(firstCycle, SamsarixConnectionError);
+  await waitFor(() => sockets.length === 2, "first retry");
+  sockets[1].serverClose(1006, "retry exhausted");
+  await waitFor(() => session.state === "closed", "closed after exhaustion");
+
+  const secondCycle = session.connect();
+  await waitFor(() => sockets.length === 3, "manual reconnect");
+  sockets[2].serverClose(1006, "second loss");
+  await assert.rejects(secondCycle, SamsarixConnectionError);
+  await waitFor(() => sockets.length === 4, "fresh retry");
+  session.close();
+});
+
 test("consumer callback failures are reported without disrupting state", async () => {
   const sockets = [];
   const reported = [];
@@ -270,7 +334,7 @@ test("consumer callback failures are reported without disrupting state", async (
 
   const connected = session.connect();
   await waitFor(() => sockets.length === 1);
-  sockets[0].receive({ type: "ready", room: {}, username: "user", active_connections: 1, max_message_chars: 4000 });
+  sockets[0].receive({ type: "ready", room: ROOM, username: "user", active_connections: 1, max_message_chars: 4000 });
   await connected;
 
   assert.equal(session.state, "connected");

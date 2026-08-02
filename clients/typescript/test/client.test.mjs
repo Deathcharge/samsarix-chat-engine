@@ -50,6 +50,32 @@ test("REST methods authenticate, encode identifiers, and preserve idempotency", 
   assert.deepEqual(JSON.parse(requests[0].init.body), { content: "hello" });
 });
 
+test("concurrent operations share one in-flight credential refresh", async () => {
+  let credentials = 0;
+  let releaseCredential;
+  const credentialReady = new Promise((resolve) => {
+    releaseCredential = resolve;
+  });
+  const client = new SamsarixChatClient({
+    baseUrl: "https://chat.example",
+    credential: async () => {
+      credentials += 1;
+      await credentialReady;
+      return { token: `token-${credentials}` };
+    },
+    fetch: async () => jsonResponse([]),
+  });
+
+  const first = client.listRooms();
+  const second = client.listRooms();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(credentials, 1);
+  releaseCredential();
+  await Promise.all([first, second]);
+  await client.listRooms();
+  assert.equal(credentials, 2);
+});
+
 test("operator operations set confirmation headers and accept empty responses", async () => {
   const requests = [];
   const client = new SamsarixChatClient({

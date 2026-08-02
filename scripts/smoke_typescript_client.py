@@ -76,14 +76,16 @@ def main() -> int:
             stderr=subprocess.DEVNULL,
         )
         try:
-            for _ in range(100):
+            readiness_deadline = time.monotonic() + 30
+            while time.monotonic() < readiness_deadline:
                 if server.poll() is not None:
                     raise RuntimeError("Samsarix server exited before becoming ready")
                 try:
                     if _request(base_url + "/readyz") == {"status": "ready"}:
                         break
                 except URLError:
-                    time.sleep(0.1)
+                    pass
+                time.sleep(0.1)
             else:
                 raise RuntimeError("Samsarix server did not become ready")
 

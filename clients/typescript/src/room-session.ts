@@ -92,6 +92,7 @@ export class RoomSession {
       this.rejectConnect = reject;
     });
     if (this.currentState !== "reconnecting") {
+      this.attempts = 0;
       void this.openSocket(false);
     }
     return this.connectPromise;
@@ -154,7 +155,14 @@ export class RoomSession {
       if (generation !== this.generation || this.manuallyClosed) {
         return;
       }
-      const url = websocketUrl(this.client.baseUrl, this.roomId, credential, this.username);
+      let url: string;
+      try {
+        url = websocketUrl(this.client.baseUrl, this.roomId, credential, this.username);
+      } catch (error) {
+        this.rejectPending(asConnectionError(error));
+        this.setState("closed");
+        return;
+      }
       const factory = this.client.webSocketFactory ?? defaultWebSocketFactory;
       const socket = factory(url);
       this.socket = socket;
@@ -294,21 +302,100 @@ export class RoomSession {
 }
 
 function isRoomEvent(value: unknown): value is RoomEvent {
-  if (typeof value !== "object" || value === null || !("type" in value) || typeof value.type !== "string") {
+  if (!isRecord(value) || typeof value.type !== "string") {
     return false;
   }
   if (!EVENT_TYPES.has(value.type)) {
     return false;
   }
-  if (value.type === "ready") {
-    return (
-      "max_message_chars" in value &&
-      typeof value.max_message_chars === "number" &&
-      Number.isInteger(value.max_message_chars) &&
-      value.max_message_chars > 0
-    );
+  switch (value.type) {
+    case "auth.required":
+      return isStringField(value, "message") && (!("example" in value) || isRecord(value.example));
+    case "error":
+      return isStringField(value, "code") && isStringField(value, "message");
+    case "history":
+      return (
+        "items" in value &&
+        Array.isArray(value.items) &&
+        value.items.every(isChatMessage) &&
+        isNullableStringField(value, "next_before")
+      );
+    case "member.banned":
+      return isStringField(value, "subject") && isStringField(value, "banned_until");
+    case "message.created":
+      return (
+        "message" in value &&
+        isChatMessage(value.message) &&
+        (!("idempotent_replay" in value) || typeof value.idempotent_replay === "boolean")
+      );
+    case "message.deleted":
+    case "message.updated":
+      return "message" in value && isChatMessage(value.message);
+    case "pong":
+      return true;
+    case "presence.joined":
+    case "presence.left":
+      return isStringField(value, "username") && isNonNegativeIntegerField(value, "active_connections");
+    case "ready":
+      return (
+        "room" in value &&
+        isRoom(value.room) &&
+        isStringField(value, "username") &&
+        isNonNegativeIntegerField(value, "active_connections") &&
+        "max_message_chars" in value &&
+        typeof value.max_message_chars === "number" &&
+        Number.isInteger(value.max_message_chars) &&
+        value.max_message_chars > 0
+      );
+    case "room.archived":
+    case "room.frozen":
+    case "room.unfrozen":
+      return "room" in value && isRoom(value.room);
   }
-  return true;
+  return false;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isStringField(value: Record<string, unknown>, field: string): boolean {
+  return typeof value[field] === "string";
+}
+
+function isNullableStringField(value: Record<string, unknown>, field: string): boolean {
+  return value[field] === null || typeof value[field] === "string";
+}
+
+function isNonNegativeIntegerField(value: Record<string, unknown>, field: string): boolean {
+  const fieldValue = value[field];
+  return typeof fieldValue === "number" && Number.isInteger(fieldValue) && fieldValue >= 0;
+}
+
+function isRoom(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isStringField(value, "id") &&
+    isStringField(value, "name") &&
+    isStringField(value, "description") &&
+    isStringField(value, "created_at") &&
+    isNullableStringField(value, "archived_at") &&
+    isNullableStringField(value, "frozen_at")
+  );
+}
+
+function isChatMessage(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isStringField(value, "id") &&
+    isStringField(value, "room_id") &&
+    isStringField(value, "sender") &&
+    isStringField(value, "content") &&
+    isStringField(value, "created_at") &&
+    isNullableStringField(value, "client_message_id") &&
+    isNullableStringField(value, "edited_at") &&
+    isNullableStringField(value, "deleted_at")
+  );
 }
 
 function websocketUrl(baseUrl: string, roomId: string, credential: Credential, username?: string): string {

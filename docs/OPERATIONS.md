@@ -96,6 +96,6 @@ Restoring replaces the live database state with the snapshot state. Messages and
 
 ## Upgrade and rollback
 
-Opening a v0.4 or v0.5 database with v0.6 migrates it to schema version 3. The migration preserves existing rooms/messages, adds nullable room freeze and message edit/delete timestamps, and creates stable-subject moderation controls. The earlier v0.4→v0.5 lifecycle additions are applied in the same pass when needed. The engine refuses a schema version newer than it understands.
+Opening a v0.4 or v0.5 database with v0.7 migrates it to schema version 3; v0.6 databases require no schema change. The migration preserves existing rooms/messages, adds nullable room freeze and message edit/delete timestamps, and creates stable-subject moderation controls. The earlier v0.4→v0.5 lifecycle additions are applied in the same pass when needed. The engine refuses a schema version newer than it understands.
 
-Take a verified backup before upgrade. Older binaries do not understand schema version 3 as a supported contract, so rollback means stopping v0.6 and restoring the pre-upgrade backup before starting the older version.
+Take a verified backup before upgrade. Version 0.6 understands the same schema, but releases before v0.6 do not. For a conservative rollback to any older release, stop v0.7 and restore the pre-v0.7 backup before starting the older version.
