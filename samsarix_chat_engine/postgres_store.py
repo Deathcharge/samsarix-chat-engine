@@ -26,7 +26,7 @@ from .models import (
     RoomCreate,
     WebhookDelivery,
 )
-from .postgres import PostgresFoundation, PostgresFoundationError
+from .postgres import POSTGRES_SCHEMA_VERSION, PostgresFoundation, PostgresFoundationError
 from .store import (
     ChatStorage,
     InvalidAuditCursorError,
@@ -148,7 +148,7 @@ class PostgresChatStore:
 
     async def check_ready(self) -> bool:
         try:
-            return await self.foundation.schema_version() >= 3
+            return await self.foundation.schema_version() >= POSTGRES_SCHEMA_VERSION
         except PostgresFoundationError:
             return False
 
