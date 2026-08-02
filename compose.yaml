@@ -1,0 +1,43 @@
+# Copyright (c) 2026 Samsarix LLC
+# SPDX-License-Identifier: MPL-2.0
+
+name: samsarix-chat
+
+services:
+  chat:
+    build:
+      context: .
+    image: samsarix-chat-engine:0.11.0
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    stop_grace_period: 30s
+    ports:
+      - "127.0.0.1:${SAMSARIX_CHAT_PORT:-8000}:8000"
+    environment:
+      SAMSARIX_CHAT_API_KEY_FILE: /run/secrets/operator_api_key
+      SAMSARIX_CHAT_TOKEN_SIGNING_SECRET_FILE: /run/secrets/token_signing_secret
+      SAMSARIX_CHAT_ALLOWED_ORIGINS: ${SAMSARIX_CHAT_ALLOWED_ORIGINS:-}
+    secrets:
+      - operator_api_key
+      - token_signing_secret
+    volumes:
+      - samsarix-data:/data
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    logging:
+      driver: local
+
+secrets:
+  operator_api_key:
+    file: ${SAMSARIX_CHAT_OPERATOR_SECRET_PATH:-./secrets/operator-api-key.txt}
+  token_signing_secret:
+    file: ${SAMSARIX_CHAT_TOKEN_SECRET_PATH:-./secrets/token-signing-secret.txt}
+
+volumes:
+  samsarix-data:

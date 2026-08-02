@@ -71,14 +71,23 @@ Attachments, search, reactions, threads, and mentions should be added only again
 
 This is deliberately per-room substring retrieval rather than global full-text ranking. It serves the named support-case journey without adding an external index, a migration, or a misleading scale claim.
 
-## v0.11 — measured multi-instance operation
+## v0.11 — hardened single-instance deployment
+
+- [x] add a multi-stage, non-root container image with exec-form shutdown and storage readiness health checks;
+- [x] provide a single-replica Compose profile with a read-only root filesystem, dropped capabilities, bounded temporary state, persistent SQLite volume, and loopback-only port mapping;
+- [x] support mounted one-line secret files for operator, token, and webhook secrets without exposing their contents;
+- [x] add CI image build/security/persistence smoke and backup/upgrade/rollback guidance.
+
+This makes the supported topology repeatable without implying that a container makes an in-process connection registry horizontally scalable.
+
+## v0.12 — measured multi-instance operation
 
 - define a broker/history adapter boundary without changing the single-instance default;
 - implement and test cross-worker fan-out, presence, distributed rate limits, and reconnect recovery;
 - run sustained load/soak and reconnect-storm tests and publish measured limits;
 - add OpenTelemetry hooks only when an operator needs them, with telemetry disabled by default.
 
-No horizontal-scale claim is acceptable before those tests pass. SQLite remains a coherent default for one process; a broker or external database must solve a demonstrated topology rather than decorate the architecture.
+No horizontal-scale claim is acceptable before those tests pass. Redis Pub/Sub is at-most-once and does not solve shared storage, migration/restore coordination, webhook leadership, or distributed quotas. A broker and shared authoritative database must solve a demonstrated topology together rather than decorate the architecture.
 
 ## Deliberate non-goals
 

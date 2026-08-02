@@ -1,12 +1,16 @@
 include CODE_OF_CONDUCT.md
 include CHANGELOG.md
 include CONTRIBUTING.md
+include .dockerignore
+include Dockerfile
 include LICENSE
 include NOTICE
 include SECURITY.md
+include compose.yaml
 recursive-include docs *.md
 recursive-include examples *.py
 recursive-include scripts *.py
+recursive-include secrets *.md
 recursive-include tests *.py
 recursive-include clients/typescript *.json *.md *.ts *.mjs LICENSE
 prune clients/typescript/dist

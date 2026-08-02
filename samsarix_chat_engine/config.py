@@ -48,6 +48,66 @@ def _read_env(suffix: str) -> str | None:
     return None
 
 
+def _read_secret_file(variable: str, path_value: str) -> str:
+    if not path_value.strip():
+        raise ConfigurationError(f"{variable} must name a readable secret file")
+    path = Path(path_value)
+    try:
+        with path.open("rb") as handle:
+            encoded = handle.read(4_098)
+    except OSError as exc:
+        raise ConfigurationError(f"{variable} must name a readable secret file") from exc
+    if len(encoded) > 4_097:
+        raise ConfigurationError(f"{variable} secret file must not exceed 4097 bytes")
+    try:
+        value = encoded.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ConfigurationError(f"{variable} secret file must contain UTF-8 text") from exc
+    value = value.removesuffix("\n").removesuffix("\r")
+    if not value or "\n" in value or "\r" in value or "\x00" in value:
+        raise ConfigurationError(f"{variable} secret file must contain exactly one non-empty text line")
+    return value
+
+
+def _read_secret_env(suffix: str) -> str | None:
+    canonical = f"SAMSARIX_CHAT_{suffix}"
+    canonical_file = f"{canonical}_FILE"
+    legacy = f"HELIX_CHAT_{suffix}"
+    legacy_file = f"{legacy}_FILE"
+    if canonical in os.environ and canonical_file in os.environ:
+        raise ConfigurationError(f"set only one of {canonical} or {canonical_file}")
+
+    canonical_value = os.environ.get(canonical)
+    if canonical_file in os.environ:
+        canonical_value = _read_secret_file(canonical_file, os.environ[canonical_file])
+    if canonical_value is not None:
+        if legacy in os.environ or legacy_file in os.environ:
+            warnings.warn(
+                f"legacy {legacy} configuration is ignored because canonical {canonical} configuration is set",
+                FutureWarning,
+                stacklevel=3,
+            )
+        return canonical_value
+
+    if legacy in os.environ and legacy_file in os.environ:
+        raise ConfigurationError(f"set only one of {legacy} or {legacy_file}")
+    if legacy_file in os.environ:
+        warnings.warn(
+            f"{legacy_file} is deprecated; use {canonical_file}",
+            FutureWarning,
+            stacklevel=3,
+        )
+        return _read_secret_file(legacy_file, os.environ[legacy_file])
+    if legacy in os.environ:
+        warnings.warn(
+            f"{legacy} is deprecated; use {canonical}",
+            FutureWarning,
+            stacklevel=3,
+        )
+        return os.environ[legacy]
+    return None
+
+
 def _read_int(suffix: str, default: int, *, minimum: int, maximum: int) -> int:
     name = f"SAMSARIX_CHAT_{suffix}"
     raw = _read_env(suffix)
@@ -296,8 +356,8 @@ class Settings:
     def from_env(cls) -> Settings:
         """Load settings from ``SAMSARIX_CHAT_*`` variables and legacy aliases."""
 
-        api_key = _read_env("API_KEY") or None
-        token_signing_secret = _read_env("TOKEN_SIGNING_SECRET") or None
+        api_key = _read_secret_env("API_KEY") or None
+        token_signing_secret = _read_secret_env("TOKEN_SIGNING_SECRET") or None
         webhook_url = _read_env("WEBHOOK_URL") or None
         configured_database = _read_env("DATABASE")
         return cls(
@@ -328,8 +388,8 @@ class Settings:
             websocket_send_timeout_seconds=_read_float("WS_SEND_TIMEOUT", 2.0, minimum=0.1, maximum=60),
             websocket_max_bytes=_read_int("WS_MAX_BYTES", 16_384, minimum=256, maximum=16_777_216),
             webhook_url=webhook_url,
-            webhook_signing_secret=_read_env("WEBHOOK_SIGNING_SECRET") or None,
-            webhook_previous_signing_secret=_read_env("WEBHOOK_PREVIOUS_SIGNING_SECRET") or None,
+            webhook_signing_secret=_read_secret_env("WEBHOOK_SIGNING_SECRET") or None,
+            webhook_previous_signing_secret=_read_secret_env("WEBHOOK_PREVIOUS_SIGNING_SECRET") or None,
             webhook_events=_read_webhook_events(webhook_url),
             webhook_timeout_seconds=_read_float("WEBHOOK_TIMEOUT", 10.0, minimum=0.1, maximum=30),
             webhook_max_attempts=_read_int("WEBHOOK_MAX_ATTEMPTS", 9, minimum=1, maximum=20),

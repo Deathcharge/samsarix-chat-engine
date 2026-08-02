@@ -39,6 +39,7 @@ clients/typescript/node_modules/
 *~
 .DS_Store
 data/
+secrets/*.txt
 *.db
 *.db-shm
 *.db-wal

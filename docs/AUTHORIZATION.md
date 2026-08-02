@@ -1,6 +1,6 @@
 # Identity and room authorization
 
-Version 0.10 supports two credential classes with deliberately different jobs:
+Version 0.11 supports two credential classes with deliberately different jobs:
 
 - `SAMSARIX_CHAT_API_KEY` is the deployment-wide operator credential. It can create and list rooms, inspect process statistics, and access every room. Keep it on trusted servers and administration workstations.
 - A signed access token represents one application user. It contains a subject, an expiry, allowed room IDs, and `room:read`, `room:write`, or `admin` permissions. Give ordinary clients only short-lived room tokens.
@@ -80,7 +80,7 @@ A read-only WebSocket remains connected when it attempts to publish and receives
 
 Tokens use HS256 with a fixed algorithm allowlist and the protected type `samsarix-access+jwt`. Verification requires `iss`, `aud`, `sub`, `iat`, `nbf`, `exp`, `jti`, `rooms`, and `permissions`; it rejects excessive lifetimes and malformed or duplicate authorization claims. Defaults are a 24-hour maximum lifetime and 30 seconds of clock skew.
 
-HS256 means every token issuer can also verify and mint tokens. Share the signing secret only with trusted backend components. Rotate it by restarting issuers and the engine with a new value; existing tokens are invalidated immediately. Token revocation lists, asymmetric signing, key IDs, and automated token-key rotation are not implemented in v0.10, so prefer lifetimes measured in minutes for browser clients. The webhook signing-secret rotation window is a separate outbound-delivery mechanism described in [Reliable application webhooks](WEBHOOKS.md).
+HS256 means every token issuer can also verify and mint tokens. Share the signing secret only with trusted backend components. Rotate it by restarting issuers and the engine with a new value; existing tokens are invalidated immediately. Token revocation lists, asymmetric signing, key IDs, and automated token-key rotation are not implemented in v0.11, so prefer lifetimes measured in minutes for browser clients. The webhook signing-secret rotation window is a separate outbound-delivery mechanism described in [Reliable application webhooks](WEBHOOKS.md). Container deployments should use the mutually exclusive `_FILE` secret forms described in [Container deployment](CONTAINER_DEPLOYMENT.md).
 
 Read state uses the exact signed `sub` as its durable key. Choose an opaque stable account ID, never a mutable display name or email address. The operator API key deliberately cannot access personal read-state endpoints because it represents a deployment rather than one end user.
 

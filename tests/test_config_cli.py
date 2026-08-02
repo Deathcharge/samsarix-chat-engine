@@ -18,7 +18,7 @@ from samsarix_chat_engine.config import ConfigurationError, Settings
 
 
 def test_public_api_and_parser_help() -> None:
-    assert samsarix_chat_engine.__version__ == "0.10.0"
+    assert samsarix_chat_engine.__version__ == "0.11.0"
     assert callable(samsarix_chat_engine.create_app)
     help_text = build_parser().format_help()
     assert "serve" in help_text
@@ -88,6 +88,64 @@ def test_settings_from_env_and_validation(monkeypatch: pytest.MonkeyPatch, tmp_p
     monkeypatch.setenv("SAMSARIX_CHAT_WS_AUTH_TIMEOUT", "slow")
     with pytest.raises(ConfigurationError, match="must be a number"):
         Settings.from_env()
+
+
+def test_sensitive_settings_support_single_line_secret_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    api_key = tmp_path / "operator-key"
+    token_secret = tmp_path / "token-secret"
+    webhook_secret = tmp_path / "webhook-secret"
+    api_key.write_text("file-operator-key-1234\n", encoding="utf-8")
+    token_secret.write_bytes(b"file-token-signing-secret-at-least-32-bytes\r\n")
+    encoded_webhook = "whsec_" + base64.b64encode(b"file-webhook-secret-is-32-bytes!!").decode("ascii")
+    webhook_secret.write_text(encoded_webhook + "\n", encoding="utf-8")
+    monkeypatch.setenv("SAMSARIX_CHAT_API_KEY_FILE", str(api_key))
+    monkeypatch.setenv("SAMSARIX_CHAT_TOKEN_SIGNING_SECRET_FILE", str(token_secret))
+    monkeypatch.setenv("SAMSARIX_CHAT_WEBHOOK_SIGNING_SECRET_FILE", str(webhook_secret))
+    monkeypatch.setenv("SAMSARIX_CHAT_WEBHOOK_URL", "https://hooks.example.com/chat")
+
+    settings = Settings.from_env()
+
+    assert settings.api_key == "file-operator-key-1234"
+    assert settings.token_signing_secret == "file-token-signing-secret-at-least-32-bytes"
+    assert settings.webhook_signing_secret == encoded_webhook
+
+
+def test_secret_file_configuration_fails_closed_without_exposing_contents(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    secret_file = tmp_path / "operator-key"
+    secret_file.write_text("private-first-line\nprivate-second-line\n", encoding="utf-8")
+    monkeypatch.setenv("SAMSARIX_CHAT_API_KEY_FILE", str(secret_file))
+
+    with pytest.raises(ConfigurationError, match="exactly one non-empty text line") as error:
+        Settings.from_env()
+    assert "private-first-line" not in str(error.value)
+
+    monkeypatch.setenv("SAMSARIX_CHAT_API_KEY", "direct-operator-key-1234")
+    with pytest.raises(ConfigurationError, match="set only one"):
+        Settings.from_env()
+
+
+@pytest.mark.parametrize("contents", [b"", b"\xff\xfe", b"x" * 4_098])
+def test_secret_files_reject_empty_invalid_or_oversized_content(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, contents: bytes
+) -> None:
+    secret_file = tmp_path / "invalid-secret"
+    secret_file.write_bytes(contents)
+    monkeypatch.setenv("SAMSARIX_CHAT_API_KEY_FILE", str(secret_file))
+
+    with pytest.raises(ConfigurationError, match="secret file"):
+        Settings.from_env()
+
+
+def test_secret_file_must_be_readable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    missing = tmp_path / "missing-operator-key"
+    monkeypatch.setenv("SAMSARIX_CHAT_API_KEY_FILE", str(missing))
+
+    with pytest.raises(ConfigurationError, match="must name a readable secret file") as error:
+        Settings.from_env()
+
+    assert str(missing) not in str(error.value)
 
 
 def test_cli_refuses_unauthenticated_public_bind(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -176,7 +234,7 @@ def test_legacy_import_and_environment_aliases(monkeypatch: pytest.MonkeyPatch, 
     with pytest.warns(DeprecationWarning, match="import samsarix_chat_engine"):
         legacy_package = importlib.import_module("helix_chat_engine")
     assert legacy_package.Settings is Settings
-    assert legacy_package.__version__ == "0.10.0"
+    assert legacy_package.__version__ == "0.11.0"
     assert importlib.import_module("helix_chat_engine.app").create_app is samsarix_chat_engine.create_app
     assert importlib.import_module("helix_chat_engine.cli").main is main
     assert importlib.import_module("helix_chat_engine.config").Settings is Settings
@@ -199,6 +257,31 @@ def test_canonical_environment_takes_precedence(monkeypatch: pytest.MonkeyPatch,
     with pytest.warns(FutureWarning, match="ignored"):
         settings = Settings.from_env()
     assert settings.database_path == tmp_path / "canonical.db"
+
+
+def test_legacy_secret_file_alias_warns(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    legacy_secret = tmp_path / "legacy-operator-key"
+    legacy_secret.write_text("legacy-file-operator-key\n", encoding="utf-8")
+    monkeypatch.setenv("HELIX_CHAT_API_KEY_FILE", str(legacy_secret))
+
+    with pytest.warns(FutureWarning, match="SAMSARIX_CHAT_API_KEY_FILE"):
+        settings = Settings.from_env()
+
+    assert settings.api_key == "legacy-file-operator-key"
+
+
+def test_canonical_secret_file_takes_precedence_over_legacy_secret(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    canonical_secret = tmp_path / "canonical-operator-key"
+    canonical_secret.write_text("canonical-file-operator-key\n", encoding="utf-8")
+    monkeypatch.setenv("SAMSARIX_CHAT_API_KEY_FILE", str(canonical_secret))
+    monkeypatch.setenv("HELIX_CHAT_API_KEY", "legacy-direct-operator-key")
+
+    with pytest.warns(FutureWarning, match="ignored"):
+        settings = Settings.from_env()
+
+    assert settings.api_key == "canonical-file-operator-key"
 
 
 def test_legacy_default_database_is_reused(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

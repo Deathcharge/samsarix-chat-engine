@@ -29,6 +29,8 @@ python -m twine check dist/*
 
 Add tests that exercise production code. Do not use mocks as a substitute for the primary SQLite, HTTP, or WebSocket behavior. Update `docs/API_REFERENCE.md` for protocol changes and `docs/PRODUCTIZATION.md` when a P0/P1 decision or release gate changes.
 
+Changes to `Dockerfile`, `compose.yaml`, secret-file configuration, or container documentation must also pass the Linux `container-image` CI job. It builds with a fresh base, verifies non-root/read-only execution, exercises authenticated persistence across restart, and removes its test volume.
+
 ## Pull requests
 
 - Explain the user problem and compatibility impact.
