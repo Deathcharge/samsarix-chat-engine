@@ -307,6 +307,8 @@ class ChatStorage(Protocol):
 
     async def initialize(self) -> None: ...
 
+    async def close(self) -> None: ...
+
     async def check_ready(self) -> bool: ...
 
     async def create_room(self, payload: RoomCreate, *, actor: str = "local-operator") -> Room: ...
@@ -460,6 +462,11 @@ class ChatStore:
         """Create or migrate the database schema without discarding v0.4 data."""
 
         await asyncio.to_thread(self._initialize_sync)
+
+    async def close(self) -> None:
+        """Release backend resources; per-operation SQLite connections need no action."""
+
+        return None
 
     async def check_ready(self) -> bool:
         """Return whether the database can execute a trivial query."""

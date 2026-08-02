@@ -463,9 +463,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     webhook_dispatcher.stop()
                 if webhook_task is not None:
                     await webhook_task
-                await manager.close_all()
             finally:
-                lifecycle_lock.release()
+                try:
+                    await manager.close_all()
+                finally:
+                    try:
+                        await store.close()
+                    finally:
+                        lifecycle_lock.release()
 
     application = FastAPI(
         title="Samsarix Chat Engine",
