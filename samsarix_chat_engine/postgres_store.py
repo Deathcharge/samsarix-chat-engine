@@ -728,7 +728,7 @@ class PostgresChatStore:
                     false
                 )
                 WHERE room_id = %s
-                  AND event_type LIKE 'message.%'
+                  AND event_type LIKE 'message.%%'
                   AND payload #>> '{message,id}' = ANY(%s::text[])
                 """,
                 (room_id, message_ids),
