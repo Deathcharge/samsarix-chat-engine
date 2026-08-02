@@ -23,11 +23,11 @@ from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
-POSTGRES_SCHEMA_VERSION = 1
+POSTGRES_SCHEMA_VERSION = 2
 POSTGRES_MIGRATION_LOCK_ID = 7_495_346_927_831_819_041
 POSTGRES_EVENT_SEQUENCE_LOCK_ID = 7_495_346_927_831_819_042
 REALTIME_CHANNEL = "samsarix_realtime_v1"
-MAX_EVENT_PAYLOAD_BYTES = 64 * 1024
+MAX_EVENT_PAYLOAD_BYTES = 128 * 1024
 MAX_INSTANCE_ID_CHARS = 128
 MAX_EVENT_TYPE_CHARS = 80
 _INSTANCE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -358,7 +358,7 @@ class PostgresFoundation:
                             char_length(event_type) BETWEEN 1 AND 80
                             AND event_type ~ '^[a-z][a-z0-9_.-]*$'
                         ),
-                        payload JSONB NOT NULL CHECK (octet_length(payload::text) <= 131072),
+                        payload JSONB NOT NULL CHECK (octet_length(payload::text) <= 262144),
                         created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
                     )
                     """
@@ -374,6 +374,90 @@ class PostgresFoundation:
                         lease_expires_at TIMESTAMPTZ NOT NULL,
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
                     )
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS public.samsarix_rooms (
+                        id TEXT PRIMARY KEY CHECK (
+                            char_length(id) BETWEEN 1 AND 64
+                            AND id ~ '^[a-z0-9][a-z0-9_-]*$'
+                        ),
+                        name TEXT NOT NULL CHECK (char_length(name) BETWEEN 1 AND 80),
+                        description TEXT NOT NULL DEFAULT '' CHECK (char_length(description) <= 500),
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                        archived_at TIMESTAMPTZ,
+                        frozen_at TIMESTAMPTZ
+                    )
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS public.samsarix_messages (
+                        id TEXT PRIMARY KEY CHECK (char_length(id) BETWEEN 1 AND 128),
+                        room_id TEXT NOT NULL REFERENCES public.samsarix_rooms(id) ON DELETE CASCADE,
+                        sender TEXT NOT NULL CHECK (char_length(sender) BETWEEN 1 AND 64),
+                        author_subject TEXT CHECK (
+                            author_subject IS NULL OR char_length(author_subject) BETWEEN 1 AND 64
+                        ),
+                        content TEXT NOT NULL CHECK (char_length(content) <= 100000),
+                        search_content TEXT NOT NULL CHECK (char_length(search_content) <= 100000),
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                        client_message_id TEXT CHECK (
+                            client_message_id IS NULL OR char_length(client_message_id) BETWEEN 1 AND 128
+                        ),
+                        edited_at TIMESTAMPTZ,
+                        deleted_at TIMESTAMPTZ,
+                        UNIQUE (room_id, client_message_id)
+                    )
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS samsarix_messages_room_order
+                    ON public.samsarix_messages (room_id, created_at DESC, id DESC)
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS samsarix_messages_global_order
+                    ON public.samsarix_messages (created_at DESC, id DESC)
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS public.samsarix_room_member_controls (
+                        room_id TEXT NOT NULL REFERENCES public.samsarix_rooms(id) ON DELETE CASCADE,
+                        subject TEXT NOT NULL CHECK (char_length(subject) BETWEEN 1 AND 64),
+                        muted_until TIMESTAMPTZ,
+                        banned_until TIMESTAMPTZ,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                        PRIMARY KEY (room_id, subject)
+                    )
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS samsarix_room_member_controls_subject
+                    ON public.samsarix_room_member_controls (subject, room_id)
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS public.samsarix_audit_events (
+                        id TEXT PRIMARY KEY CHECK (char_length(id) BETWEEN 1 AND 128),
+                        action TEXT NOT NULL CHECK (char_length(action) BETWEEN 1 AND 80),
+                        actor TEXT NOT NULL CHECK (char_length(actor) BETWEEN 1 AND 128),
+                        room_id TEXT,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                        details JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (octet_length(details::text) <= 131072)
+                    )
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS samsarix_audit_events_order
+                    ON public.samsarix_audit_events (created_at DESC, id DESC)
                     """
                 )
                 await connection.execute(
@@ -404,7 +488,7 @@ def _validate_event(room_id: str, event_type: str, payload: dict[str, Any]) -> d
     except (TypeError, ValueError):
         raise InvalidRealtimeEventError("realtime event payload must be finite JSON") from None
     if len(encoded) > MAX_EVENT_PAYLOAD_BYTES:
-        raise InvalidRealtimeEventError("realtime event payload exceeds 64 KiB")
+        raise InvalidRealtimeEventError("realtime event payload exceeds 128 KiB")
     return cast(dict[str, Any], json.loads(encoded))
 
 

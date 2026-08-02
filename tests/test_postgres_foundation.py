@@ -35,7 +35,7 @@ def test_event_validation_is_bounded_and_canonical() -> None:
     with pytest.raises(InvalidRealtimeEventError):
         _validate_event("room", "message.created", {"invalid": float("nan")})
     with pytest.raises(InvalidRealtimeEventError):
-        _validate_event("room", "message.created", {"content": "x" * (64 * 1024)})
+        _validate_event("room", "message.created", {"content": "x" * (128 * 1024)})
 
 
 def test_pool_configuration_rejects_invalid_bounds_without_echoing_conninfo() -> None:
@@ -161,7 +161,10 @@ async def test_concurrent_initialization_is_serialized(clean_test_database: str)
     second = PostgresFoundation(clean_test_database)
     try:
         await asyncio.gather(first.open(), second.open())
-        assert await asyncio.gather(first.schema_version(), second.schema_version()) == [1, 1]
+        assert await asyncio.gather(first.schema_version(), second.schema_version()) == [
+            POSTGRES_SCHEMA_VERSION,
+            POSTGRES_SCHEMA_VERSION,
+        ]
     finally:
         await asyncio.gather(first.close(), second.close())
 
@@ -244,4 +247,8 @@ async def _reset_test_database(conninfo: str) -> None:
             raise RuntimeError("live PostgreSQL tests require the dedicated samsarix_test database")
         await connection.execute("DROP TABLE IF EXISTS public.samsarix_instance_cursors")
         await connection.execute("DROP TABLE IF EXISTS public.samsarix_realtime_events")
+        await connection.execute("DROP TABLE IF EXISTS public.samsarix_room_member_controls")
+        await connection.execute("DROP TABLE IF EXISTS public.samsarix_messages")
+        await connection.execute("DROP TABLE IF EXISTS public.samsarix_rooms")
+        await connection.execute("DROP TABLE IF EXISTS public.samsarix_audit_events")
         await connection.execute("DROP TABLE IF EXISTS public.samsarix_schema_metadata")
