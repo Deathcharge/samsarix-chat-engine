@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import quote, urlparse
 
-from .store import ChatStore, PendingWebhook, WebhookDeliveryNotFoundError
+from .store import ChatStorage, PendingWebhook, WebhookDeliveryNotFoundError
 
 logger = logging.getLogger(__name__)
 _RETRY_SCHEDULE_SECONDS = (5.0, 300.0, 1_800.0, 7_200.0, 18_000.0, 36_000.0, 50_400.0, 72_000.0)
@@ -212,7 +212,7 @@ class WebhookDispatcher:
 
     def __init__(
         self,
-        store: ChatStore,
+        store: ChatStorage,
         *,
         url: str,
         secrets: tuple[bytes, ...],

@@ -18,7 +18,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import IO, Any, TypeVar
+from typing import IO, Any, Protocol, TypeVar
 
 from .models import (
     AuditEvent,
@@ -292,6 +292,145 @@ class PendingWebhook:
     payload: bytes
 
 
+class MessageStream(Protocol):
+    """Closable, synchronous message stream used by export responses."""
+
+    def __iter__(self) -> Iterator[Message]: ...
+
+    def __next__(self) -> Message: ...
+
+    def close(self) -> None: ...
+
+
+class ChatStorage(Protocol):
+    """Storage contract implemented by SQLite and the planned PostgreSQL backend."""
+
+    async def initialize(self) -> None: ...
+
+    async def close(self) -> None: ...
+
+    async def check_ready(self) -> bool: ...
+
+    async def create_room(self, payload: RoomCreate, *, actor: str = "local-operator") -> Room: ...
+
+    async def get_room(self, room_id: str) -> Room | None: ...
+
+    async def list_rooms(self, *, limit: int = 100) -> list[Room]: ...
+
+    async def set_room_state(
+        self,
+        room_id: str,
+        *,
+        archived: bool | None,
+        frozen: bool | None,
+        actor: str,
+    ) -> tuple[Room, frozenset[str]]: ...
+
+    async def delete_room(self, room_id: str, *, actor: str) -> int: ...
+
+    async def prepare_export(self, room_id: str, *, actor: str) -> MessageStream: ...
+
+    async def create_message(
+        self,
+        *,
+        room_id: str,
+        sender: str,
+        content: str,
+        client_message_id: str | None,
+        allow_frozen: bool,
+        member_subject: str | None = None,
+        author_subject: str | None = None,
+    ) -> tuple[Message, bool]: ...
+
+    async def update_message(
+        self,
+        *,
+        room_id: str,
+        message_id: str,
+        actor: str,
+        content: str,
+        is_admin: bool,
+        member_subject: str | None = None,
+    ) -> Message: ...
+
+    async def delete_message(
+        self,
+        *,
+        room_id: str,
+        message_id: str,
+        actor: str,
+        is_admin: bool,
+        member_subject: str | None = None,
+    ) -> tuple[Message, bool]: ...
+
+    async def get_member_moderation(self, room_id: str, subject: str) -> MemberModeration | None: ...
+
+    async def set_member_moderation(
+        self,
+        room_id: str,
+        subject: str,
+        payload: MemberModerationUpdate,
+        *,
+        actor: str,
+    ) -> MemberModeration: ...
+
+    async def list_messages(
+        self,
+        room_id: str,
+        *,
+        limit: int = 50,
+        before: str | None = None,
+    ) -> tuple[list[Message], str | None]: ...
+
+    async def search_messages(
+        self,
+        room_id: str,
+        query: str,
+        *,
+        limit: int = 50,
+        before: str | None = None,
+    ) -> tuple[list[Message], str | None]: ...
+
+    async def get_read_state(self, room_id: str, subject: str) -> ReadState: ...
+
+    async def mark_read(self, room_id: str, subject: str, message_id: str | None) -> ReadState: ...
+
+    async def clear_read_state(self, room_id: str, subject: str) -> None: ...
+
+    async def list_audit_events(
+        self,
+        *,
+        limit: int = 50,
+        before: str | None = None,
+    ) -> tuple[list[AuditEvent], str | None]: ...
+
+    async def list_webhook_deliveries(
+        self,
+        *,
+        limit: int = 50,
+        before: str | None = None,
+        status: str | None = None,
+    ) -> tuple[list[WebhookDelivery], str | None]: ...
+
+    async def next_webhook_delivery(self, now: datetime) -> PendingWebhook | None: ...
+
+    async def record_webhook_attempt(
+        self,
+        delivery_id: str,
+        *,
+        attempted_at: datetime,
+        status_code: int | None,
+        error: str | None,
+        next_attempt_at: datetime | None,
+        delivered: bool,
+        failed: bool,
+    ) -> None: ...
+
+    async def retry_webhook_delivery(self, delivery_id: str) -> WebhookDelivery: ...
+
+    async def run_retention(self, *, actor: str) -> tuple[int, datetime]: ...
+
+
 class ChatStore:
     """Small asynchronous facade over a per-operation SQLite connection."""
 
@@ -323,6 +462,11 @@ class ChatStore:
         """Create or migrate the database schema without discarding v0.4 data."""
 
         await asyncio.to_thread(self._initialize_sync)
+
+    async def close(self) -> None:
+        """Release backend resources; per-operation SQLite connections need no action."""
+
+        return None
 
     async def check_ready(self) -> bool:
         """Return whether the database can execute a trivial query."""

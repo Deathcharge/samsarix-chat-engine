@@ -5,6 +5,7 @@ import logging
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -410,3 +411,19 @@ def test_newer_database_schema_is_refused_without_mutation(tmp_path) -> None:
 
     with closing(sqlite3.connect(database)) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
+
+
+@pytest.mark.asyncio
+async def test_sqlite_store_close_is_idempotent(tmp_path: Path) -> None:
+    store = ChatStore(
+        tmp_path / "close.db",
+        max_rooms=10,
+        max_stored_messages=100,
+        max_stored_messages_per_room=50,
+    )
+    await store.initialize()
+
+    await store.close()
+    await store.close()
+
+    assert await store.check_ready()

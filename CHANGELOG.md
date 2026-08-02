@@ -2,6 +2,18 @@
 
 This project follows semantic versioning while it is in alpha: minor versions may add or revise public contracts, and those changes are called out here.
 
+## Unreleased
+
+### Added
+
+- Accepted PostgreSQL multi-instance architecture and explicit cross-process correctness, recovery, capacity, moderation, webhook, migration, and failure-test gates for v0.13.
+- Storage-neutral `ChatStorage` protocol between application/webhook orchestration and the existing SQLite backend.
+
+### Security and operations
+
+- Multi-process SQLite is explicitly rejected: WAL is same-host-only, single-writer, and current SQLite documentation identifies a concurrent WAL-reset corruption race affecting versions through 3.51.2.
+- Version 0.12 remains a one-process/one-replica release until the PostgreSQL acceptance gates pass; no horizontal-scale claim is introduced by this architecture increment.
+
 ## 0.12.0 — 2026-08-02
 
 ### Added
