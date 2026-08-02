@@ -56,3 +56,33 @@ async def test_failed_send_evicts_connection_and_unregister_is_idempotent() -> N
     assert await manager.send(websocket, {"type": "test"}) is False
     assert manager.active_connections == 0
     assert await manager.unregister(websocket) is None
+
+
+@pytest.mark.asyncio
+async def test_close_room_notifies_and_removes_only_target_room() -> None:
+    manager = ConnectionManager(max_connections=3, max_per_room=3, send_timeout=0.1)
+    target = FakeWebSocket()
+    other = FakeWebSocket()
+    await manager.register(as_websocket(target), "target", "A")
+    await manager.register(as_websocket(other), "other", "B")
+
+    await manager.close_room("target", {"type": "room.archived"})
+
+    assert target.sent == [{"type": "room.archived"}]
+    assert target.closed == [(4409, "Room archived")]
+    assert other.sent == []
+    assert manager.active_connections == 1
+    assert manager.room_connections("target") == 0
+    assert manager.room_connections("other") == 1
+
+
+@pytest.mark.asyncio
+async def test_close_room_attempts_close_when_notification_fails() -> None:
+    manager = ConnectionManager(max_connections=1, max_per_room=1, send_timeout=0.1)
+    target = FakeWebSocket(fail_send=True)
+    await manager.register(as_websocket(target), "target", "A")
+
+    await manager.close_room("target", {"type": "room.archived"})
+
+    assert target.closed == [(4409, "Room archived")]
+    assert manager.active_connections == 0

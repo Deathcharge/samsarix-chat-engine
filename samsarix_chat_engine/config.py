@@ -50,6 +50,20 @@ def _read_int(suffix: str, default: int, *, minimum: int, maximum: int) -> int:
     return value
 
 
+def _read_optional_int(suffix: str, *, minimum: int, maximum: int) -> int | None:
+    raw = _read_env(suffix)
+    if raw is None or not raw.strip():
+        return None
+    name = f"SAMSARIX_CHAT_{suffix}"
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ConfigurationError(f"{name} must be an integer") from exc
+    if not minimum <= value <= maximum:
+        raise ConfigurationError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
 def _read_float(suffix: str, default: float, *, minimum: float, maximum: float) -> float:
     name = f"SAMSARIX_CHAT_{suffix}"
     raw = _read_env(suffix)
@@ -106,6 +120,8 @@ class Settings:
     max_rooms: int = 1_000
     max_stored_messages: int = 100_000
     max_stored_messages_per_room: int = 10_000
+    message_retention_days: int | None = None
+    max_audit_events: int = 100_000
     websocket_auth_timeout_seconds: float = 5.0
     websocket_send_timeout_seconds: float = 2.0
     websocket_max_bytes: int = 16_384
@@ -131,6 +147,7 @@ class Settings:
             "max_rooms": (self.max_rooms, 1, 1_000_000),
             "max_stored_messages": (self.max_stored_messages, 1, 10_000_000),
             "max_stored_messages_per_room": (self.max_stored_messages_per_room, 1, 1_000_000),
+            "max_audit_events": (self.max_audit_events, 100, 10_000_000),
             "websocket_max_bytes": (self.websocket_max_bytes, 256, 16_777_216),
             "token_max_lifetime_seconds": (self.token_max_lifetime_seconds, 60, 604_800),
             "token_clock_skew_seconds": (self.token_clock_skew_seconds, 0, 300),
@@ -142,6 +159,8 @@ class Settings:
             raise ConfigurationError("max_connections_per_room cannot exceed max_connections")
         if self.max_stored_messages_per_room > self.max_stored_messages:
             raise ConfigurationError("max_stored_messages_per_room cannot exceed max_stored_messages")
+        if self.message_retention_days is not None and not 1 <= self.message_retention_days <= 3_650:
+            raise ConfigurationError("message_retention_days must be between 1 and 3650")
         if not 0.1 <= self.websocket_auth_timeout_seconds <= 60:
             raise ConfigurationError("websocket_auth_timeout_seconds must be between 0.1 and 60")
         if not 0.1 <= self.websocket_send_timeout_seconds <= 60:
@@ -189,6 +208,8 @@ class Settings:
             max_stored_messages_per_room=_read_int(
                 "MAX_STORED_MESSAGES_PER_ROOM", 10_000, minimum=1, maximum=1_000_000
             ),
+            message_retention_days=_read_optional_int("MESSAGE_RETENTION_DAYS", minimum=1, maximum=3_650),
+            max_audit_events=_read_int("MAX_AUDIT_EVENTS", 100_000, minimum=100, maximum=10_000_000),
             websocket_auth_timeout_seconds=_read_float("WS_AUTH_TIMEOUT", 5.0, minimum=0.1, maximum=60),
             websocket_send_timeout_seconds=_read_float("WS_SEND_TIMEOUT", 2.0, minimum=0.1, maximum=60),
             websocket_max_bytes=_read_int("WS_MAX_BYTES", 16_384, minimum=256, maximum=16_777_216),

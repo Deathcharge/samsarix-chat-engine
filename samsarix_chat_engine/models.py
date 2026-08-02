@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -33,6 +33,13 @@ class Room(APIModel):
     name: str
     description: str
     created_at: datetime
+    archived_at: datetime | None = None
+
+
+class RoomUpdate(APIModel):
+    """Administrative room lifecycle update."""
+
+    archived: bool
 
 
 class MessageCreate(APIModel):
@@ -66,6 +73,31 @@ class MessagePage(APIModel):
 
     items: list[Message]
     next_before: str | None
+
+
+class AuditEvent(APIModel):
+    """Administrative event containing metadata but no message body or credential."""
+
+    id: str
+    action: str
+    actor: str
+    room_id: str | None
+    created_at: datetime
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class AuditEventPage(APIModel):
+    """Newest administrative events and an older-page cursor."""
+
+    items: list[AuditEvent]
+    next_before: str | None
+
+
+class RetentionResult(APIModel):
+    """Result of an explicit retention pass."""
+
+    deleted_messages: int
+    cutoff: datetime
 
 
 class WebSocketMessage(APIModel):

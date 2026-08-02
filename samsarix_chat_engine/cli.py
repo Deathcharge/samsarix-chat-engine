@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import logging
+import sqlite3
 import sys
 import warnings
 from collections.abc import Sequence
@@ -16,6 +17,7 @@ from . import __version__
 from .app import create_app
 from .auth import AccessTokenService, Permission
 from .config import ConfigurationError, Settings
+from .store import DatabaseInUseError, DatabaseLifecycleLock, copy_sqlite_database
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -57,6 +59,15 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SECONDS",
         help="token lifetime in seconds (default: 3600)",
     )
+    database = subparsers.add_parser("database", help="back up or restore the SQLite database")
+    database.add_argument("--database", type=Path, help="database path (overrides SAMSARIX_CHAT_DATABASE)")
+    database_commands = database.add_subparsers(dest="database_command", required=True)
+    backup = database_commands.add_parser("backup", help="create a consistent SQLite snapshot")
+    backup.add_argument("output", type=Path, help="new backup file path")
+    backup.add_argument("--replace", action="store_true", help="replace an existing backup file")
+    restore = database_commands.add_parser("restore", help="restore a database from a snapshot")
+    restore.add_argument("input", type=Path, help="backup file path")
+    restore.add_argument("--replace", action="store_true", help="replace an existing database")
     return parser
 
 
@@ -80,7 +91,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         settings = Settings.from_env()
-        if args.command == "serve" and args.database is not None:
+        if args.command in {"serve", "database"} and args.database is not None:
             settings = settings.with_database_path(args.database)
     except ConfigurationError as exc:
         parser.error(str(exc))
@@ -106,6 +117,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         except ValueError as exc:
             parser.error(str(exc))
         print(issued)
+        return 0
+
+    if args.command == "database":
+        try:
+            if args.database_command == "backup":
+                copy_sqlite_database(settings.database_path, args.output, replace=args.replace)
+                completed = args.output.resolve()
+            else:
+                with DatabaseLifecycleLock(settings.database_path):
+                    copy_sqlite_database(args.input, settings.database_path, replace=args.replace)
+                completed = settings.database_path.resolve()
+        except (DatabaseInUseError, FileExistsError, FileNotFoundError, OSError, ValueError, sqlite3.Error) as exc:
+            parser.error(str(exc))
+        print(completed)
         return 0
 
     if not 1 <= args.port <= 65_535:
