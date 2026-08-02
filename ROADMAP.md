@@ -58,9 +58,9 @@ Attachments, search, reactions, threads, and mentions should be added only again
 
 ## v0.9 — reliable application delivery
 
-- add signed webhooks for committed message and moderation events with timeouts, bounded retries, replay protection, and idempotency;
-- expose delivery health and dead-letter recovery without weakening local message commits;
-- document receiver verification, secret rotation, and failure-mode runbooks.
+- [x] add signed webhooks for committed message and moderation events with timeouts, bounded retries, replay protection, and idempotency;
+- [x] expose delivery health and terminal-failure recovery without weakening local message commits;
+- [x] document receiver verification, secret rotation, network/privacy boundaries, and failure-mode runbooks.
 
 ## v0.10 — measured multi-instance operation
 

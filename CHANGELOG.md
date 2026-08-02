@@ -2,6 +2,29 @@
 
 This project follows semantic versioning while it is in alpha: minor versions may add or revise public contracts, and those changes are called out here.
 
+## 0.9.0 — 2026-08-01
+
+### Added
+
+- Transactional SQLite webhook outbox for selected committed message create/update/delete and member-moderation events.
+- Standard Webhooks HMAC-SHA256 ID/timestamp/body signatures with a temporary previous-secret rotation window.
+- Restart-safe at-least-once background delivery, bounded multi-day retries with jitter, `Retry-After` handling, and stable replay IDs.
+- Admin-only delivery metadata/filter/pagination and manual replay endpoints that omit message payloads and receiver bodies.
+- Receiver verification, retry recovery, rotation, SSRF/egress, privacy, backup, and rollback runbooks.
+- SQLite schema v5 with an empty in-place outbox migration from earlier supported versions.
+
+### Changed
+
+- Python distribution and service metadata advance to 0.9.0; the TypeScript client remains 0.2.0 because its public protocol surface is unchanged.
+- Optional webhook-enabled writes fail atomically with `507 webhook_capacity_reached` only when every row at the configured outbox cap is still pending.
+
+### Security, privacy, and reliability
+
+- Remote destinations require HTTPS, redirects and URL credentials/query secrets are rejected, platform TLS verification remains enabled, and non-public address resolution is denied unless a trusted operator explicitly opts in.
+- Every network attempt has a bounded timeout; secrets and receiver response bodies are never logged or exposed through the operations API.
+- Delivery is honestly documented as at-least-once and potentially reordered; receivers verify the signed raw body/timestamp and durably deduplicate the stable ID.
+- Message/room deletion cancels related pending payloads and scrubs completed/terminal outbox bodies while retaining non-replayable operational metadata.
+
 ## 0.8.0 — 2026-08-01
 
 ### Added

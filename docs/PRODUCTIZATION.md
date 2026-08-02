@@ -62,7 +62,7 @@ Primary references checked on 2026-07-28: [FastAPI's official WebSocket document
 
 ## Architecture and trust boundaries
 
-Untrusted HTTP and WebSocket payloads enter FastAPI/Pydantic validation. A configured operator key grants administrative access; signed short-lived tokens bind an application subject to rooms and read/write permissions. The server, not the payload, chooses authenticated sender identity. The service commits validated messages to a local SQLite path and then sends them to the in-process room registry. It makes no outbound requests.
+Untrusted HTTP and WebSocket payloads enter FastAPI/Pydantic validation. A configured operator key grants administrative access; signed short-lived tokens bind an application subject to rooms and read/write permissions. The server, not the payload, chooses authenticated sender identity. The service commits validated messages to a local SQLite path and then sends them to the in-process room registry. When an operator explicitly configures a webhook, a separate worker sends selected committed event bodies to that one validated destination; otherwise the engine makes no application-level outbound requests.
 
 Deployment owners control login, membership decisions, TLS/proxying, operator and signing secrets, allowed browser origins, filesystem permissions, backups, deletion obligations, and access to the SQLite file. Any client holding the operator key or signing secret can access every room. Multi-process deployment breaks real-time fan-out and per-process rate-limit accounting, so it is unsupported.
 
@@ -88,6 +88,7 @@ Deployment owners control login, membership decisions, TLS/proxying, operator an
 - [x] Accurately document security, privacy, cost, recovery, and single-process behavior.
 - [x] Add host-asserted user identity and server-side per-room authorization before use with mutually untrusted users.
 - [x] Add room/message export and deletion administration for deployments with data-subject or retention obligations.
+- [x] Add transactionally durable, signed application webhooks with bounded retries, operator recovery, and explicit receiver/network/privacy contracts.
 - [ ] Add a broker/presence adapter and cross-instance integration tests before multiple workers or hosts are supported.
 - [ ] Run sustained concurrent load/soak tests and publish measured limits before capacity claims.
 
@@ -111,6 +112,7 @@ Deployment owners control login, membership decisions, TLS/proxying, operator an
 - [x] Final clean-environment verification and adversarial review.
 - [x] Strict signed access tokens, operator separation, per-room/action authorization, and server-enforced sender identity.
 - [x] Streaming room export, archive/reopen, confirmed deletion, age retention, metadata-only audit, and backup/restore.
+- [x] Standard Webhooks-compatible committed-event outbox, delivery worker, health/replay API, rotation, and failure runbook.
 
 ## Release acceptance criteria
 
@@ -138,7 +140,9 @@ Version 0.6 supplies the conversation-control layer needed by embedded support, 
 
 Version 0.7 reduces adoption friction with a checked-in, framework-neutral TypeScript client. It uses zero runtime dependencies, generated declarations, explicit ESM exports, injected web-standard transports, stable API errors, typed protocol events, first-message authentication, async credential refresh, and bounded reconnect state. The package shape follows [TypeScript's bundled-declaration guidance](https://www.typescriptlang.org/docs/handbook/declaration-files/publishing.html) and [Node's explicit-exports guidance](https://nodejs.org/api/packages.html); the reconnect observer surface reflects the connection states exposed by mature chat SDKs such as [Sendbird](https://sendbird.com/docs/chat/sdk/v4/javascript/event-handler/managing-connection-event-handlers/add-or-remove-a-connection-event-handler). The npm artifact is buildable and verified but remains unpublished until the owner chooses a package namespace/release gate.
 
-Version 0.8 turns those primitives into an explicit support-room workflow. Signed users receive a persistent, non-regressing per-room cursor and a current unread count that excludes their own and deleted messages. They can remove their own state, while a per-room cap bounds storage. WebSocket writers can emit transient typing transitions under an independent limiter; starts refresh an advertised server deadline and stops occur on explicit command, successful publish, disconnect, or timeout without persistence or audit. The TypeScript client covers both contracts, and a runnable two-party support example demonstrates customer-to-agent-to-customer read state. This shape is grounded in [Stream's unread-state model](https://getstream.io/chat/docs/javascript/unread/) and Sendbird's [channel](https://sendbird.com/docs/chat/sdk/v4/javascript/channel/overview-channel) and [message](https://sendbird.com/docs/chat/sdk/v4/javascript/message/overview-message) guidance. Signed outbound webhooks remain a separate v0.9 reliability milestone.
+Version 0.8 turns those primitives into an explicit support-room workflow. Signed users receive a persistent, non-regressing per-room cursor and a current unread count that excludes their own and deleted messages. They can remove their own state, while a per-room cap bounds storage. WebSocket writers can emit transient typing transitions under an independent limiter; starts refresh an advertised server deadline and stops occur on explicit command, successful publish, disconnect, or timeout without persistence or audit. The TypeScript client covers both contracts, and a runnable two-party support example demonstrates customer-to-agent-to-customer read state. This shape is grounded in [Stream's unread-state model](https://getstream.io/chat/docs/javascript/unread/) and Sendbird's [channel](https://sendbird.com/docs/chat/sdk/v4/javascript/channel/overview-channel) and [message](https://sendbird.com/docs/chat/sdk/v4/javascript/message/overview-message) guidance. It establishes the application state consumed by the separate v0.9 reliability milestone.
+
+Version 0.9 closes that host-application integration gap with a SQLite transactional outbox for selected committed message and moderation events. It follows the [Standard Webhooks specification](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md) for the stable ID, per-attempt timestamp, exact-body HMAC-SHA256 signature, rotation list, receiver idempotency, retry, timeout, HTTPS, and SSRF considerations. The single worker provides restart-safe at-least-once delivery, a bounded multi-day schedule with jitter and `Retry-After`, metadata-only health pagination, and manual replay. GitHub's [validation guidance](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries) supports raw-body constant-time HMAC verification, while its [webhook practices](https://docs.github.com/en/webhooks/using-webhooks/best-practices-for-using-webhooks) support HTTPS, fast acknowledgement, and stable delivery-ID replay protection. Stripe's [delivery behavior](https://docs.stripe.com/webhooks#event-delivery-behaviors) reinforces automatic retries and the absence of an ordering guarantee. The implementation deliberately rejects redirect/query-secret destinations, blocks non-public resolution by default, retains no receiver body, scrubs related payload copies on message/room deletion and age/count retention, and fails a mutation rather than silently dropping its event only when an all-pending outbox is full.
 
 Final v0.8 local verification on 2026-08-01 used Node 24.12.0, CPython 3.11.9 for the declared development environment, and CPython 3.14.6 for the clean installed artifact:
 
@@ -259,7 +263,7 @@ This v0.3 verification was local on Windows with CPython 3.11.9. The configured 
 
 ## Deferred and blocked work
 
-A complete reference application, read/unread state, signed webhook delivery, multi-instance fan-out, attachment storage policy, and load testing are genuine next-stage local engineering, ordered in the roadmap. The reference workflow and reliable committed-event integration are the highest-value next gates because they turn the stable service and SDK contracts into an immediately evaluable product journey.
+Multi-instance fan-out, attachment storage policy, reactions/search only against named journeys, and sustained load testing are genuine next-stage local engineering, ordered in the roadmap. The current single-process workflow and reliable committed-event integration are complete enough for controlled application evaluation; horizontal scale and capacity claims remain intentionally deferred until measured.
 
 Public package publication, hosted deployment, domains, credentials, signing, and pricing remain owner-controlled. No external accounts, infrastructure, releases, or spending were created as part of the local productization work.
 
@@ -269,7 +273,8 @@ Public package publication, hosted deployment, domains, credentials, signing, an
 
 ## Known risks
 
-- The operator API key and HS256 signing secret are high-impact symmetric credentials; rotation invalidates all dependent access immediately.
+- The operator API key and HS256 token signing secret are high-impact symmetric credentials; token-secret rotation invalidates dependent access immediately.
+- The webhook HMAC secrets authorize receiver trust, payloads duplicate selected plaintext content in the outbox/receiver, and DNS rebinding still requires deployment-level egress controls despite default address checks.
 - Access tokens have bounded expiry but no per-token revocation list, asymmetric keys, or automatic key rotation.
 - SQLite and the in-process connection registry intentionally limit scale and topology.
 - Count-based deletion has no audit log and is unsuitable where legal holds are required.

@@ -1,6 +1,6 @@
 # API reference
 
-The canonical machine-readable contract is generated at `/openapi.json`; interactive documentation is at `/docs`. This document explains the stable v0.8 behavior that OpenAPI does not fully describe, especially read state, streaming export, and WebSockets.
+The canonical machine-readable contract is generated at `/openapi.json`; interactive documentation is at `/docs`. This document explains the stable v0.9 behavior that OpenAPI does not fully describe, especially read state, streaming export, durable webhooks, and WebSockets.
 
 ## Authentication
 
@@ -144,6 +144,14 @@ Returns the current process's active WebSocket connection count.
 
 Admin-only. Returns chronological pages of room lifecycle, export-request, moderation, message-change, explicit-retention, and automatic-retention metadata. Events contain no message bodies or credentials. The shared API-key actor is `operator-api-key`, automatic policy actions use `system:retention`, and signed admin tokens use their subject.
 
+### `GET /v1/admin/webhook-deliveries?status={pending|delivered|failed}&limit=50&before={delivery_id}`
+
+Admin-only. Returns newest-first delivery metadata: stable ID, selected event type, room, attempt count/timestamps, next attempt, terminal/delivered time, last HTTP status, sanitized error code, and whether its body remains `replayable`. The optional status filter applies to each page; concurrently changing delivery status can move a row between filtered views. Payloads, destination URLs, secrets, and receiver response bodies are never returned. An unknown cursor returns `400 invalid_cursor`.
+
+### `POST /v1/admin/webhook-deliveries/{delivery_id}/retry`
+
+Admin-only. Resets a known delivery to pending, preserves its stable `webhook-id`, wakes the configured worker, and returns the reset metadata with HTTP 202. It returns `409 webhook_not_configured` when no destination is active, `409 webhook_payload_unavailable` when message/room deletion scrubbed the body, and `404 webhook_delivery_not_found` for an unknown ID. Receivers must treat replay as a duplicate-safe operation.
+
 ### `POST /v1/admin/retention/run`
 
 Admin-only. Deletes messages older than `SAMSARIX_CHAT_MESSAGE_RETENTION_DAYS`, returns the UTC cutoff and row count, and adds `retention.executed`. Returns `409 retention_not_configured` when maximum age is unset.
@@ -161,7 +169,7 @@ HTTP errors use a stable envelope:
 }
 ```
 
-Validation failures use `invalid_request` and include field locations, messages, and types without echoing submitted values. Rate limits return 429 with `Retry-After: 60`. Unexpected SQLite failures return `503 storage_unavailable` without internal details.
+Validation failures use `invalid_request` and include field locations, messages, and types without echoing submitted values. Rate limits return 429 with `Retry-After: 60`. Unexpected SQLite failures return `503 storage_unavailable` without internal details. If the configured webhook outbox contains only pending rows at its hard cap, the originating message/moderation change returns `507 webhook_capacity_reached` and its transaction is rolled back.
 
 HTTP request bodies are byte-bounded in addition to field validation. The derived limit accommodates the configured maximum message even when Unicode is JSON-escaped; oversized bodies return `413 request_too_large` before their contents are retained for validation.
 
@@ -239,4 +247,8 @@ Every WebSocket publish and typing command checks `room:write` and the current r
 
 ## Delivery semantics
 
-Message create/update/delete events are emitted only after SQLite commits the corresponding state. Broadcast, presence, and typing are in-process and at-most-once; slow or failed clients are removed after the configured send timeout. Typing is never persisted, and clients must honor `expires_in` even if a stop event is missed. Reconnecting clients recover current edits and tombstones from history and current unread state over HTTP rather than relying on missed events. Clients should reconnect with backoff, consume the initial history event, and use the HTTP message cursor endpoint for older messages. Multi-worker or multi-host fan-out is not implemented in v0.8; lifecycle and ban teardown are deterministic only within the supported single process. The checked-in [TypeScript client](../clients/typescript/README.md) implements this recovery sequence for browser and Node integrations.
+Message create/update/delete events are emitted only after SQLite commits the corresponding state. Broadcast, presence, and typing are in-process and at-most-once; slow or failed clients are removed after the configured send timeout. Typing is never persisted, and clients must honor `expires_in` even if a stop event is missed. Reconnecting clients recover current edits and tombstones from history and current unread state over HTTP rather than relying on missed events. Clients should reconnect with backoff, consume the initial history event, and use the HTTP message cursor endpoint for older messages.
+
+When configured, selected application webhook rows commit atomically with message/moderation state and deliver later with at-least-once semantics. Retries and manual replay keep the same `webhook-id`; each attempt gets a new signed timestamp. Delivery can be duplicated or reordered, so receivers validate the Standard Webhooks signature/timestamp and durably deduplicate IDs before side effects. See [Reliable application webhooks](WEBHOOKS.md) for the exact envelope, verification procedure, retry schedule, rotation, network policy, and recovery runbook.
+
+Multi-worker or multi-host fan-out is not implemented in v0.9; lifecycle, webhook worker, and ban teardown are deterministic only within the supported single process. The checked-in [TypeScript client](../clients/typescript/README.md) implements the reconnect recovery sequence for browser and Node integrations.

@@ -1,6 +1,6 @@
 # Data lifecycle operations
 
-Samsarix Chat Engine 0.7 provides explicit export, archive, deletion, retention, audit, backup, and restore controls. These controls help an operator apply a deployment-specific policy; they are not a claim of regulatory compliance.
+Samsarix Chat Engine 0.9 provides explicit export, archive, deletion, retention, audit, webhook recovery, backup, and restore controls. These controls help an operator apply a deployment-specific policy; they are not a claim of regulatory compliance.
 
 All HTTP examples below require an operator API key or an access token with `admin`. User room tokens cannot call lifecycle or audit endpoints.
 
@@ -68,6 +68,14 @@ The log covers room creation, archive/reopen, export requests, deletion, explici
 
 The trail is bounded by `SAMSARIX_CHAT_MAX_AUDIT_EVENTS` (default 100000) to prevent unbounded disk use. Export it to an appropriately protected external audit system if your policy requires longer or tamper-resistant retention. A database administrator can still modify local SQLite data.
 
+## Monitor and recover application webhooks
+
+When an application webhook is configured, message and moderation transactions create an outbox row in the same SQLite commit. The in-process worker sends due rows after commit; receiver failure never converts an already committed chat response into an error. Monitor failed and pending metadata through `/v1/admin/webhook-deliveries`, and replay a known row through `/v1/admin/webhook-deliveries/{delivery_id}/retry` after correcting the receiver.
+
+An outbox containing only pending rows at `SAMSARIX_CHAT_MAX_WEBHOOK_DELIVERIES` rejects the originating chat/moderation transaction with 507 instead of silently losing the promised event. Message/room deletion and age/count retention cancel related pending bodies and scrub completed/terminal payload copies; metadata remains visible with `replayable: false`. They cannot recall an accepted delivery, and a worker-claimed delivery may finish concurrently, so downstream erasure remains the receiver operator's responsibility. Treat sustained pending growth, repeated `last_error` codes, terminal failures, and capacity rejection as operational alerts. The engine does not send email or telemetry on failure; the deployment must scrape/poll this operator endpoint or inspect structured service logs.
+
+See [Reliable application webhooks](WEBHOOKS.md) for endpoint validation, receiver signature verification, secret rotation, retry timing, privacy, SSRF/egress boundaries, and exact recovery commands.
+
 ## Back up and restore
 
 The backup command uses SQLite's online backup API, validates the snapshot with `PRAGMA integrity_check`, and atomically places the finished file. It can safely snapshot a running service:
@@ -92,13 +100,13 @@ Check `/readyz`, inspect representative rooms/history, then stop the test servic
 3. Start one process and verify `/readyz`, room history, and the audit trail.
 4. Keep the rollback copy until application-level verification is complete.
 
-Restoring replaces the live database state with the snapshot state. Messages and audit events created after the backup are lost. The running service holds a cross-process database lifecycle lock, so the restore command fails while that service is active; stop it and retry. The adjacent `.lock` file may remain after shutdown—the operating-system lock, not file presence, signals use. This coordinates Samsarix processes using the same resolved database path, not unrelated tools that modify SQLite directly.
+Restoring replaces the live database state with the snapshot state. Messages, audit events, read state, and webhook acknowledgements created after the backup are lost. Restored pending or previously unacknowledged webhook rows may deliver again, so receivers must deduplicate the stable ID. The running service holds a cross-process database lifecycle lock, so the restore command fails while that service is active; stop it and retry. The adjacent `.lock` file may remain after shutdown—the operating-system lock, not file presence, signals use. This coordinates Samsarix processes using the same resolved database path, not unrelated tools that modify SQLite directly.
 
 ## Upgrade and rollback
 
-Opening an older supported database with v0.8 migrates it to schema version 4. The migration preserves existing rooms/messages, lifecycle metadata, moderation controls, and audit records, adds nullable authenticated-author metadata to messages, then creates an empty `room_read_states` table. Legacy and operator/local messages have no authenticated author and therefore count as other-authored for signed-user unread state. The engine refuses a schema version newer than it understands.
+Opening an older supported database with v0.9 migrates it to schema version 5. The migration preserves existing rooms/messages, lifecycle metadata, moderation controls, read state, and audit records, then creates an empty webhook outbox. Legacy and operator/local messages still have no authenticated author and therefore count as other-authored for signed-user unread state. The engine refuses a schema version newer than it understands.
 
-Take a verified backup before upgrade. Earlier releases do not understand schema 4. For a conservative rollback, stop v0.8 and restore the pre-v0.8 backup before starting the older version.
+Take a verified backup before upgrade. Earlier releases do not understand schema 5. For a conservative rollback, stop v0.9 and restore the pre-v0.9 backup before starting the older version. Removing webhook environment variables stops new outbox insertion and delivery but is not a database downgrade.
 
 ## Read-state lifecycle
 

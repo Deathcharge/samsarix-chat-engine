@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import os
 import socket
@@ -11,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
@@ -20,6 +24,30 @@ import uvicorn
 from websockets.asyncio.client import connect
 
 from samsarix_chat_engine import Settings, create_app
+
+
+class _WebhookReceiver(BaseHTTPRequestHandler):
+    secret = b"0123456789abcdef0123456789abcdef"
+    deliveries: list[dict[str, Any]] = []
+
+    def do_POST(self) -> None:  # noqa: N802 - stdlib handler contract
+        body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        delivery_id = self.headers["webhook-id"]
+        timestamp = self.headers["webhook-timestamp"]
+        signature = self.headers["webhook-signature"]
+        signed = delivery_id.encode("ascii") + b"." + timestamp.encode("ascii") + b"." + body
+        expected = base64.b64encode(hmac.new(self.secret, signed, hashlib.sha256).digest()).decode("ascii")
+        candidates = [part.removeprefix("v1,") for part in signature.split() if part.startswith("v1,")]
+        if not any(hmac.compare_digest(expected, candidate) for candidate in candidates):
+            self.send_response(400)
+            self.end_headers()
+            return
+        self.deliveries.append(json.loads(body))
+        self.send_response(204)
+        self.end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
 
 
 def _available_port() -> int:
@@ -96,7 +124,27 @@ async def _websocket_round_trip(base_url: str, token: str) -> str:
             or created["message"]["sender"] != "wheel-user"
         ):
             raise RuntimeError("WebSocket typing stop or sender identity mismatch")
-        return created["message"]["sender"]
+        sender = created["message"]["sender"]
+        if not isinstance(sender, str):
+            raise RuntimeError("WebSocket sender was not a string")
+        return sender
+
+
+def _wait_for_webhooks(base_url: str, operator_key: str, expected_count: int) -> None:
+    for _ in range(100):
+        webhook_page = _request(
+            base_url + "/v1/admin/webhook-deliveries",
+            credential=("X-API-Key", operator_key),
+        )
+        webhook_items = webhook_page["items"]
+        if (
+            len(webhook_items) == expected_count
+            and all(item["delivered_at"] is not None for item in webhook_items)
+            and len(_WebhookReceiver.deliveries) == expected_count
+        ):
+            return
+        time.sleep(0.05)
+    raise RuntimeError(f"installed-wheel webhook delivery count {expected_count} did not settle")
 
 
 def main() -> int:
@@ -104,6 +152,11 @@ def main() -> int:
     base_url = f"http://127.0.0.1:{port}"
     operator_key = "installed-wheel-operator-key"
     signing_secret = "installed-wheel-signing-secret-32-bytes"  # noqa: S105 - isolated smoke fixture
+    webhook_secret = "whsec_" + base64.b64encode(_WebhookReceiver.secret).decode("ascii")
+    webhook_receiver = ThreadingHTTPServer(("127.0.0.1", 0), _WebhookReceiver)
+    webhook_thread = threading.Thread(target=webhook_receiver.serve_forever, name="wheel-webhook", daemon=True)
+    _WebhookReceiver.deliveries = []
+    webhook_thread.start()
     with tempfile.TemporaryDirectory(prefix="samsarix-wheel-smoke-") as temporary:
         database = Path(temporary) / "smoke.db"
         environment = os.environ.copy()
@@ -146,6 +199,14 @@ def main() -> int:
             token_audience=environment["SAMSARIX_CHAT_TOKEN_AUDIENCE"],
             token_max_lifetime_seconds=86_400,
             token_clock_skew_seconds=30,
+            webhook_url=f"http://127.0.0.1:{webhook_receiver.server_port}/chat",
+            webhook_signing_secret=webhook_secret,
+            webhook_events=(
+                "member.moderation.updated",
+                "message.created",
+                "message.deleted",
+                "message.updated",
+            ),
         )
         server = uvicorn.Server(
             uvicorn.Config(
@@ -221,12 +282,14 @@ def main() -> int:
             websocket_sender = asyncio.run(_websocket_round_trip(base_url, token))
             if room["id"] != "wheel-room" or message["sender"] != "wheel-user" or len(history["items"]) != 2:
                 raise RuntimeError("installed-wheel HTTP journey mismatch")
+            _wait_for_webhooks(base_url, operator_key, 3)
             edited = _request(
                 base_url + f"/v1/rooms/wheel-room/messages/{message['id']}",
                 method="PATCH",
                 credential=("Authorization", f"Bearer {token}"),
                 body={"content": "installed wheel edited"},
             )
+            _wait_for_webhooks(base_url, operator_key, 4)
             deleted_message = _request(
                 base_url + f"/v1/rooms/wheel-room/messages/{message['id']}",
                 method="DELETE",
@@ -268,6 +331,20 @@ def main() -> int:
                 raise RuntimeError("installed-wheel mute control mismatch")
             if cleared["muted_until"] is not None:
                 raise RuntimeError("installed-wheel clear-control mismatch")
+            _wait_for_webhooks(base_url, operator_key, 7)
+            webhook_types = sorted(delivery["type"] for delivery in _WebhookReceiver.deliveries)
+            if webhook_types != sorted(
+                [
+                    "message.created",
+                    "message.created",
+                    "message.created",
+                    "message.updated",
+                    "message.deleted",
+                    "member.moderation.updated",
+                    "member.moderation.updated",
+                ]
+            ):
+                raise RuntimeError("installed-wheel signed webhook journey mismatch")
             exported = _request(
                 base_url + "/v1/rooms/wheel-room/export",
                 credential=("X-API-Key", operator_key),
@@ -304,7 +381,7 @@ def main() -> int:
             if not database.is_file() or database.stat().st_size == 0:
                 raise RuntimeError("installed-wheel database was not persisted")
             print(
-                f"http=ok websocket=ok read_state=ok typing=ok controls=ok export=ok lifecycle=ok backup=ok "
+                f"http=ok websocket=ok read_state=ok typing=ok controls=ok webhook=ok export=ok lifecycle=ok backup=ok "
                 f"sender={websocket_sender} history={len(history['items'])}"
             )
         finally:
@@ -312,6 +389,11 @@ def main() -> int:
             server_thread.join(timeout=10)
             if server_thread.is_alive():
                 raise RuntimeError("installed-wheel server did not stop within 10 seconds")
+            webhook_receiver.shutdown()
+            webhook_receiver.server_close()
+            webhook_thread.join(timeout=5)
+            if webhook_thread.is_alive():
+                raise RuntimeError("installed-wheel webhook receiver did not stop within 5 seconds")
     return 0
 
 

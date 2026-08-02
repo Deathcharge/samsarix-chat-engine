@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import os
 import warnings
+from base64 import b64decode
+from binascii import Error as Base64Error
 from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.parse import urlparse
@@ -13,6 +15,16 @@ from urllib.parse import urlparse
 
 class ConfigurationError(ValueError):
     """Raised when runtime configuration is unsafe or malformed."""
+
+
+WEBHOOK_EVENT_TYPES = frozenset(
+    {
+        "member.moderation.updated",
+        "message.created",
+        "message.deleted",
+        "message.updated",
+    }
+)
 
 
 def _read_env(suffix: str) -> str | None:
@@ -78,9 +90,46 @@ def _read_float(suffix: str, default: float, *, minimum: float, maximum: float) 
     return value
 
 
+def _read_bool(suffix: str, default: bool = False) -> bool:
+    raw = _read_env(suffix)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigurationError(f"SAMSARIX_CHAT_{suffix} must be true or false")
+
+
 def _read_origins() -> tuple[str, ...]:
     raw = _read_env("ALLOWED_ORIGINS") or ""
     return tuple(dict.fromkeys(value.strip().rstrip("/") for value in raw.split(",") if value.strip()))
+
+
+def _read_webhook_events(webhook_url: str | None) -> tuple[str, ...]:
+    raw = _read_env("WEBHOOK_EVENTS")
+    if raw is None:
+        return tuple(sorted(WEBHOOK_EVENT_TYPES)) if webhook_url else ()
+    events = tuple(dict.fromkeys(value.strip() for value in raw.split(",") if value.strip()))
+    unknown = sorted(set(events) - WEBHOOK_EVENT_TYPES)
+    if unknown:
+        raise ConfigurationError(f"SAMSARIX_CHAT_WEBHOOK_EVENTS contains unsupported values: {', '.join(unknown)}")
+    return events
+
+
+def decode_webhook_secret(value: str) -> bytes:
+    """Decode one Standard Webhooks symmetric secret after strict validation."""
+
+    if not value.startswith("whsec_"):
+        raise ConfigurationError("webhook signing secrets must use the whsec_ base64 format")
+    try:
+        decoded = b64decode(value.removeprefix("whsec_"), validate=True)
+    except (Base64Error, ValueError) as exc:
+        raise ConfigurationError("webhook signing secrets must contain valid base64") from exc
+    if not 24 <= len(decoded) <= 64:
+        raise ConfigurationError("webhook signing secrets must decode to between 24 and 64 bytes")
+    return decoded
 
 
 def _default_database_path() -> Path:
@@ -128,6 +177,14 @@ class Settings:
     websocket_auth_timeout_seconds: float = 5.0
     websocket_send_timeout_seconds: float = 2.0
     websocket_max_bytes: int = 16_384
+    webhook_url: str | None = None
+    webhook_signing_secret: str | None = None
+    webhook_previous_signing_secret: str | None = None
+    webhook_events: tuple[str, ...] = ()
+    webhook_timeout_seconds: float = 10.0
+    webhook_max_attempts: int = 9
+    max_webhook_deliveries: int = 100_000
+    webhook_allow_private_targets: bool = False
 
     def __post_init__(self) -> None:
         if self.api_key is not None and not 16 <= len(self.api_key) <= 4_096:
@@ -156,6 +213,8 @@ class Settings:
             "websocket_max_bytes": (self.websocket_max_bytes, 256, 16_777_216),
             "token_max_lifetime_seconds": (self.token_max_lifetime_seconds, 60, 604_800),
             "token_clock_skew_seconds": (self.token_clock_skew_seconds, 0, 300),
+            "webhook_max_attempts": (self.webhook_max_attempts, 1, 20),
+            "max_webhook_deliveries": (self.max_webhook_deliveries, 100, 10_000_000),
         }
         for name, (value, minimum, maximum) in checks.items():
             if not minimum <= value <= maximum:
@@ -172,6 +231,8 @@ class Settings:
             raise ConfigurationError("websocket_send_timeout_seconds must be between 0.1 and 60")
         if not 1 <= self.typing_timeout_seconds <= 30:
             raise ConfigurationError("typing_timeout_seconds must be between 1 and 30")
+        if not 0.1 <= self.webhook_timeout_seconds <= 30:
+            raise ConfigurationError("webhook_timeout_seconds must be between 0.1 and 30")
         for origin in self.allowed_origins:
             parsed = urlparse(origin)
             if (
@@ -189,6 +250,45 @@ class Settings:
                     "allowed origins must be exact http(s) origins without credentials, "
                     "paths, query strings, or trailing slashes"
                 )
+        webhook_values = {
+            "SAMSARIX_CHAT_WEBHOOK_SIGNING_SECRET": self.webhook_signing_secret,
+            "SAMSARIX_CHAT_WEBHOOK_PREVIOUS_SIGNING_SECRET": self.webhook_previous_signing_secret,
+        }
+        if self.webhook_url is None:
+            if any(webhook_values.values()) or self.webhook_events:
+                raise ConfigurationError("webhook secrets and events require SAMSARIX_CHAT_WEBHOOK_URL")
+        else:
+            if self.webhook_signing_secret is None:
+                raise ConfigurationError("SAMSARIX_CHAT_WEBHOOK_SIGNING_SECRET is required with a webhook URL")
+            parsed = urlparse(self.webhook_url)
+            try:
+                hostname = parsed.hostname
+                _ = parsed.port
+            except ValueError as exc:
+                raise ConfigurationError("webhook URL contains an invalid host or port") from exc
+            loopback = hostname is not None and hostname.lower() in {"localhost", "127.0.0.1", "::1"}
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.netloc
+                or hostname is None
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.query
+                or parsed.fragment
+                or (parsed.scheme == "http" and not loopback)
+            ):
+                raise ConfigurationError(
+                    "webhook URL must be HTTPS without credentials, query, or fragments; "
+                    "HTTP is allowed only on loopback"
+                )
+            unknown = sorted(set(self.webhook_events) - WEBHOOK_EVENT_TYPES)
+            if not self.webhook_events or unknown:
+                raise ConfigurationError("webhook_events must contain at least one supported event type")
+            primary = decode_webhook_secret(self.webhook_signing_secret)
+            if self.webhook_previous_signing_secret is not None:
+                previous = decode_webhook_secret(self.webhook_previous_signing_secret)
+                if primary == previous:
+                    raise ConfigurationError("current and previous webhook signing secrets must differ")
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -196,6 +296,7 @@ class Settings:
 
         api_key = _read_env("API_KEY") or None
         token_signing_secret = _read_env("TOKEN_SIGNING_SECRET") or None
+        webhook_url = _read_env("WEBHOOK_URL") or None
         configured_database = _read_env("DATABASE")
         return cls(
             database_path=Path(configured_database) if configured_database else _default_database_path(),
@@ -223,6 +324,14 @@ class Settings:
             websocket_auth_timeout_seconds=_read_float("WS_AUTH_TIMEOUT", 5.0, minimum=0.1, maximum=60),
             websocket_send_timeout_seconds=_read_float("WS_SEND_TIMEOUT", 2.0, minimum=0.1, maximum=60),
             websocket_max_bytes=_read_int("WS_MAX_BYTES", 16_384, minimum=256, maximum=16_777_216),
+            webhook_url=webhook_url,
+            webhook_signing_secret=_read_env("WEBHOOK_SIGNING_SECRET") or None,
+            webhook_previous_signing_secret=_read_env("WEBHOOK_PREVIOUS_SIGNING_SECRET") or None,
+            webhook_events=_read_webhook_events(webhook_url),
+            webhook_timeout_seconds=_read_float("WEBHOOK_TIMEOUT", 10.0, minimum=0.1, maximum=30),
+            webhook_max_attempts=_read_int("WEBHOOK_MAX_ATTEMPTS", 9, minimum=1, maximum=20),
+            max_webhook_deliveries=_read_int("MAX_WEBHOOK_DELIVERIES", 100_000, minimum=100, maximum=10_000_000),
+            webhook_allow_private_targets=_read_bool("WEBHOOK_ALLOW_PRIVATE_TARGETS"),
         )
 
     def with_database_path(self, database_path: Path) -> Settings:

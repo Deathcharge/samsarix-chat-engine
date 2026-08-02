@@ -14,7 +14,7 @@ from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, FastAPI, Header, Path, Query, Request, Response, WebSocket, WebSocketDisconnect
@@ -28,7 +28,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.types import Message as ASGIMessage
 
 from .auth import AccessTokenService, AuthenticationError, Permission, Principal, credentials_match
-from .config import Settings
+from .config import Settings, decode_webhook_secret
 from .models import (
     AuditEventPage,
     MemberModeration,
@@ -43,6 +43,8 @@ from .models import (
     Room,
     RoomCreate,
     RoomUpdate,
+    WebhookDelivery,
+    WebhookDeliveryPage,
     WebSocketAuth,
     WebSocketMessage,
     WebSocketPing,
@@ -53,6 +55,7 @@ from .store import (
     DatabaseLifecycleLock,
     InvalidAuditCursorError,
     InvalidCursorError,
+    InvalidWebhookCursorError,
     MemberBannedError,
     MemberMutedError,
     MessageDeletedError,
@@ -66,7 +69,11 @@ from .store import (
     RoomFrozenError,
     RoomNotArchivedError,
     RoomNotFoundError,
+    WebhookCapacityError,
+    WebhookDeliveryNotFoundError,
+    WebhookPayloadUnavailableError,
 )
+from .webhooks import WebhookDispatcher
 from .websocket_manager import ConnectionManager
 
 logger = logging.getLogger(__name__)
@@ -285,6 +292,7 @@ _MESSAGE_WRITE_ERRORS: tuple[tuple[type[Exception], str, str, int | None, str | 
     ),
     (MemberBannedError, "room_banned", "This account is banned from the room", 4403, "Room access revoked"),
     (MemberMutedError, "room_muted", "This account is muted in the room", None, None),
+    (WebhookCapacityError, "webhook_capacity_reached", "Webhook delivery capacity reached", None, None),
     (RoomNotFoundError, "room_not_found", "Room not found", 4404, "Room not found"),
 )
 
@@ -376,6 +384,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         max_read_states_per_room=resolved.max_read_states_per_room,
         message_retention_days=resolved.message_retention_days,
         max_audit_events=resolved.max_audit_events,
+        webhook_events=resolved.webhook_events,
+        max_webhook_deliveries=resolved.max_webhook_deliveries,
     )
     lifecycle_lock = DatabaseLifecycleLock(resolved.database_path)
     manager = ConnectionManager(
@@ -396,10 +406,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if resolved.token_signing_secret is not None
         else None
     )
+    webhook_dispatcher = None
+    if resolved.webhook_url is not None and resolved.webhook_signing_secret is not None:
+        secrets = [decode_webhook_secret(resolved.webhook_signing_secret)]
+        if resolved.webhook_previous_signing_secret is not None:
+            secrets.append(decode_webhook_secret(resolved.webhook_previous_signing_secret))
+        webhook_dispatcher = WebhookDispatcher(
+            store,
+            url=resolved.webhook_url,
+            secrets=tuple(secrets),
+            timeout=resolved.webhook_timeout_seconds,
+            max_attempts=resolved.webhook_max_attempts,
+            allow_private_targets=resolved.webhook_allow_private_targets,
+        )
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         lifecycle_lock.acquire()
+        webhook_task: asyncio.Task[None] | None = None
         try:
             await store.initialize()
             application.state.settings = resolved
@@ -408,16 +432,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             application.state.message_limiter = limiter
             application.state.typing_limiter = typing_limiter
             application.state.token_service = token_service
+            application.state.webhook_dispatcher = webhook_dispatcher
+            if webhook_dispatcher is not None:
+                webhook_task = asyncio.create_task(webhook_dispatcher.run(), name="samsarix-webhook-dispatcher")
             yield
         finally:
             try:
+                if webhook_dispatcher is not None:
+                    webhook_dispatcher.stop()
+                if webhook_task is not None:
+                    await webhook_task
                 await manager.close_all()
             finally:
                 lifecycle_lock.release()
 
     application = FastAPI(
         title="Samsarix Chat Engine",
-        version="0.8.0",
+        version="0.9.0",
         summary="A small persisted room-chat service with WebSocket delivery",
         lifespan=lifespan,
     )
@@ -427,6 +458,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.message_limiter = limiter
     application.state.typing_limiter = typing_limiter
     application.state.token_service = token_service
+    application.state.webhook_dispatcher = webhook_dispatcher
 
     application.add_middleware(
         RequestBodyLimitMiddleware,
@@ -487,7 +519,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def index() -> dict[str, Any]:
         return {
             "name": "Samsarix Chat Engine",
-            "version": "0.8.0",
+            "version": "0.9.0",
             "status": "ok",
             "docs": "/docs",
             "health": "/healthz",
@@ -722,9 +754,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise APIError(403, "room_banned", "This account is banned from the room") from exc
         except MemberMutedError as exc:
             raise APIError(403, "room_muted", "This account is muted in the room") from exc
+        except WebhookCapacityError as exc:
+            raise APIError(507, "webhook_capacity_reached", "Webhook delivery capacity reached") from exc
         response.status_code = 201 if created else 200
         event = _event("message.created", message=message.model_dump(mode="json"))
         if created:
+            if webhook_dispatcher is not None:
+                webhook_dispatcher.wake()
             await manager.broadcast(room_id, event)
         return message
 
@@ -772,6 +808,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise APIError(403, "room_banned", "This account is banned from the room") from exc
         except MemberMutedError as exc:
             raise APIError(403, "room_muted", "This account is muted in the room") from exc
+        except WebhookCapacityError as exc:
+            raise APIError(507, "webhook_capacity_reached", "Webhook delivery capacity reached") from exc
+        if webhook_dispatcher is not None:
+            webhook_dispatcher.wake()
         await manager.broadcast(room_id, _event("message.updated", message=message.model_dump(mode="json")))
         return message
 
@@ -809,7 +849,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise APIError(403, "room_banned", "This account is banned from the room") from exc
         except MemberMutedError as exc:
             raise APIError(403, "room_muted", "This account is muted in the room") from exc
+        except WebhookCapacityError as exc:
+            raise APIError(507, "webhook_capacity_reached", "Webhook delivery capacity reached") from exc
         if deleted:
+            if webhook_dispatcher is not None:
+                webhook_dispatcher.wake()
             await manager.broadcast(room_id, _event("message.deleted", message=message.model_dump(mode="json")))
         return Response(status_code=204)
 
@@ -836,6 +880,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         except RoomNotFoundError as exc:
             raise APIError(404, "room_not_found", "Room not found") from exc
+        except WebhookCapacityError as exc:
+            raise APIError(507, "webhook_capacity_reached", "Webhook delivery capacity reached") from exc
+        if webhook_dispatcher is not None:
+            webhook_dispatcher.wake()
         if moderation.banned_until is not None and moderation.banned_until > datetime.now(timezone.utc):
             closed = await manager.close_member(
                 room_id,
@@ -870,6 +918,50 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except InvalidAuditCursorError as exc:
             raise APIError(400, "invalid_cursor", "The audit cursor is not valid") from exc
         return AuditEventPage(items=items, next_before=next_before)
+
+    @router.get(
+        "/admin/webhook-deliveries",
+        response_model=WebhookDeliveryPage,
+        tags=["operations"],
+    )
+    async def list_webhook_deliveries(
+        principal: PrincipalDependency,
+        limit: int = Query(default=50, ge=1, le=100),
+        before: str | None = Query(default=None, min_length=1, max_length=128),
+        status: Literal["pending", "delivered", "failed"] | None = Query(default=None),
+    ) -> WebhookDeliveryPage:
+        _authorize(principal, "admin")
+        try:
+            items, next_before = await store.list_webhook_deliveries(
+                limit=limit,
+                before=before,
+                status=status,
+            )
+        except InvalidWebhookCursorError as exc:
+            raise APIError(400, "invalid_cursor", "The webhook delivery cursor is not valid") from exc
+        return WebhookDeliveryPage(items=items, next_before=next_before)
+
+    @router.post(
+        "/admin/webhook-deliveries/{delivery_id}/retry",
+        response_model=WebhookDelivery,
+        status_code=202,
+        tags=["operations"],
+    )
+    async def retry_webhook_delivery(
+        delivery_id: Annotated[str, Path(min_length=1, max_length=128)],
+        principal: PrincipalDependency,
+    ) -> WebhookDelivery:
+        _authorize(principal, "admin")
+        if webhook_dispatcher is None:
+            raise APIError(409, "webhook_not_configured", "Configure a webhook destination before replaying delivery")
+        try:
+            delivery = await store.retry_webhook_delivery(delivery_id)
+        except WebhookDeliveryNotFoundError as exc:
+            raise APIError(404, "webhook_delivery_not_found", "Webhook delivery not found") from exc
+        except WebhookPayloadUnavailableError as exc:
+            raise APIError(409, "webhook_payload_unavailable", "Deletion removed this delivery's replay body") from exc
+        webhook_dispatcher.wake()
+        return delivery
 
     @router.post("/admin/retention/run", response_model=RetentionResult, tags=["operations"])
     async def run_retention(principal: PrincipalDependency) -> RetentionResult:
@@ -1167,6 +1259,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     RoomArchivedError,
                     RoomFrozenError,
                     RoomNotFoundError,
+                    WebhookCapacityError,
                 ) as exc:
                     code, message_text, close_code, close_reason = _message_write_error(exc)
                     await manager.send(
@@ -1184,6 +1277,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
                 await set_typing(False)
                 if created:
+                    if webhook_dispatcher is not None:
+                        webhook_dispatcher.wake()
                     await manager.broadcast(room_id, message_event)
                 else:
                     await manager.send(websocket, message_event)

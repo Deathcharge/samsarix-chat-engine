@@ -14,14 +14,24 @@ import tempfile
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import closing
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import IO, Any, TypeVar
 
-from .models import AuditEvent, MemberModeration, MemberModerationUpdate, Message, ReadState, Room, RoomCreate
+from .models import (
+    AuditEvent,
+    MemberModeration,
+    MemberModerationUpdate,
+    Message,
+    ReadState,
+    Room,
+    RoomCreate,
+    WebhookDelivery,
+)
 
 T = TypeVar("T")
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 logger = logging.getLogger(__name__)
 
 
@@ -105,6 +115,10 @@ class InvalidAuditCursorError(StoreError):
     """Raised when an administrative audit cursor is unknown."""
 
 
+class InvalidWebhookCursorError(StoreError):
+    """Raised when a webhook delivery cursor is unknown."""
+
+
 class MessageNotFoundError(StoreError):
     """Raised when a requested message does not exist in the room."""
 
@@ -127,6 +141,18 @@ class MemberBannedError(StoreError):
 
 class ReadStateCapacityError(StoreError):
     """Raised when a room has reached its configured persisted read-state cap."""
+
+
+class WebhookCapacityError(StoreError):
+    """Raised when only active webhook rows remain at the configured cap."""
+
+
+class WebhookDeliveryNotFoundError(StoreError):
+    """Raised when an operator targets an unknown webhook delivery."""
+
+
+class WebhookPayloadUnavailableError(StoreError):
+    """Raised when deletion privacy rules removed a delivery's replay body."""
 
 
 class RetentionNotConfiguredError(StoreError):
@@ -234,6 +260,14 @@ class MessageSnapshot(Iterator[Message]):
             self._connection.close()
 
 
+@dataclass(frozen=True, slots=True)
+class PendingWebhook:
+    """One due outbox row including the exact JSON payload to sign and send."""
+
+    delivery: WebhookDelivery
+    payload: bytes
+
+
 class ChatStore:
     """Small asynchronous facade over a per-operation SQLite connection."""
 
@@ -247,6 +281,8 @@ class ChatStore:
         max_read_states_per_room: int = 10_000,
         message_retention_days: int | None = None,
         max_audit_events: int = 100_000,
+        webhook_events: tuple[str, ...] = (),
+        max_webhook_deliveries: int = 100_000,
     ) -> None:
         self.database_path = database_path
         self.max_rooms = max_rooms
@@ -255,6 +291,8 @@ class ChatStore:
         self.max_read_states_per_room = max_read_states_per_room
         self.message_retention_days = message_retention_days
         self.max_audit_events = max_audit_events
+        self.webhook_events = frozenset(webhook_events)
+        self.max_webhook_deliveries = max_webhook_deliveries
         self._write_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
@@ -471,6 +509,53 @@ class ChatStore:
     ) -> tuple[list[AuditEvent], str | None]:
         return await asyncio.to_thread(self._list_audit_events_sync, limit, before)
 
+    async def list_webhook_deliveries(
+        self,
+        *,
+        limit: int = 50,
+        before: str | None = None,
+        status: str | None = None,
+    ) -> tuple[list[WebhookDelivery], str | None]:
+        """List bounded delivery metadata without exposing duplicated message payloads."""
+
+        return await asyncio.to_thread(self._list_webhook_deliveries_sync, limit, before, status)
+
+    async def next_webhook_delivery(self, now: datetime) -> PendingWebhook | None:
+        """Return the oldest due delivery; a crash before acknowledgement causes safe redelivery."""
+
+        return await asyncio.to_thread(self._next_webhook_delivery_sync, now)
+
+    async def record_webhook_attempt(
+        self,
+        delivery_id: str,
+        *,
+        attempted_at: datetime,
+        status_code: int | None,
+        error: str | None,
+        next_attempt_at: datetime | None,
+        delivered: bool,
+        failed: bool,
+    ) -> None:
+        """Persist one bounded delivery outcome."""
+
+        async with self._write_lock:
+            await asyncio.to_thread(
+                self._record_webhook_attempt_sync,
+                delivery_id,
+                attempted_at,
+                status_code,
+                error,
+                next_attempt_at,
+                delivered,
+                failed,
+            )
+
+    async def retry_webhook_delivery(self, delivery_id: str) -> WebhookDelivery:
+        """Reset one delivery for an operator-requested replay using its stable webhook ID."""
+
+        async with self._write_lock:
+            return await asyncio.to_thread(self._retry_webhook_delivery_sync, delivery_id)
+
     async def run_retention(self, *, actor: str) -> tuple[int, datetime]:
         if self.message_retention_days is None:
             raise RetentionNotConfiguredError("message retention is not configured")
@@ -573,6 +658,28 @@ class ChatStore:
                 );
                 CREATE INDEX IF NOT EXISTS room_read_states_subject
                     ON room_read_states(subject, room_id);
+
+                CREATE TABLE IF NOT EXISTS webhook_deliveries (
+                    id TEXT PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    resource_id TEXT NOT NULL,
+                    payload_json TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    next_attempt_at TEXT,
+                    last_attempt_at TEXT,
+                    delivered_at TEXT,
+                    failed_at TEXT,
+                    last_status_code INTEGER,
+                    last_error TEXT
+                );
+                CREATE INDEX IF NOT EXISTS webhook_deliveries_due
+                    ON webhook_deliveries(delivered_at, failed_at, next_attempt_at, created_at, id);
+                CREATE INDEX IF NOT EXISTS webhook_deliveries_order
+                    ON webhook_deliveries(created_at DESC, id DESC);
+                CREATE INDEX IF NOT EXISTS webhook_deliveries_resource
+                    ON webhook_deliveries(room_id, resource_id, event_type);
                 """
             )
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")  # noqa: S608 - constant PRAGMA literal
@@ -654,6 +761,7 @@ class ChatStore:
                 room_id=room_id,
                 details={"deleted_messages": message_count},
             )
+            self._scrub_room_webhooks(connection, room_id=room_id)
             connection.execute("DELETE FROM rooms WHERE id = ?", (room_id,))
         return int(message_count)
 
@@ -720,6 +828,14 @@ class ChatStore:
                 ),
             )
             self._trim_messages(connection, room_id, now=message.created_at)
+            self._insert_webhook(
+                connection,
+                event_type="message.created",
+                room_id=room_id,
+                resource_id=message.id,
+                occurred_at=message.created_at,
+                data={"message": message.model_dump(mode="json")},
+            )
             return message, True
 
     def _update_message_sync(
@@ -773,7 +889,16 @@ class ChatStore:
                 """,
                 (message_id,),
             ).fetchone()
-        return self._message_from_row(row)
+            message = self._message_from_row(row)
+            self._insert_webhook(
+                connection,
+                event_type="message.updated",
+                room_id=room_id,
+                resource_id=message.id,
+                occurred_at=message.edited_at or datetime.now(timezone.utc),
+                data={"actor": actor, "message": message.model_dump(mode="json")},
+            )
+        return message
 
     def _delete_message_sync(
         self,
@@ -825,7 +950,17 @@ class ChatStore:
                 """,
                 (message_id,),
             ).fetchone()
-        return self._message_from_row(row), True
+            message = self._message_from_row(row)
+            self._scrub_message_webhooks(connection, room_id=room_id, message_id=message_id)
+            self._insert_webhook(
+                connection,
+                event_type="message.deleted",
+                room_id=room_id,
+                resource_id=message.id,
+                occurred_at=message.deleted_at or datetime.now(timezone.utc),
+                data={"actor": actor, "message": message.model_dump(mode="json")},
+            )
+        return message, True
 
     def _set_member_moderation_sync(
         self,
@@ -888,6 +1023,23 @@ class ChatStore:
                     "banned_until": banned_until,
                 },
             )
+            self._insert_webhook(
+                connection,
+                event_type="member.moderation.updated",
+                room_id=room_id,
+                resource_id=subject,
+                occurred_at=now,
+                data={
+                    "actor": actor,
+                    "moderation": {
+                        "room_id": room_id,
+                        "subject": subject,
+                        "muted_until": muted_until,
+                        "banned_until": banned_until,
+                        "updated_at": now.isoformat(),
+                    },
+                },
+            )
         return MemberModeration(
             room_id=room_id,
             subject=subject,
@@ -920,30 +1072,28 @@ class ChatStore:
         age_deleted = 0
         if self.message_retention_days is not None:
             cutoff = now - timedelta(days=self.message_retention_days)
-            age_deleted = connection.execute(
-                "DELETE FROM messages WHERE created_at < ?", (cutoff.isoformat(),)
-            ).rowcount
-        room_cap_deleted = connection.execute(
-            """
-            DELETE FROM messages
-            WHERE id IN (
-                SELECT id FROM messages WHERE room_id = ?
-                ORDER BY created_at, id
-                LIMIT MAX(0, (SELECT COUNT(*) FROM messages WHERE room_id = ?) - ?)
+            age_deleted = self._delete_messages_with_webhook_scrub(
+                connection,
+                "SELECT id, room_id FROM messages WHERE created_at < ?",
+                (cutoff.isoformat(),),
             )
+        room_cap_deleted = self._delete_messages_with_webhook_scrub(
+            connection,
+            """
+            SELECT id, room_id FROM messages WHERE room_id = ?
+            ORDER BY created_at, id
+            LIMIT MAX(0, (SELECT COUNT(*) FROM messages WHERE room_id = ?) - ?)
             """,
             (room_id, room_id, self.max_stored_messages_per_room),
-        ).rowcount
-        global_cap_deleted = connection.execute(
+        )
+        global_cap_deleted = self._delete_messages_with_webhook_scrub(
+            connection,
             """
-            DELETE FROM messages
-            WHERE id IN (
-                SELECT id FROM messages ORDER BY created_at, id
-                LIMIT MAX(0, (SELECT COUNT(*) FROM messages) - ?)
-            )
+            SELECT id, room_id FROM messages ORDER BY created_at, id
+            LIMIT MAX(0, (SELECT COUNT(*) FROM messages) - ?)
             """,
             (self.max_stored_messages,),
-        ).rowcount
+        )
         if age_deleted or room_cap_deleted or global_cap_deleted:
             details: dict[str, Any] = {
                 "age_deleted": age_deleted,
@@ -1143,11 +1293,168 @@ class ChatStore:
         next_before = page_rows[-1]["id"] if has_more and page_rows else None
         return events, next_before
 
+    def _list_webhook_deliveries_sync(
+        self,
+        limit: int,
+        before: str | None,
+        status: str | None,
+    ) -> tuple[list[WebhookDelivery], str | None]:
+        with closing(self._connect()) as connection, connection:
+            if before is not None:
+                cursor = connection.execute(
+                    "SELECT created_at, id FROM webhook_deliveries WHERE id = ?", (before,)
+                ).fetchone()
+                if cursor is None:
+                    raise InvalidWebhookCursorError(before)
+                rows = connection.execute(
+                    """
+                    SELECT id, event_type, room_id, created_at, attempt_count, next_attempt_at,
+                           last_attempt_at, delivered_at, failed_at, last_status_code, last_error,
+                           payload_json IS NOT NULL AS replayable
+                    FROM webhook_deliveries
+                    WHERE (
+                        ? IS NULL
+                        OR (? = 'pending' AND delivered_at IS NULL AND failed_at IS NULL)
+                        OR (? = 'delivered' AND delivered_at IS NOT NULL)
+                        OR (? = 'failed' AND failed_at IS NOT NULL)
+                    )
+                      AND (created_at < ? OR (created_at = ? AND id < ?))
+                    ORDER BY created_at DESC, id DESC LIMIT ?
+                    """,
+                    (
+                        status,
+                        status,
+                        status,
+                        status,
+                        cursor["created_at"],
+                        cursor["created_at"],
+                        cursor["id"],
+                        limit + 1,
+                    ),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT id, event_type, room_id, created_at, attempt_count, next_attempt_at,
+                           last_attempt_at, delivered_at, failed_at, last_status_code, last_error,
+                           payload_json IS NOT NULL AS replayable
+                    FROM webhook_deliveries
+                    WHERE (
+                        ? IS NULL
+                        OR (? = 'pending' AND delivered_at IS NULL AND failed_at IS NULL)
+                        OR (? = 'delivered' AND delivered_at IS NOT NULL)
+                        OR (? = 'failed' AND failed_at IS NOT NULL)
+                    )
+                    ORDER BY created_at DESC, id DESC LIMIT ?
+                    """,
+                    (status, status, status, status, limit + 1),
+                ).fetchall()
+        has_more = len(rows) > limit
+        page_rows = rows[:limit]
+        deliveries = [self._webhook_from_row(row) for row in page_rows]
+        next_before = page_rows[-1]["id"] if has_more and page_rows else None
+        return deliveries, next_before
+
+    def _next_webhook_delivery_sync(self, now: datetime) -> PendingWebhook | None:
+        with closing(self._connect()) as connection, connection:
+            row = connection.execute(
+                """
+                SELECT id, event_type, room_id, created_at, payload_json, attempt_count, next_attempt_at,
+                       last_attempt_at, delivered_at, failed_at, last_status_code, last_error,
+                       payload_json IS NOT NULL AS replayable
+                FROM webhook_deliveries
+                WHERE delivered_at IS NULL AND failed_at IS NULL AND payload_json IS NOT NULL
+                  AND next_attempt_at <= ?
+                ORDER BY next_attempt_at, created_at, id LIMIT 1
+                """,
+                (now.isoformat(),),
+            ).fetchone()
+        if row is None:
+            return None
+        return PendingWebhook(delivery=self._webhook_from_row(row), payload=row["payload_json"].encode("utf-8"))
+
+    def _record_webhook_attempt_sync(
+        self,
+        delivery_id: str,
+        attempted_at: datetime,
+        status_code: int | None,
+        error: str | None,
+        next_attempt_at: datetime | None,
+        delivered: bool,
+        failed: bool,
+    ) -> None:
+        if delivered and failed:
+            raise ValueError("a webhook attempt cannot be delivered and failed")
+        with closing(self._connect()) as connection, connection:
+            updated = connection.execute(
+                """
+                UPDATE webhook_deliveries
+                SET attempt_count = attempt_count + 1,
+                    next_attempt_at = ?,
+                    last_attempt_at = ?,
+                    delivered_at = ?,
+                    failed_at = ?,
+                    last_status_code = ?,
+                    last_error = ?
+                WHERE id = ? AND delivered_at IS NULL AND failed_at IS NULL
+                """,
+                (
+                    next_attempt_at.isoformat() if next_attempt_at else None,
+                    attempted_at.isoformat(),
+                    attempted_at.isoformat() if delivered else None,
+                    attempted_at.isoformat() if failed else None,
+                    status_code,
+                    error,
+                    delivery_id,
+                ),
+            ).rowcount
+            if updated == 0:
+                raise WebhookDeliveryNotFoundError(delivery_id)
+
+    def _retry_webhook_delivery_sync(self, delivery_id: str) -> WebhookDelivery:
+        now = datetime.now(timezone.utc)
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT payload_json FROM webhook_deliveries WHERE id = ?", (delivery_id,)
+            ).fetchone()
+            if existing is None:
+                raise WebhookDeliveryNotFoundError(delivery_id)
+            if existing["payload_json"] is None:
+                raise WebhookPayloadUnavailableError(delivery_id)
+            connection.execute(
+                """
+                UPDATE webhook_deliveries
+                SET attempt_count = 0,
+                    next_attempt_at = ?,
+                    last_attempt_at = NULL,
+                    delivered_at = NULL,
+                    failed_at = NULL,
+                    last_status_code = NULL,
+                    last_error = NULL
+                WHERE id = ?
+                """,
+                (now.isoformat(), delivery_id),
+            )
+            row = connection.execute(
+                """
+                SELECT id, event_type, room_id, created_at, attempt_count, next_attempt_at,
+                       last_attempt_at, delivered_at, failed_at, last_status_code, last_error,
+                       payload_json IS NOT NULL AS replayable
+                FROM webhook_deliveries WHERE id = ?
+                """,
+                (delivery_id,),
+            ).fetchone()
+        return self._webhook_from_row(row)
+
     def _run_retention_sync(self, cutoff: datetime, actor: str) -> int:
         with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
-            cursor = connection.execute("DELETE FROM messages WHERE created_at < ?", (cutoff.isoformat(),))
-            deleted = cursor.rowcount
+            deleted = self._delete_messages_with_webhook_scrub(
+                connection,
+                "SELECT id, room_id FROM messages WHERE created_at < ?",
+                (cutoff.isoformat(),),
+            )
             self._insert_audit(
                 connection,
                 action="retention.executed",
@@ -1155,6 +1462,52 @@ class ChatStore:
                 details={"deleted_messages": deleted, "cutoff": cutoff.isoformat()},
             )
         return int(deleted)
+
+    @staticmethod
+    def _delete_messages_with_webhook_scrub(
+        connection: sqlite3.Connection,
+        selection_sql: str,
+        parameters: tuple[Any, ...],
+    ) -> int:
+        """Delete a selected message set and remove every locally retained replay body."""
+
+        connection.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS message_deletion_batch (id TEXT PRIMARY KEY, room_id TEXT NOT NULL)"
+        )
+        connection.execute("DELETE FROM message_deletion_batch")
+        connection.execute(  # noqa: S608 - callers provide fixed internal SELECT statements
+            f"INSERT INTO message_deletion_batch (id, room_id) {selection_sql}",
+            parameters,
+        )
+        deleted = int(connection.execute("SELECT COUNT(*) FROM message_deletion_batch").fetchone()[0])
+        if deleted == 0:
+            return 0
+        connection.execute(
+            """
+            DELETE FROM webhook_deliveries
+            WHERE delivered_at IS NULL AND failed_at IS NULL AND event_type LIKE 'message.%'
+              AND EXISTS (
+                  SELECT 1 FROM message_deletion_batch batch
+                  WHERE batch.id = webhook_deliveries.resource_id
+                    AND batch.room_id = webhook_deliveries.room_id
+              )
+            """
+        )
+        connection.execute(
+            """
+            UPDATE webhook_deliveries SET payload_json = NULL
+            WHERE (delivered_at IS NOT NULL OR failed_at IS NOT NULL) AND event_type LIKE 'message.%'
+              AND EXISTS (
+                  SELECT 1 FROM message_deletion_batch batch
+                  WHERE batch.id = webhook_deliveries.resource_id
+                    AND batch.room_id = webhook_deliveries.room_id
+              )
+            """
+        )
+        connection.execute(
+            "DELETE FROM messages WHERE EXISTS (SELECT 1 FROM message_deletion_batch WHERE id = messages.id)"
+        )
+        return deleted
 
     def _insert_audit(
         self,
@@ -1188,6 +1541,93 @@ class ChatStore:
             (self.max_audit_events,),
         )
 
+    def _insert_webhook(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        event_type: str,
+        room_id: str,
+        resource_id: str,
+        occurred_at: datetime,
+        data: dict[str, Any],
+    ) -> None:
+        if event_type not in self.webhook_events:
+            return
+        connection.execute(
+            """
+            DELETE FROM webhook_deliveries WHERE id IN (
+                SELECT id FROM webhook_deliveries
+                WHERE delivered_at IS NOT NULL OR failed_at IS NOT NULL
+                ORDER BY created_at, id
+                LIMIT MAX(0, (SELECT COUNT(*) FROM webhook_deliveries) - ? + 1)
+            )
+            """,
+            (self.max_webhook_deliveries,),
+        )
+        count = connection.execute("SELECT COUNT(*) FROM webhook_deliveries").fetchone()[0]
+        if count >= self.max_webhook_deliveries:
+            raise WebhookCapacityError("webhook delivery capacity reached")
+        delivery_id = f"wh_{uuid.uuid4().hex}"
+        envelope = {
+            "id": delivery_id,
+            "type": event_type,
+            "timestamp": occurred_at.isoformat(),
+            "data": {"room_id": room_id, **data},
+        }
+        payload_json = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        connection.execute(
+            """
+            INSERT INTO webhook_deliveries (
+                id, event_type, room_id, resource_id, created_at, payload_json, next_attempt_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                delivery_id,
+                event_type,
+                room_id,
+                resource_id,
+                occurred_at.isoformat(),
+                payload_json,
+                occurred_at.isoformat(),
+            ),
+        )
+
+    @staticmethod
+    def _scrub_message_webhooks(connection: sqlite3.Connection, *, room_id: str, message_id: str) -> None:
+        connection.execute(
+            """
+            DELETE FROM webhook_deliveries
+            WHERE room_id = ? AND resource_id = ? AND event_type LIKE 'message.%'
+              AND delivered_at IS NULL AND failed_at IS NULL
+            """,
+            (room_id, message_id),
+        )
+        connection.execute(
+            """
+            UPDATE webhook_deliveries SET payload_json = NULL
+            WHERE room_id = ? AND resource_id = ? AND event_type LIKE 'message.%'
+              AND (delivered_at IS NOT NULL OR failed_at IS NOT NULL)
+            """,
+            (room_id, message_id),
+        )
+
+    @staticmethod
+    def _scrub_room_webhooks(connection: sqlite3.Connection, *, room_id: str) -> None:
+        connection.execute(
+            """
+            DELETE FROM webhook_deliveries
+            WHERE room_id = ? AND delivered_at IS NULL AND failed_at IS NULL
+            """,
+            (room_id,),
+        )
+        connection.execute(
+            """
+            UPDATE webhook_deliveries SET payload_json = NULL
+            WHERE room_id = ? AND (delivered_at IS NOT NULL OR failed_at IS NOT NULL)
+            """,
+            (room_id,),
+        )
+
     @staticmethod
     def _room_from_row(row: sqlite3.Row) -> Room:
         return Room(
@@ -1210,6 +1650,23 @@ class ChatStore:
             client_message_id=row["client_message_id"],
             edited_at=datetime.fromisoformat(row["edited_at"]) if row["edited_at"] else None,
             deleted_at=datetime.fromisoformat(row["deleted_at"]) if row["deleted_at"] else None,
+        )
+
+    @staticmethod
+    def _webhook_from_row(row: sqlite3.Row) -> WebhookDelivery:
+        return WebhookDelivery(
+            id=row["id"],
+            event_type=row["event_type"],
+            room_id=row["room_id"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            attempt_count=row["attempt_count"],
+            next_attempt_at=datetime.fromisoformat(row["next_attempt_at"]) if row["next_attempt_at"] else None,
+            last_attempt_at=datetime.fromisoformat(row["last_attempt_at"]) if row["last_attempt_at"] else None,
+            delivered_at=datetime.fromisoformat(row["delivered_at"]) if row["delivered_at"] else None,
+            failed_at=datetime.fromisoformat(row["failed_at"]) if row["failed_at"] else None,
+            last_status_code=row["last_status_code"],
+            last_error=row["last_error"],
+            replayable=bool(row["replayable"]),
         )
 
     @staticmethod

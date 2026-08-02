@@ -17,11 +17,13 @@ from .models import (
     Room,
     RoomCreate,
     RoomUpdate,
+    WebhookDelivery,
+    WebhookDeliveryPage,
 )
 from .store import ChatStore
 from .websocket_manager import ConnectionManager
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 __all__ = [
     "AccessTokenService",
@@ -42,6 +44,8 @@ __all__ = [
     "RoomCreate",
     "RoomUpdate",
     "Settings",
+    "WebhookDelivery",
+    "WebhookDeliveryPage",
     "__version__",
     "create_app",
 ]

@@ -110,8 +110,9 @@ When using a token, connect without `?username=` because the server derives iden
 - WebSocket close `4409`: an operator archived the room; reconnect only after it is reopened.
 - WebSocket close `1013`: the configured connection cap is full; retry with backoff.
 - `503 storage_unavailable` or `/readyz` returning 503: check the database directory permissions and available disk.
+- `507 webhook_capacity_reached`: the optional delivery outbox contains only pending rows at its cap; restore the receiver, replay/clear the operational failure, or raise the cap with matching disk capacity.
 - CLI refuses a public bind: configure an API key or token signing secret, or bind to loopback. The insecure override is only for isolated development networks.
 
-## Upgrading to 0.8
+## Upgrading to 0.9
 
-Version 0.8 migrates older supported SQLite schemas in place to schema 4 while preserving rooms, messages, lifecycle state, moderation controls, and audit records. The new read-state table begins empty. Take an integrity-checked backup first with `samsarix-chat database backup backups/pre-0.8.db`, then start v0.8. See [Data lifecycle operations](OPERATIONS.md) for migration, verification, and rollback details.
+Version 0.9 migrates older supported SQLite schemas in place to schema 5 while preserving rooms, messages, lifecycle state, moderation controls, read state, and audit records. The new webhook outbox begins empty. Take an integrity-checked backup first with `samsarix-chat database backup backups/pre-0.9.db`, then start v0.9. See [Data lifecycle operations](OPERATIONS.md) for migration, verification, and rollback details; configure [Reliable application webhooks](WEBHOOKS.md) only after the receiver verifies signatures and deduplicates IDs.
