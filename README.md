@@ -2,7 +2,7 @@
 
 Samsarix Chat Engine is a small, local-first room chat service from Samsarix LLC for developers who need persisted messages and live WebSocket delivery without adopting a full collaboration platform. It runs as a standalone FastAPI service or as an embeddable ASGI application, stores data in SQLite, and has no dependency on Redis, an LLM provider, or any private package.
 
-Version 0.11.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, accountable data lifecycle, practical conversation controls, typed TypeScript client, support workflow and retrieval, durable application webhooks, and hardened container deployment are implemented and tested. The project is licensed under the standard Mozilla Public License 2.0.
+Version 0.12.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, verification-only asymmetric authentication, accountable data lifecycle, practical conversation controls, typed TypeScript client, support workflow and retrieval, durable application webhooks, and hardened container deployment are implemented and tested. The project is licensed under the standard Mozilla Public License 2.0.
 
 ## What works
 
@@ -13,7 +13,7 @@ Version 0.11.0 is an alpha release candidate. Its core single-instance journey, 
 - Broadcast messages and lightweight join/leave presence within one process.
 - Retry message submission safely with `Idempotency-Key` or `client_message_id`.
 - Protect operator actions with an optional shared API key.
-- Give application users signed, expiring, per-room read/write access tokens.
+- Give application users signed, expiring, per-room read/write access tokens using HS256 or a static public Ed25519/RSA JWKS.
 - Track signed users' monotonic room read cursors and current unread counts without counting their own messages.
 - Exchange separately rate-limited, auto-expiring typing signals without persisting activity history.
 - Let authors edit or delete their own messages while administrators can moderate any message.
@@ -132,6 +132,7 @@ All settings are optional for loopback development. Copy [.env.example](.env.exa
 | `SAMSARIX_CHAT_API_KEY_FILE` | unset | File alternative to `API_KEY`; never set both |
 | `SAMSARIX_CHAT_TOKEN_SIGNING_SECRET` | unset | Enables signed application-user tokens; minimum 32 bytes |
 | `SAMSARIX_CHAT_TOKEN_SIGNING_SECRET_FILE` | unset | File alternative to `TOKEN_SIGNING_SECRET`; never set both |
+| `SAMSARIX_CHAT_TOKEN_VERIFICATION_JWKS_FILE` | unset | Static public JWKS for verification-only EdDSA/RS256 auth; mutually exclusive with the signing secret |
 | `SAMSARIX_CHAT_TOKEN_ISSUER` | `samsarix-chat-engine` | Required JWT issuer |
 | `SAMSARIX_CHAT_TOKEN_AUDIENCE` | `samsarix-chat` | Required JWT audience |
 | `SAMSARIX_CHAT_TOKEN_MAX_LIFETIME` | `86400` | Maximum issued/accepted token lifetime in seconds |
@@ -164,7 +165,7 @@ All settings are optional for loopback development. Copy [.env.example](.env.exa
 | `SAMSARIX_CHAT_MAX_WEBHOOK_DELIVERIES` | `100000` | Bounded pending/completed outbox rows |
 | `SAMSARIX_CHAT_WEBHOOK_ALLOW_PRIVATE_TARGETS` | `false` | Explicitly allow trusted private-network destinations |
 
-The CLI refuses `--host 0.0.0.0` or another non-loopback bind unless an API key or token signing secret is configured. `--allow-insecure-public` is an explicit development escape hatch, not a production recommendation.
+The CLI refuses `--host 0.0.0.0` or another non-loopback bind unless an API key or token verifier is configured. `--allow-insecure-public` is an explicit development escape hatch, not a production recommendation. Install `.[asymmetric-auth]` when using a JWKS outside the container image; the image includes that extra.
 
 ## Embed it
 
@@ -204,7 +205,7 @@ HTTP / WebSocket clients
 
 ## Security, privacy, and operating cost
 
-The default loopback bind avoids accidental network exposure. The API key is an all-room operator credential; do not ship it to browsers. Host applications authenticate users and issue short-lived room tokens whose subject becomes the server-enforced sender identity. Configure TLS at a reverse proxy and exact allowed browser origins for any network deployment.
+The default loopback bind avoids accidental network exposure. The API key is an all-room operator credential; do not ship it to browsers. Host applications authenticate users and issue short-lived room tokens whose subject becomes the server-enforced sender identity. Production deployments can give the engine only public verification keys so private signing authority remains in the host application. Configure TLS at a reverse proxy and exact allowed browser origins for any network deployment.
 
 Messages and display names are stored as plaintext in the configured SQLite file. The engine does not collect telemetry or put message bodies or API keys in its administrative audit trail. When explicitly configured, webhook payloads send selected message content and identifiers to the operator's endpoint and retain a payload copy in the bounded outbox. Backups, exports, webhook receivers, filesystem permissions, retention policy, user consent, and legal obligations remain the deployment owner's responsibility. Default operation has no metered API cost; its operating costs are compute, disk, backup, webhook requests, and network transfer only.
 
@@ -233,6 +234,6 @@ This is a coherent single-instance MVP, not a hosted chat platform. The containe
 
 Copyright (c) 2026 Samsarix LLC. The source is licensed under the [Mozilla Public License 2.0](LICENSE). MPL-2.0 keeps distributed modifications to covered source files open and preserves license notices, while allowing those files to be combined with separate proprietary files in a larger work.
 
-The canonical Python package, command, and environment prefix are `samsarix_chat_engine`, `samsarix-chat`, and `SAMSARIX_CHAT_*`. Version 0.11 keeps `helix_chat_engine`, `helix-chat`, and `HELIX_CHAT_*` as deprecated compatibility aliases. If only `data/helix-chat.db` exists, the CLI reuses it so the rename does not hide existing data.
+The canonical Python package, command, and environment prefix are `samsarix_chat_engine`, `samsarix-chat`, and `SAMSARIX_CHAT_*`. Version 0.12 keeps `helix_chat_engine`, `helix-chat`, and `HELIX_CHAT_*` as deprecated compatibility aliases. If only `data/helix-chat.db` exists, the CLI reuses it so the rename does not hide existing data.
 
 For general inquiries, email contact@samsarix.com. For product support and private security reports, email support@samsarix.com or read [SECURITY.md](SECURITY.md).

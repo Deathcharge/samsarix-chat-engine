@@ -217,6 +217,7 @@ class Settings:
     database_path: Path = Path("data/samsarix-chat.db")
     api_key: str | None = None
     token_signing_secret: str | None = None
+    token_verification_jwks_path: Path | None = None
     token_issuer: str = "samsarix-chat-engine"  # noqa: S105 - public JWT issuer identifier
     token_audience: str = "samsarix-chat"  # noqa: S105 - public JWT audience identifier
     token_max_lifetime_seconds: int = 86_400
@@ -254,6 +255,10 @@ class Settings:
             secret_bytes = len(self.token_signing_secret.encode("utf-8"))
             if not 32 <= secret_bytes <= 4_096:
                 raise ConfigurationError("SAMSARIX_CHAT_TOKEN_SIGNING_SECRET must be between 32 and 4096 bytes")
+        if self.token_signing_secret is not None and self.token_verification_jwks_path is not None:
+            raise ConfigurationError(
+                "set only one of SAMSARIX_CHAT_TOKEN_SIGNING_SECRET or SAMSARIX_CHAT_TOKEN_VERIFICATION_JWKS_FILE"
+            )
         for claim_name, claim_value in {
             "token issuer": self.token_issuer,
             "token audience": self.token_audience,
@@ -281,6 +286,19 @@ class Settings:
         for name, (value, minimum, maximum) in checks.items():
             if not minimum <= value <= maximum:
                 raise ConfigurationError(f"{name} must be between {minimum} and {maximum}")
+        if self.token_verification_jwks_path is not None:
+            from .auth import JWKSAccessTokenVerifier, TokenKeySetError
+
+            try:
+                JWKSAccessTokenVerifier.from_file(
+                    self.token_verification_jwks_path,
+                    issuer=self.token_issuer,
+                    audience=self.token_audience,
+                    max_lifetime_seconds=self.token_max_lifetime_seconds,
+                    clock_skew_seconds=self.token_clock_skew_seconds,
+                )
+            except TokenKeySetError as exc:
+                raise ConfigurationError(str(exc)) from exc
         if self.max_connections_per_room > self.max_connections:
             raise ConfigurationError("max_connections_per_room cannot exceed max_connections")
         if self.max_stored_messages_per_room > self.max_stored_messages:
@@ -358,12 +376,14 @@ class Settings:
 
         api_key = _read_secret_env("API_KEY") or None
         token_signing_secret = _read_secret_env("TOKEN_SIGNING_SECRET") or None
+        token_verification_jwks_file = _read_env("TOKEN_VERIFICATION_JWKS_FILE")
         webhook_url = _read_env("WEBHOOK_URL") or None
         configured_database = _read_env("DATABASE")
         return cls(
             database_path=Path(configured_database) if configured_database else _default_database_path(),
             api_key=api_key,
             token_signing_secret=token_signing_secret,
+            token_verification_jwks_path=(Path(token_verification_jwks_file) if token_verification_jwks_file else None),
             token_issuer=_read_env("TOKEN_ISSUER") or "samsarix-chat-engine",
             token_audience=_read_env("TOKEN_AUDIENCE") or "samsarix-chat",
             token_max_lifetime_seconds=_read_int("TOKEN_MAX_LIFETIME", 86_400, minimum=60, maximum=604_800),

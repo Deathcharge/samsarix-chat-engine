@@ -135,10 +135,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if not 1 <= args.port <= 65_535:
         parser.error("--port must be between 1 and 65535")
-    authentication_configured = settings.api_key is not None or settings.token_signing_secret is not None
+    authentication_configured = (
+        settings.api_key is not None
+        or settings.token_signing_secret is not None
+        or settings.token_verification_jwks_path is not None
+    )
     if not _is_loopback_host(args.host) and not authentication_configured and not args.allow_insecure_public:
         parser.error(
-            "refusing an unauthenticated public bind; configure an API key or token signing secret, "
+            "refusing an unauthenticated public bind; configure an API key or token verification, "
             "or explicitly pass --allow-insecure-public"
         )
 

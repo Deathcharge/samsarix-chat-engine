@@ -3,7 +3,14 @@
 """Public API for Samsarix Chat Engine."""
 
 from .app import create_app
-from .auth import AccessTokenService, AuthenticationError, Principal
+from .auth import (
+    AccessTokenService,
+    AccessTokenVerifier,
+    AuthenticationError,
+    JWKSAccessTokenVerifier,
+    Principal,
+    TokenKeySetError,
+)
 from .config import ConfigurationError, Settings
 from .models import (
     AuditEvent,
@@ -23,10 +30,11 @@ from .models import (
 from .store import ChatStore
 from .websocket_manager import ConnectionManager
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 
 __all__ = [
     "AccessTokenService",
+    "AccessTokenVerifier",
     "AuthenticationError",
     "AuditEvent",
     "AuditEventPage",
@@ -36,6 +44,7 @@ __all__ = [
     "Message",
     "MessageCreate",
     "MessagePage",
+    "JWKSAccessTokenVerifier",
     "Principal",
     "ReadState",
     "ReadStateUpdate",
@@ -44,6 +53,7 @@ __all__ = [
     "RoomCreate",
     "RoomUpdate",
     "Settings",
+    "TokenKeySetError",
     "WebhookDelivery",
     "WebhookDeliveryPage",
     "__version__",

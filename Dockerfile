@@ -10,7 +10,7 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
 WORKDIR /source
 COPY . .
 RUN python -m venv /opt/samsarix \
-    && /opt/samsarix/bin/python -m pip install .
+    && /opt/samsarix/bin/python -m pip install ".[asymmetric-auth]"
 
 FROM python:${PYTHON_VERSION}-slim-bookworm AS runtime
 
