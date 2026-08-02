@@ -2,7 +2,7 @@
 
 Samsarix Chat Engine is a small, local-first room chat service from Samsarix LLC for developers who need persisted messages and live WebSocket delivery without adopting a full collaboration platform. It runs as a standalone FastAPI service or as an embeddable ASGI application, stores data in SQLite, and has no dependency on Redis, an LLM provider, or any private package.
 
-Version 0.8.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, accountable data lifecycle, practical conversation controls, typed TypeScript client, and support-workflow primitives are implemented and tested. The project is licensed under the standard Mozilla Public License 2.0.
+Version 0.9.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, accountable data lifecycle, practical conversation controls, typed TypeScript client, support-workflow primitives, and durable application webhooks are implemented and tested. The project is licensed under the standard Mozilla Public License 2.0.
 
 ## What works
 
@@ -21,6 +21,7 @@ Version 0.8.0 is an alpha release candidate. Its core single-instance journey, t
 - Stream versioned room exports, archive/reopen rooms, and require two-step confirmed deletion.
 - Apply optional age-based retention and inspect a bounded metadata-only administrative audit trail.
 - Create integrity-checked SQLite backups and restore them through the CLI.
+- Deliver selected committed message/moderation events through a signed, durable, retrying webhook outbox.
 - Bound message size, send rate, connections, room count, and retained history.
 - Check liveness at `/healthz`, storage readiness at `/readyz`, and OpenAPI docs at `/docs`.
 
@@ -69,7 +70,7 @@ python examples/02_websocket_chat.py
 
 See [Getting started](docs/GETTING_STARTED.md) for authentication and browser examples, [Conversation controls](docs/CONVERSATION_CONTROLS.md) for moderation workflows, and [Data lifecycle operations](docs/OPERATIONS.md) for export, deletion, retention, backup, and restore.
 
-The [application-workflow guide](docs/APPLICATION_WORKFLOWS.md) and runnable `examples/03_support_workflow.py` show a two-party support case with separate customer and agent identities.
+The [application-workflow guide](docs/APPLICATION_WORKFLOWS.md) and runnable `examples/03_support_workflow.py` show a two-party support case with separate customer and agent identities. [Reliable application webhooks](docs/WEBHOOKS.md) covers receiver verification, retries, replay, rotation, and failure recovery.
 
 ## TypeScript client
 
@@ -130,6 +131,14 @@ All settings are optional for loopback development. Copy [.env.example](.env.exa
 | `SAMSARIX_CHAT_WS_AUTH_TIMEOUT` | `5` | Browser authentication deadline in seconds |
 | `SAMSARIX_CHAT_WS_SEND_TIMEOUT` | `2` | Slow-client send timeout in seconds |
 | `SAMSARIX_CHAT_WS_MAX_BYTES` | `16384` | WebSocket command frame cap used by the CLI server |
+| `SAMSARIX_CHAT_WEBHOOK_URL` | unset | Opt-in host-application callback; HTTPS except literal loopback development |
+| `SAMSARIX_CHAT_WEBHOOK_SIGNING_SECRET` | unset | Standard Webhooks `whsec_` current HMAC secret; required with a URL |
+| `SAMSARIX_CHAT_WEBHOOK_PREVIOUS_SIGNING_SECRET` | unset | Temporary old `whsec_` secret for zero-downtime rotation |
+| `SAMSARIX_CHAT_WEBHOOK_EVENTS` | all four when URL set | Comma-separated selected committed message/moderation event types |
+| `SAMSARIX_CHAT_WEBHOOK_TIMEOUT` | `10` | Per-attempt network timeout in seconds, 0.1–30 |
+| `SAMSARIX_CHAT_WEBHOOK_MAX_ATTEMPTS` | `9` | Total automatic delivery attempts, 1–20 |
+| `SAMSARIX_CHAT_MAX_WEBHOOK_DELIVERIES` | `100000` | Bounded pending/completed outbox rows |
+| `SAMSARIX_CHAT_WEBHOOK_ALLOW_PRIVATE_TARGETS` | `false` | Explicitly allow trusted private-network destinations |
 
 The CLI refuses `--host 0.0.0.0` or another non-loopback bind unless an API key or token signing secret is configured. `--allow-insecure-public` is an explicit development escape hatch, not a production recommendation.
 
@@ -155,10 +164,13 @@ HTTP / WebSocket clients
     ConnectionManager -- bounded, in-process room broadcast
           |
        ChatStore -- SQLite transactions, lifecycle audit, bounded retention
+          |
+  durable outbox -- signed, bounded webhook worker (optional)
 ```
 
 - SQLite writes are serialized within one process and use `BEGIN IMMEDIATE`; foreign keys, WAL mode, and a five-second busy timeout are enabled.
 - A message is persisted before `message.created` is broadcast. An HTTP success therefore means the local database committed it.
+- Selected webhook rows commit in the same transaction as their message/moderation change, then deliver at least once in the background. Receivers deduplicate the stable delivery ID.
 - Signed users can persist a monotonic per-room read cursor and retrieve a current unread count that excludes their own and deleted messages.
 - Typing signals are transition-only, separately rate-limited, automatically expired, and never persisted or audited.
 - WebSocket delivery and presence events are best-effort/at-most-once. Reconnecting clients recover the last 50 messages and can page older history over HTTP.
@@ -169,7 +181,7 @@ HTTP / WebSocket clients
 
 The default loopback bind avoids accidental network exposure. The API key is an all-room operator credential; do not ship it to browsers. Host applications authenticate users and issue short-lived room tokens whose subject becomes the server-enforced sender identity. Configure TLS at a reverse proxy and exact allowed browser origins for any network deployment.
 
-Messages and display names are stored as plaintext in the configured SQLite file. The engine does not collect telemetry, call external APIs, or put message bodies or API keys in its administrative audit trail. Backups, exports, filesystem permissions, retention policy, user consent, and legal obligations remain the deployment owner's responsibility. Default operation has no metered API cost; its operating costs are compute, disk, backup, and network transfer only.
+Messages and display names are stored as plaintext in the configured SQLite file. The engine does not collect telemetry or put message bodies or API keys in its administrative audit trail. When explicitly configured, webhook payloads send selected message content and identifiers to the operator's endpoint and retain a payload copy in the bounded outbox. Backups, exports, webhook receivers, filesystem permissions, retention policy, user consent, and legal obligations remain the deployment owner's responsibility. Default operation has no metered API cost; its operating costs are compute, disk, backup, webhook requests, and network transfer only.
 
 ## Development and release checks
 
@@ -190,12 +202,12 @@ CI runs the tests on CPython 3.10–3.14 on Linux and CPython 3.12 on Windows. S
 
 ## Limitations and project status
 
-This is a coherent single-instance MVP, not a hosted chat platform. The highest-value future work is signed webhook delivery, a multi-instance broker adapter, attachments with explicit storage policy, and load/soak testing. Those are intentionally not presented as current capabilities.
+This is a coherent single-instance MVP, not a hosted chat platform. The highest-value future work is measured multi-instance delivery, load/soak testing, and attachments with explicit storage policy. Those are intentionally not presented as current capabilities.
 
 ## License
 
 Copyright (c) 2026 Samsarix LLC. The source is licensed under the [Mozilla Public License 2.0](LICENSE). MPL-2.0 keeps distributed modifications to covered source files open and preserves license notices, while allowing those files to be combined with separate proprietary files in a larger work.
 
-The canonical Python package, command, and environment prefix are `samsarix_chat_engine`, `samsarix-chat`, and `SAMSARIX_CHAT_*`. Version 0.8 keeps `helix_chat_engine`, `helix-chat`, and `HELIX_CHAT_*` as deprecated compatibility aliases. If only `data/helix-chat.db` exists, the CLI reuses it so the rename does not hide existing data.
+The canonical Python package, command, and environment prefix are `samsarix_chat_engine`, `samsarix-chat`, and `SAMSARIX_CHAT_*`. Version 0.9 keeps `helix_chat_engine`, `helix-chat`, and `HELIX_CHAT_*` as deprecated compatibility aliases. If only `data/helix-chat.db` exists, the CLI reuses it so the rename does not hide existing data.
 
 For general inquiries, email contact@samsarix.com. For product support and private security reports, email support@samsarix.com or read [SECURITY.md](SECURITY.md).

@@ -1,5 +1,6 @@
 """Configuration, CLI safety, and public-package tests."""
 
+import base64
 import importlib
 import sqlite3
 import sys
@@ -17,7 +18,7 @@ from samsarix_chat_engine.config import ConfigurationError, Settings
 
 
 def test_public_api_and_parser_help() -> None:
-    assert samsarix_chat_engine.__version__ == "0.8.0"
+    assert samsarix_chat_engine.__version__ == "0.9.0"
     assert callable(samsarix_chat_engine.create_app)
     help_text = build_parser().format_help()
     assert "serve" in help_text
@@ -33,6 +34,14 @@ def test_settings_from_env_and_validation(monkeypatch: pytest.MonkeyPatch, tmp_p
     monkeypatch.setenv("SAMSARIX_CHAT_MAX_READ_STATES_PER_ROOM", "250")
     monkeypatch.setenv("SAMSARIX_CHAT_TYPING_EVENTS_PER_MINUTE", "45")
     monkeypatch.setenv("SAMSARIX_CHAT_TYPING_TIMEOUT", "6.5")
+    webhook_secret = "whsec_" + base64.b64encode(b"configuration-webhook-secret-32!!").decode("ascii")
+    monkeypatch.setenv("SAMSARIX_CHAT_WEBHOOK_URL", "https://hooks.example.com/chat")
+    monkeypatch.setenv("SAMSARIX_CHAT_WEBHOOK_SIGNING_SECRET", webhook_secret)
+    monkeypatch.setenv("SAMSARIX_CHAT_WEBHOOK_EVENTS", "message.created,message.deleted")
+    monkeypatch.setenv("SAMSARIX_CHAT_WEBHOOK_TIMEOUT", "4.5")
+    monkeypatch.setenv("SAMSARIX_CHAT_WEBHOOK_MAX_ATTEMPTS", "5")
+    monkeypatch.setenv("SAMSARIX_CHAT_MAX_WEBHOOK_DELIVERIES", "250")
+    monkeypatch.setenv("SAMSARIX_CHAT_WEBHOOK_ALLOW_PRIVATE_TARGETS", "true")
     settings = Settings.from_env()
 
     assert settings.database_path == tmp_path / "configured.db"
@@ -43,6 +52,13 @@ def test_settings_from_env_and_validation(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert settings.max_read_states_per_room == 250
     assert settings.typing_events_per_minute == 45
     assert settings.typing_timeout_seconds == 6.5
+    assert settings.webhook_url == "https://hooks.example.com/chat"
+    assert settings.webhook_signing_secret == webhook_secret
+    assert settings.webhook_events == ("message.created", "message.deleted")
+    assert settings.webhook_timeout_seconds == 4.5
+    assert settings.webhook_max_attempts == 5
+    assert settings.max_webhook_deliveries == 250
+    assert settings.webhook_allow_private_targets is True
 
     monkeypatch.setenv("SAMSARIX_CHAT_MAX_CONNECTIONS", "not-a-number")
     with pytest.raises(ConfigurationError, match="must be an integer"):
@@ -156,7 +172,7 @@ def test_legacy_import_and_environment_aliases(monkeypatch: pytest.MonkeyPatch, 
     with pytest.warns(DeprecationWarning, match="import samsarix_chat_engine"):
         legacy_package = importlib.import_module("helix_chat_engine")
     assert legacy_package.Settings is Settings
-    assert legacy_package.__version__ == "0.8.0"
+    assert legacy_package.__version__ == "0.9.0"
     assert importlib.import_module("helix_chat_engine.app").create_app is samsarix_chat_engine.create_app
     assert importlib.import_module("helix_chat_engine.cli").main is main
     assert importlib.import_module("helix_chat_engine.config").Settings is Settings

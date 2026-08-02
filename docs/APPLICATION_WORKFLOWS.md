@@ -77,6 +77,10 @@ A connected WebSocket client with `room:write` sends `{"type":"typing","active":
 - A separate limiter keyed by signed subject or unauthenticated/operator client address, `SAMSARIX_CHAT_TYPING_EVENTS_PER_MINUTE`, prevents typing traffic from consuming the message-publish allowance.
 - Delivery is best-effort and at-most-once. UIs must use the advertised expiry as a backstop and must not infer durable presence, activity history, or message intent from typing signals.
 
+## Host application events
+
+For offline assignment, notifications, CRM synchronization, or case timelines, version 0.9 can send selected committed message/moderation events to one host-application endpoint. The host should verify the signed raw request, durably deduplicate `webhook-id`, enqueue its own work, and acknowledge quickly. It must not assume ordered or exactly-once delivery. See [Reliable application webhooks](WEBHOOKS.md) for the complete sender/receiver and recovery contract.
+
 ## Product and privacy boundary
 
 The host application should use opaque, stable internal account IDs as token subjects rather than email addresses. Read timestamps and typing activity can reveal engagement patterns, so expose them only to participants with a legitimate room relationship and document their use in the host product's privacy notice. Samsarix deliberately does not provide per-message read receipts, cross-room user activity, or durable typing history.

@@ -128,6 +128,30 @@ class AuditEventPage(APIModel):
     next_before: str | None
 
 
+class WebhookDelivery(APIModel):
+    """Persisted delivery metadata; payloads and response bodies are intentionally omitted."""
+
+    id: str
+    event_type: str
+    room_id: str
+    created_at: datetime
+    attempt_count: int
+    next_attempt_at: datetime | None
+    last_attempt_at: datetime | None
+    delivered_at: datetime | None
+    failed_at: datetime | None
+    last_status_code: int | None
+    last_error: str | None
+    replayable: bool
+
+
+class WebhookDeliveryPage(APIModel):
+    """Newest webhook deliveries and an older-page cursor."""
+
+    items: list[WebhookDelivery]
+    next_before: str | None
+
+
 class RetentionResult(APIModel):
     """Result of an explicit retention pass."""
 
