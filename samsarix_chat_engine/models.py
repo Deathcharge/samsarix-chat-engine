@@ -34,12 +34,20 @@ class Room(APIModel):
     description: str
     created_at: datetime
     archived_at: datetime | None = None
+    frozen_at: datetime | None = None
 
 
 class RoomUpdate(APIModel):
     """Administrative room lifecycle update."""
 
-    archived: bool
+    archived: bool | None = None
+    frozen: bool | None = None
+
+    @model_validator(mode="after")
+    def require_lifecycle_change(self) -> RoomUpdate:
+        if self.archived is None and self.frozen is None:
+            raise ValueError("at least one of archived or frozen is required")
+        return self
 
 
 class MessageCreate(APIModel):
@@ -66,6 +74,21 @@ class Message(APIModel):
     content: str
     created_at: datetime
     client_message_id: str | None = None
+    edited_at: datetime | None = None
+    deleted_at: datetime | None = None
+
+
+class MessageUpdate(APIModel):
+    """Author or administrator message-content update."""
+
+    content: str = Field(min_length=1, max_length=100_000)
+
+    @field_validator("content")
+    @classmethod
+    def reject_blank_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("content must not be blank")
+        return value
 
 
 class MessagePage(APIModel):
@@ -98,6 +121,29 @@ class RetentionResult(APIModel):
 
     deleted_messages: int
     cutoff: datetime
+
+
+class MemberModerationUpdate(APIModel):
+    """Relative mute/ban durations; zero clears the matching control."""
+
+    muted_for_seconds: int | None = Field(default=None, ge=0, le=31_536_000)
+    banned_for_seconds: int | None = Field(default=None, ge=0, le=31_536_000)
+
+    @model_validator(mode="after")
+    def require_control(self) -> MemberModerationUpdate:
+        if self.muted_for_seconds is None and self.banned_for_seconds is None:
+            raise ValueError("at least one moderation duration is required")
+        return self
+
+
+class MemberModeration(APIModel):
+    """Persisted moderation state for one room subject."""
+
+    room_id: str
+    subject: str
+    muted_until: datetime | None
+    banned_until: datetime | None
+    updated_at: datetime
 
 
 class WebSocketMessage(APIModel):

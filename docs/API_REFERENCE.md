@@ -1,6 +1,6 @@
 # API reference
 
-The canonical machine-readable contract is generated at `/openapi.json`; interactive documentation is at `/docs`. This document explains the stable v0.5 behavior that OpenAPI does not fully describe, especially streaming export and WebSockets.
+The canonical machine-readable contract is generated at `/openapi.json`; interactive documentation is at `/docs`. This document explains the stable v0.6 behavior that OpenAPI does not fully describe, especially streaming export and WebSockets.
 
 ## Authentication
 
@@ -43,15 +43,15 @@ Lists up to 100 rooms in creation order.
 
 ### `GET /v1/rooms/{room_id}`
 
-Returns a room, including nullable `archived_at`, or `404 room_not_found`.
+Returns a room, including nullable `archived_at` and `frozen_at`, or `404 room_not_found`. An actively banned token subject receives `403 room_banned`.
 
 ### `PATCH /v1/rooms/{room_id}`
 
-Admin-only. Send `{"archived":true}` to make a room read-only and close active clients, or `{"archived":false}` to reopen it. Repeating the current state is idempotent and does not add a duplicate audit event.
+Admin-only. Send `{"archived":true}` to make a room read-only and close active clients, or `{"archived":false}` to reopen it. Send `{"frozen":true}` to keep read sessions connected while restricting message creation and edits to administrators; `false` resumes member writes. Either or both fields may be supplied. Repeating the current state is idempotent and does not add a duplicate audit event.
 
 ### `GET /v1/rooms/{room_id}/export`
 
-Admin-only. Streams `application/x-ndjson`: a `samsarix.room_export` metadata record with `schema_version: 1`, followed by one `message` record per line in chronological order. The response is an attachment and the operation records `room.export_requested`.
+Admin-only. Streams `application/x-ndjson`: a `samsarix.room_export` metadata record with `schema_version: 2`, followed by one current `message` record or tombstone per line in chronological order. Schema 2 adds room freeze and message edit/delete timestamps. The response is an attachment and the operation records `room.export_requested`.
 
 ### `DELETE /v1/rooms/{room_id}`
 
@@ -69,7 +69,19 @@ Persists a message, broadcasts it to the room, and returns 201:
 }
 ```
 
-`sender` is 1–64 characters for operator or local access. Token clients may omit it; the signed subject is persisted. A conflicting value returns `403 identity_mismatch`. `content` is nonblank and subject to `SAMSARIX_CHAT_MAX_MESSAGE_CHARS`. `client_message_id` is optional and at most 128 characters. `Idempotency-Key` can be used instead; if both are present, they must match. Replaying an ID returns the first persisted message with HTTP 200 and does not broadcast it again. Archived rooms reject new messages with `409 room_archived`; their history remains readable until deletion.
+`sender` is 1–64 characters for operator or local access. Token clients may omit it; the signed subject is persisted. A conflicting value returns `403 identity_mismatch`. `content` is nonblank and subject to `SAMSARIX_CHAT_MAX_MESSAGE_CHARS`. `client_message_id` is optional and at most 128 characters. `Idempotency-Key` can be used instead; if both are present, they must match. Replaying an ID returns the first persisted message with HTTP 200 and does not broadcast it again. Archived rooms reject new messages with `409 room_archived`; frozen rooms reject member writes with `409 room_frozen`; active controls return `403 room_muted` or `403 room_banned`.
+
+### `PATCH /v1/rooms/{room_id}/messages/{message_id}`
+
+Replaces a non-deleted message's content and sets `edited_at`. The signed author or an administrator may edit; other writers receive `403 message_not_owned`. Deleted messages return `409 message_deleted`. Success broadcasts `message.updated` after commit. Earlier content is overwritten and is not copied to the audit trail.
+
+```json
+{"content":"Corrected text"}
+```
+
+### `DELETE /v1/rooms/{room_id}/messages/{message_id}`
+
+The signed author or an administrator may delete. Success returns 204, replaces content with an empty string, sets `deleted_at`, and broadcasts `message.deleted` once. Repeating the delete is idempotent. The tombstone stays in chronological history so clients do not reorder surrounding messages; deleted content is not retained by this feature. Administrators may remove content while a room is frozen or archived.
 
 ### `GET /v1/rooms/{room_id}/messages?limit=50&before={message_id}`
 
@@ -82,7 +94,17 @@ Returns messages in chronological order:
 }
 ```
 
-Pages contain the newest matching messages. When `next_before` is non-null, pass it as `before` to fetch the next older page. An unknown or cross-room cursor returns `400 invalid_cursor`.
+Pages contain the newest matching messages. Message objects include nullable `edited_at` and `deleted_at`; a deleted message has empty `content`. When `next_before` is non-null, pass it as `before` to fetch the next older page. An unknown or cross-room cursor returns `400 invalid_cursor`.
+
+### `PATCH /v1/rooms/{room_id}/members/{subject}/moderation`
+
+Admin-only. Applies relative durations of up to one year to a stable signed-token subject. Omit one field to preserve it; use zero to clear it.
+
+```json
+{"muted_for_seconds":900,"banned_for_seconds":3600}
+```
+
+A mute preserves reads and blocks writes. A ban blocks HTTP room reads/writes, rejects new WebSocket sessions, and sends `member.banned` before closing matching live sockets with 4403. Operators and admin tokens bypass member controls. Expired timestamps are ignored. Each change records metadata (subject and expiry), never message bodies or credentials.
 
 ### `GET /v1/stats`
 
@@ -90,7 +112,7 @@ Returns the current process's active WebSocket connection count.
 
 ### `GET /v1/admin/audit-events?limit=50&before={event_id}`
 
-Admin-only. Returns chronological pages of room lifecycle, export-request, explicit-retention, and automatic-retention metadata. Events contain no message bodies or credentials. The shared API-key actor is `operator-api-key`, automatic policy actions use `system:retention`, and signed admin tokens use their subject.
+Admin-only. Returns chronological pages of room lifecycle, export-request, moderation, message-change, explicit-retention, and automatic-retention metadata. Events contain no message bodies or credentials. The shared API-key actor is `operator-api-key`, automatic policy actions use `system:retention`, and signed admin tokens use their subject.
 
 ### `POST /v1/admin/retention/run`
 
@@ -144,7 +166,7 @@ After authentication and room validation, events begin with:
 ```json
 {
   "type": "ready",
-  "room": {"id":"general","name":"General","description":"","created_at":"...","archived_at":null},
+  "room": {"id":"general","name":"General","description":"","created_at":"...","archived_at":null,"frozen_at":null},
   "username": "Andrew",
   "active_connections": 1,
   "max_message_chars": 4000
@@ -158,10 +180,14 @@ After authentication and room validation, events begin with:
 Live events are:
 
 - `message.created`: contains `message` and `idempotent_replay`.
+- `message.updated`: contains the committed current `message`.
+- `message.deleted`: contains the committed message tombstone.
 - `presence.joined` / `presence.left`: contains `username` and the current room connection count; best effort only.
 - `pong`: response to an application-level ping command.
 - `error`: contains a stable `code` and human-readable `message`.
 - `room.archived`: final room metadata before the server closes the connection with 4409.
+- `room.frozen` / `room.unfrozen`: current room metadata; connections remain open.
+- `member.banned`: the subject and expiry before matching connections close with 4403.
 
 ### Client commands
 
@@ -173,8 +199,8 @@ Live events are:
 {"type":"ping"}
 ```
 
-Every WebSocket publish checks `room:write`; read-only sessions receive `authorization_denied` and remain connected. After three invalid commands the server closes with 1008. Binary frames close after repeated rejection with 1003. Oversized frames close with 1009. Capacity rejection uses 1013; a missing room uses 4404.
+Every WebSocket publish checks `room:write` and the current room/member state. Read-only, muted, and frozen-member sessions receive a structured error and remain connected. A banned session closes with 4403. After three invalid commands the server closes with 1008. Binary frames close after repeated rejection with 1003. Oversized frames close with 1009. Capacity rejection uses 1013; a missing room uses 4404.
 
 ## Delivery semantics
 
-A `message.created` event is emitted only after SQLite commits the message. Broadcast is in-process and at-most-once; slow or failed clients are removed after the configured send timeout. Clients should reconnect with backoff, consume the initial history event, and use the HTTP cursor endpoint for older messages. Multi-worker or multi-host fan-out is not implemented in v0.5; archive teardown is deterministic only within the supported single process.
+Message create/update/delete events are emitted only after SQLite commits the corresponding state. Broadcast is in-process and at-most-once; slow or failed clients are removed after the configured send timeout. Reconnecting clients recover current edits and tombstones from history rather than relying on missed events. Clients should reconnect with backoff, consume the initial history event, and use the HTTP cursor endpoint for older messages. Multi-worker or multi-host fan-out is not implemented in v0.6; lifecycle and ban teardown are deterministic only within the supported single process.

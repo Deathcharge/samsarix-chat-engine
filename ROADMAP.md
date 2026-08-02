@@ -39,15 +39,21 @@ This closes the largest remaining privacy and operational gap. It does not claim
 
 ## v0.6 — conversation controls for real communities
 
-- message edit and deletion with author/operator authorization and persisted event semantics;
-- room freeze plus user mute/ban primitives for moderation;
-- read cursors/unread counts and typing indicators with explicit privacy/cost limits;
-- webhooks for committed message and moderation events with signing, timeouts, retry caps, and idempotency;
-- a small framework-neutral TypeScript protocol client after the protocol stabilizes.
+- [x] message edit and tombstone deletion with author/operator authorization and persisted event semantics;
+- [x] room freeze plus stable-subject mute/ban primitives for moderation;
+- [x] immediate live-socket eviction for bans and reconnect convergence for edits/deletes;
+- [x] metadata-only moderation audit, schema migration, API/runbook documentation, and integration tests.
 
 Attachments, search, reactions, threads, and mentions should be added only against a named consumer journey. Binary files should use operator-provided object storage rather than SQLite blobs.
 
-## v0.7 — measured multi-instance operation
+## v0.7 — integration ergonomics
+
+- ship a small framework-neutral TypeScript protocol client with reconnect and event-state helpers;
+- add opt-in read cursors/unread counts and ephemeral typing indicators with explicit privacy/cost limits;
+- add signed webhooks for committed message and moderation events with timeouts, retry caps, and idempotency;
+- publish a complete reference integration against a named support or community journey.
+
+## v0.8 — measured multi-instance operation
 
 - define a broker/history adapter boundary without changing the single-instance default;
 - implement and test cross-worker fan-out, presence, distributed rate limits, and reconnect recovery;

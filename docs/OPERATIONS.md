@@ -15,7 +15,7 @@ curl --fail-with-body \
   http://127.0.0.1:8000/v1/rooms/general/export
 ```
 
-Line 1 has `type: samsarix.room_export`, `schema_version: 1`, an export timestamp, and room metadata. Each later line has `type: message` and one complete message. The audit action is `room.export_requested`: it records that the export request was accepted, not that the client received every byte.
+Line 1 has `type: samsarix.room_export`, `schema_version: 2`, an export timestamp, and room metadata. Each later line has `type: message` and one complete current message or tombstone. Export schema 2 adds room `frozen_at` and message `edited_at`/`deleted_at`; readers should reject unknown major schema values. The audit action is `room.export_requested`: it records that the export request was accepted, not that the client received every byte.
 
 Exports contain plaintext message bodies and sender identifiers. Protect them like the database, transmit them over TLS, and delete working copies according to your policy.
 
@@ -96,6 +96,6 @@ Restoring replaces the live database state with the snapshot state. Messages and
 
 ## Upgrade and rollback
 
-Opening a v0.4 schema (version 1) with v0.5 adds nullable `rooms.archived_at`, creates `audit_events`, and sets schema version 2. Existing rooms and messages are preserved. The engine refuses a schema version newer than it understands.
+Opening a v0.4 or v0.5 database with v0.6 migrates it to schema version 3. The migration preserves existing rooms/messages, adds nullable room freeze and message edit/delete timestamps, and creates stable-subject moderation controls. The earlier v0.4→v0.5 lifecycle additions are applied in the same pass when needed. The engine refuses a schema version newer than it understands.
 
-Take a verified backup before upgrade. Because v0.4 does not understand schema version 2 as a supported contract, rollback means stopping v0.5 and restoring the pre-upgrade backup before starting v0.4.
+Take a verified backup before upgrade. Older binaries do not understand schema version 3 as a supported contract, so rollback means stopping v0.6 and restoring the pre-upgrade backup before starting the older version.

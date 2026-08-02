@@ -132,6 +132,22 @@ Version 0.4 establishes the product's first credible multi-user trust boundary. 
 
 Version 0.5 closes the primary operational privacy gap for controlled single-instance deployments. Operators can stream versioned NDJSON exports, archive and reopen rooms, and irreversibly delete only an already archived room with an exact confirmation header. Archive is enforced at persistence and protocol layers and deterministically notifies/closes connected clients. Optional age retention complements count caps; a bounded administrative audit trail records actors and lifecycle metadata without duplicating message bodies or credentials. The CLI now creates integrity-checked online SQLite backups and atomically restores them with explicit replacement. Schema version 1 migrates in place to version 2, while unknown future versions are refused without mutation.
 
+Version 0.6 supplies the conversation-control layer needed by embedded support, education, private-community, and live-event products. Signed authors can edit or tombstone their own messages; administrators can moderate any message. Room freeze preserves connected readers while reserving writes for administrators. Relative mute and ban controls bind to stable token subjects, with mute preserving reads and ban immediately evicting matching live sockets. Current message state survives reconnect, and audit records only message IDs and moderation metadata. Schema versions 1 and 2 migrate in place to version 3. The design is grounded in the analogous primitives documented by [Sendbird](https://docs.sendbird.com/docs/chat/platform-api/v3/moderation/moderation-overview), [Discord](https://docs.discord.com/developers/resources/message), and [Ably](https://ably.com/docs/chat/rooms/messages).
+
+Final v0.6 local verification on 2026-08-01 used CPython 3.11.9 for the source suite and a clean CPython 3.14.6 environment for the installed artifact:
+
+| Check | Actual result |
+| --- | --- |
+| `ruff check .` / `ruff format --check .` | Passed; 41 Python files formatted |
+| `mypy samsarix_chat_engine` / `compileall` / `git diff --check` | Passed; no type issues in 9 source files |
+| `pytest --cov=samsarix_chat_engine --cov-report=term-missing` | 82 passed in 77.74s; 90.82% total branch coverage |
+| fresh wheel-runtime `pip check` / `pip-audit --path` | No broken requirements; no known third-party vulnerabilities |
+| sdist build / wheel rebuilt from sdist / `twine check` | Both 0.6.0 artifacts built and passed metadata checks |
+| final wheel installed outside the source tree | Version 0.6.0, Samsarix LLC/contact metadata, dependency resolution, and imports passed |
+| expanded installed-wheel smoke | HTTP/WebSocket persistence, edit/delete, freeze, mute/clear, export schema 2, archive/delete, backup, and graceful shutdown passed |
+
+Exact artifact digests are recorded with the pull request because embedding them in the packaged source would change those digests. The GitHub matrix remains the cross-platform merge gate; artifact digests will change if review fixes alter the source.
+
 Initial v0.5 verification on 2026-08-01 used CPython 3.14.6 on Windows and the newest resolved runtime versions inside the declared bounds:
 
 | Check | Actual result |
@@ -206,7 +222,7 @@ This v0.3 verification was local on Windows with CPython 3.11.9. The configured 
 
 ## Deferred and blocked work
 
-Moderation controls, a stable client SDK, multi-instance fan-out, and load testing are genuine next-stage local engineering, ordered in the roadmap. Conversation controls are the highest-value next gate for support, education, and private-community deployments.
+A stable client SDK, multi-instance fan-out, attachment storage policy, and load testing are genuine next-stage local engineering, ordered in the roadmap. A typed client SDK is the highest-value next gate because it makes the now-stable authorization, lifecycle, and moderation contracts easier to embed safely.
 
 Public package publication, hosted deployment, domains, credentials, signing, and pricing remain owner-controlled. No external accounts, infrastructure, releases, or spending were created as part of the local productization work.
 

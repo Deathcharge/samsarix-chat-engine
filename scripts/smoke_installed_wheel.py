@@ -161,14 +161,59 @@ def main() -> int:
             websocket_sender = asyncio.run(_websocket_round_trip(base_url, token))
             if room["id"] != "wheel-room" or message["sender"] != "wheel-user" or len(history["items"]) != 1:
                 raise RuntimeError("installed-wheel HTTP journey mismatch")
+            edited = _request(
+                base_url + f"/v1/rooms/wheel-room/messages/{message['id']}",
+                method="PATCH",
+                credential=("Authorization", f"Bearer {token}"),
+                body={"content": "installed wheel edited"},
+            )
+            deleted_message = _request(
+                base_url + f"/v1/rooms/wheel-room/messages/{message['id']}",
+                method="DELETE",
+                credential=("Authorization", f"Bearer {token}"),
+            )
+            frozen = _request(
+                base_url + "/v1/rooms/wheel-room",
+                method="PATCH",
+                credential=("X-API-Key", operator_key),
+                body={"frozen": True},
+            )
+            unfrozen = _request(
+                base_url + "/v1/rooms/wheel-room",
+                method="PATCH",
+                credential=("X-API-Key", operator_key),
+                body={"frozen": False},
+            )
+            muted = _request(
+                base_url + "/v1/rooms/wheel-room/members/wheel-user/moderation",
+                method="PATCH",
+                credential=("X-API-Key", operator_key),
+                body={"muted_for_seconds": 60},
+            )
+            cleared = _request(
+                base_url + "/v1/rooms/wheel-room/members/wheel-user/moderation",
+                method="PATCH",
+                credential=("X-API-Key", operator_key),
+                body={"muted_for_seconds": 0},
+            )
+            if (
+                edited["edited_at"] is None
+                or deleted_message is not None
+                or frozen["frozen_at"] is None
+                or unfrozen["frozen_at"] is not None
+                or muted["muted_until"] is None
+                or cleared["muted_until"] is not None
+            ):
+                raise RuntimeError("installed-wheel conversation-control journey mismatch")
             exported = _request(
                 base_url + "/v1/rooms/wheel-room/export",
                 credential=("X-API-Key", operator_key),
             )
             export_lines = [json.loads(line) for line in exported.splitlines()]
             if (
-                export_lines[0]["schema_version"] != 1
-                or export_lines[1]["message"]["content"] != "installed wheel HTTP"
+                export_lines[0]["schema_version"] != 2
+                or export_lines[1]["message"]["content"] != ""
+                or export_lines[1]["message"]["deleted_at"] is None
             ):
                 raise RuntimeError("installed-wheel export journey mismatch")
             backup = Path(temporary) / "smoke-backup.db"
@@ -196,7 +241,7 @@ def main() -> int:
             if not database.is_file() or database.stat().st_size == 0:
                 raise RuntimeError("installed-wheel database was not persisted")
             print(
-                f"http=ok websocket=ok export=ok lifecycle=ok backup=ok "
+                f"http=ok websocket=ok controls=ok export=ok lifecycle=ok backup=ok "
                 f"sender={websocket_sender} history={len(history['items'])}"
             )
         finally:

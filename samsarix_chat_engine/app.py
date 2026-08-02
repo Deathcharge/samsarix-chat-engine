@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from typing import Annotated, Any
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, FastAPI, Header, Query, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, FastAPI, Header, Path, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -31,9 +31,12 @@ from .auth import AccessTokenService, AuthenticationError, Permission, Principal
 from .config import Settings
 from .models import (
     AuditEventPage,
+    MemberModeration,
+    MemberModerationUpdate,
     Message,
     MessageCreate,
     MessagePage,
+    MessageUpdate,
     RetentionResult,
     Room,
     RoomCreate,
@@ -47,10 +50,16 @@ from .store import (
     DatabaseLifecycleLock,
     InvalidAuditCursorError,
     InvalidCursorError,
+    MemberBannedError,
+    MemberMutedError,
+    MessageDeletedError,
+    MessageNotFoundError,
+    MessageOwnershipError,
     RetentionNotConfiguredError,
     RoomAlreadyExistsError,
     RoomArchivedError,
     RoomCapacityError,
+    RoomFrozenError,
     RoomNotArchivedError,
     RoomNotFoundError,
 )
@@ -221,6 +230,27 @@ def _authorize(principal: Principal, permission: Permission, room_id: str | None
         raise APIError(403, "authorization_denied", "This credential does not grant the required access")
 
 
+async def _enforce_member_access(
+    store: ChatStore,
+    principal: Principal,
+    room_id: str,
+    *,
+    write: bool,
+) -> None:
+    """Apply room moderation to stable token subjects; operators always bypass it."""
+
+    if principal.is_admin or principal.subject is None:
+        return
+    moderation = await store.get_member_moderation(room_id, principal.subject)
+    if moderation is None:
+        return
+    now = datetime.now(timezone.utc)
+    if moderation.banned_until is not None and moderation.banned_until > now:
+        raise APIError(403, "room_banned", "This account is banned from the room")
+    if write and moderation.muted_until is not None and moderation.muted_until > now:
+        raise APIError(403, "room_muted", "This account is muted in the room")
+
+
 def _error_payload(code: str, message: str, **details: Any) -> dict[str, Any]:
     error: dict[str, Any] = {"code": code, "message": message}
     if details:
@@ -348,7 +378,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     application = FastAPI(
         title="Samsarix Chat Engine",
-        version="0.5.0",
+        version="0.6.0",
         summary="A small persisted room-chat service with WebSocket delivery",
         lifespan=lifespan,
     )
@@ -417,7 +447,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def index() -> dict[str, Any]:
         return {
             "name": "Samsarix Chat Engine",
-            "version": "0.5.0",
+            "version": "0.6.0",
             "status": "ok",
             "docs": "/docs",
             "health": "/healthz",
@@ -457,23 +487,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         room = await store.get_room(room_id)
         if room is None:
             raise APIError(404, "room_not_found", "Room not found")
+        await _enforce_member_access(store, principal, room_id, write=False)
         return room
 
     @router.patch("/rooms/{room_id}", response_model=Room, tags=["rooms"])
     async def update_room(room_id: str, payload: RoomUpdate, principal: PrincipalDependency) -> Room:
         _authorize(principal, "admin")
         try:
-            room, changed = await store.set_room_archived(
+            room, changes = await store.set_room_state(
                 room_id,
                 archived=payload.archived,
+                frozen=payload.frozen,
                 actor=_audit_actor(principal),
             )
         except RoomNotFoundError as exc:
             raise APIError(404, "room_not_found", "Room not found") from exc
-        if changed and payload.archived:
+        if "archived" in changes and payload.archived:
             await manager.close_room(
                 room_id,
                 _event("room.archived", room=room.model_dump(mode="json")),
+            )
+        elif "frozen" in changes:
+            await manager.broadcast(
+                room_id,
+                _event("room.frozen" if payload.frozen else "room.unfrozen", room=room.model_dump(mode="json")),
             )
         return room
 
@@ -513,7 +550,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         def export_lines() -> Iterator[str]:
             metadata = {
                 "type": "samsarix.room_export",
-                "schema_version": 1,
+                "schema_version": 2,
                 "exported_at": exported_at.isoformat(),
                 "room": room.model_dump(mode="json"),
             }
@@ -543,6 +580,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         before: str | None = Query(default=None, min_length=1, max_length=128),
     ) -> MessagePage:
         _authorize(principal, "room:read", room_id)
+        await _enforce_member_access(store, principal, room_id, write=False)
         try:
             items, next_before = await store.list_messages(room_id, limit=limit, before=before)
         except RoomNotFoundError as exc:
@@ -561,6 +599,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", min_length=1, max_length=128),
     ) -> Message:
         _authorize(principal, "room:write", room_id)
+        await _enforce_member_access(store, principal, room_id, write=True)
         sender = payload.sender
         if principal.subject is not None:
             if sender is not None and sender != principal.subject:
@@ -594,16 +633,143 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 sender=sender,
                 content=payload.content,
                 client_message_id=idempotency_key or payload.client_message_id,
+                allow_frozen=principal.is_admin,
+                member_subject=None if principal.is_admin else principal.subject,
             )
         except RoomNotFoundError as exc:
             raise APIError(404, "room_not_found", "Room not found") from exc
         except RoomArchivedError as exc:
             raise APIError(409, "room_archived", "Archived rooms are read-only") from exc
+        except RoomFrozenError as exc:
+            raise APIError(409, "room_frozen", "Only administrators may publish while the room is frozen") from exc
+        except MemberBannedError as exc:
+            raise APIError(403, "room_banned", "This account is banned from the room") from exc
+        except MemberMutedError as exc:
+            raise APIError(403, "room_muted", "This account is muted in the room") from exc
         response.status_code = 201 if created else 200
         event = _event("message.created", message=message.model_dump(mode="json"))
         if created:
             await manager.broadcast(room_id, event)
         return message
+
+    @router.patch("/rooms/{room_id}/messages/{message_id}", response_model=Message, tags=["messages"])
+    async def update_message(
+        room_id: str,
+        message_id: str,
+        payload: MessageUpdate,
+        principal: PrincipalDependency,
+    ) -> Message:
+        _authorize(principal, "room:write", room_id)
+        await _enforce_member_access(store, principal, room_id, write=True)
+        try:
+            message = await store.update_message(
+                room_id=room_id,
+                message_id=message_id,
+                actor=_audit_actor(principal),
+                content=payload.content,
+                is_admin=principal.is_admin,
+                member_subject=None if principal.is_admin else principal.subject,
+            )
+        except RoomNotFoundError as exc:
+            raise APIError(404, "room_not_found", "Room not found") from exc
+        except MessageNotFoundError as exc:
+            raise APIError(404, "message_not_found", "Message not found") from exc
+        except MessageOwnershipError as exc:
+            raise APIError(
+                403,
+                "message_not_owned",
+                "Only the author or an administrator may edit this message",
+            ) from exc
+        except MessageDeletedError as exc:
+            raise APIError(409, "message_deleted", "Deleted messages cannot be edited") from exc
+        except RoomArchivedError as exc:
+            raise APIError(409, "room_archived", "Archived rooms are read-only") from exc
+        except RoomFrozenError as exc:
+            raise APIError(409, "room_frozen", "Only administrators may edit while the room is frozen") from exc
+        except MemberBannedError as exc:
+            raise APIError(403, "room_banned", "This account is banned from the room") from exc
+        except MemberMutedError as exc:
+            raise APIError(403, "room_muted", "This account is muted in the room") from exc
+        await manager.broadcast(room_id, _event("message.updated", message=message.model_dump(mode="json")))
+        return message
+
+    @router.delete("/rooms/{room_id}/messages/{message_id}", status_code=204, tags=["messages"])
+    async def delete_message(
+        room_id: str,
+        message_id: str,
+        principal: PrincipalDependency,
+    ) -> Response:
+        _authorize(principal, "room:write", room_id)
+        await _enforce_member_access(store, principal, room_id, write=True)
+        try:
+            message, deleted = await store.delete_message(
+                room_id=room_id,
+                message_id=message_id,
+                actor=_audit_actor(principal),
+                is_admin=principal.is_admin,
+                member_subject=None if principal.is_admin else principal.subject,
+            )
+        except RoomNotFoundError as exc:
+            raise APIError(404, "room_not_found", "Room not found") from exc
+        except MessageNotFoundError as exc:
+            raise APIError(404, "message_not_found", "Message not found") from exc
+        except MessageOwnershipError as exc:
+            raise APIError(
+                403,
+                "message_not_owned",
+                "Only the author or an administrator may delete this message",
+            ) from exc
+        except RoomArchivedError as exc:
+            raise APIError(409, "room_archived", "Archived rooms are read-only") from exc
+        except RoomFrozenError as exc:
+            raise APIError(409, "room_frozen", "Only administrators may delete while the room is frozen") from exc
+        except MemberBannedError as exc:
+            raise APIError(403, "room_banned", "This account is banned from the room") from exc
+        except MemberMutedError as exc:
+            raise APIError(403, "room_muted", "This account is muted in the room") from exc
+        if deleted:
+            await manager.broadcast(room_id, _event("message.deleted", message=message.model_dump(mode="json")))
+        return Response(status_code=204)
+
+    @router.patch(
+        "/rooms/{room_id}/members/{subject}/moderation",
+        response_model=MemberModeration,
+        tags=["moderation"],
+    )
+    async def update_member_moderation(
+        room_id: str,
+        subject: Annotated[str, Path(min_length=1, max_length=64)],
+        payload: MemberModerationUpdate,
+        principal: PrincipalDependency,
+    ) -> MemberModeration:
+        _authorize(principal, "admin")
+        if subject != subject.strip():
+            raise APIError(422, "invalid_request", "Moderation subject must not have surrounding whitespace")
+        try:
+            moderation = await store.set_member_moderation(
+                room_id,
+                subject,
+                payload,
+                actor=_audit_actor(principal),
+            )
+        except RoomNotFoundError as exc:
+            raise APIError(404, "room_not_found", "Room not found") from exc
+        if moderation.banned_until is not None and moderation.banned_until > datetime.now(timezone.utc):
+            closed = await manager.close_member(
+                room_id,
+                subject,
+                _event("member.banned", subject=subject, banned_until=moderation.banned_until.isoformat()),
+            )
+            if closed:
+                await manager.broadcast(
+                    room_id,
+                    _event(
+                        "presence.left",
+                        username=subject,
+                        active_connections=manager.room_connections(room_id),
+                    ),
+                )
+        return moderation
 
     @router.get("/stats", tags=["operations"])
     async def stats(principal: PrincipalDependency) -> dict[str, int]:
@@ -668,11 +834,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await websocket.send_json(_event("error", code="room_not_found", message="Room not found"))
             await websocket.close(code=4404, reason="Room not found")
             return
+        moderation = await store.get_member_moderation(room_id, principal.subject) if principal.subject else None
+        if (
+            not principal.is_admin
+            and moderation is not None
+            and moderation.banned_until is not None
+            and moderation.banned_until > datetime.now(timezone.utc)
+        ):
+            await websocket.send_json(
+                _event("error", code="room_banned", message="This account is banned from the room")
+            )
+            await websocket.close(code=4403, reason="Room access revoked")
+            return
         if room.archived_at is not None:
             await websocket.send_json(_event("error", code="room_archived", message="Archived rooms are read-only"))
             await websocket.close(code=4409, reason="Room archived")
             return
-        if not await manager.register(websocket, room_id, username):
+        if not await manager.register(websocket, room_id, username, principal.subject):
             await websocket.send_json(
                 _event("error", code="connection_capacity_reached", message="Connection capacity reached")
             )
@@ -680,12 +858,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return
 
         room = await store.get_room(room_id)
-        if room is None or room.archived_at is not None:
+        moderation = await store.get_member_moderation(room_id, principal.subject) if principal.subject else None
+        now = datetime.now(timezone.utc)
+        banned = (
+            not principal.is_admin
+            and moderation is not None
+            and moderation.banned_until is not None
+            and moderation.banned_until > now
+        )
+        if room is None or room.archived_at is not None or banned:
             await manager.unregister(websocket)
-            code = "room_not_found" if room is None else "room_archived"
-            status_message = "Room not found" if room is None else "Archived rooms are read-only"
+            code = "room_not_found" if room is None else "room_banned" if banned else "room_archived"
+            status_message = (
+                "Room not found"
+                if room is None
+                else "This account is banned from the room"
+                if banned
+                else "Archived rooms are read-only"
+            )
             await websocket.send_json(_event("error", code=code, message=status_message))
-            await websocket.close(code=4404 if room is None else 4409, reason=status_message)
+            await websocket.close(code=4404 if room is None else 4403 if banned else 4409, reason=status_message)
             return
 
         history, next_before = await store.list_messages(room_id, limit=50)
@@ -760,6 +952,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         _event("error", code="authorization_denied", message="Message publishing is not allowed"),
                     )
                     continue
+                moderation = (
+                    await store.get_member_moderation(room_id, principal.subject) if principal.subject else None
+                )
+                now = datetime.now(timezone.utc)
+                if (
+                    not principal.is_admin
+                    and moderation is not None
+                    and moderation.banned_until is not None
+                    and moderation.banned_until > now
+                ):
+                    await manager.send(
+                        websocket,
+                        _event("error", code="room_banned", message="This account is banned from the room"),
+                    )
+                    await websocket.close(code=4403, reason="Room access revoked")
+                    break
+                if (
+                    not principal.is_admin
+                    and moderation is not None
+                    and moderation.muted_until is not None
+                    and moderation.muted_until > now
+                ):
+                    await manager.send(
+                        websocket,
+                        _event("error", code="room_muted", message="This account is muted in the room"),
+                    )
+                    continue
                 if len(command.content) > resolved.max_message_chars:
                     await manager.send(
                         websocket,
@@ -783,20 +1002,53 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         sender=username,
                         content=command.content,
                         client_message_id=command.client_message_id,
+                        allow_frozen=principal.is_admin,
+                        member_subject=None if principal.is_admin else principal.subject,
                     )
-                except (RoomArchivedError, RoomNotFoundError) as exc:
+                except (
+                    MemberBannedError,
+                    MemberMutedError,
+                    RoomArchivedError,
+                    RoomFrozenError,
+                    RoomNotFoundError,
+                ) as exc:
                     archived = isinstance(exc, RoomArchivedError)
+                    frozen = isinstance(exc, RoomFrozenError)
+                    banned = isinstance(exc, MemberBannedError)
+                    muted = isinstance(exc, MemberMutedError)
                     await manager.send(
                         websocket,
                         _event(
                             "error",
-                            code="room_archived" if archived else "room_not_found",
-                            message="Archived rooms are read-only" if archived else "Room not found",
+                            code=(
+                                "room_archived"
+                                if archived
+                                else "room_frozen"
+                                if frozen
+                                else "room_banned"
+                                if banned
+                                else "room_muted"
+                                if muted
+                                else "room_not_found"
+                            ),
+                            message=(
+                                "Archived rooms are read-only"
+                                if archived
+                                else "Only administrators may publish while the room is frozen"
+                                if frozen
+                                else "This account is banned from the room"
+                                if banned
+                                else "This account is muted in the room"
+                                if muted
+                                else "Room not found"
+                            ),
                         ),
                     )
+                    if frozen or muted:
+                        continue
                     await websocket.close(
-                        code=4409 if archived else 4404,
-                        reason="Room archived" if archived else "Room not found",
+                        code=4409 if archived else 4403 if banned else 4404,
+                        reason="Room archived" if archived else "Room access revoked" if banned else "Room not found",
                     )
                     break
                 message_event = _event(

@@ -86,3 +86,22 @@ async def test_close_room_attempts_close_when_notification_fails() -> None:
 
     assert target.closed == [(4409, "Room archived")]
     assert manager.active_connections == 0
+
+
+@pytest.mark.asyncio
+async def test_close_member_targets_subject_without_disrupting_room() -> None:
+    manager = ConnectionManager(max_connections=3, max_per_room=3, send_timeout=0.1)
+    target = FakeWebSocket()
+    peer = FakeWebSocket()
+    await manager.register(as_websocket(target), "room", "Target", "subject-1")
+    await manager.register(as_websocket(peer), "room", "Peer", "subject-2")
+
+    closed = await manager.close_member("room", "subject-1", {"type": "member.banned"})
+
+    assert closed == 1
+    assert target.sent == [{"type": "member.banned"}]
+    assert target.closed == [(4403, "Room access revoked")]
+    assert peer.sent == []
+    assert peer.closed == []
+    assert manager.active_connections == 1
+    assert manager.room_connections("room") == 1

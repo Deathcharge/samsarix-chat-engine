@@ -1,6 +1,6 @@
 # Identity and room authorization
 
-Version 0.5 supports two credential classes with deliberately different jobs:
+Version 0.6 supports two credential classes with deliberately different jobs:
 
 - `SAMSARIX_CHAT_API_KEY` is the deployment-wide operator credential. It can create and list rooms, inspect process statistics, and access every room. Keep it on trusted servers and administration workstations.
 - A signed access token represents one application user. It contains a subject, an expiry, allowed room IDs, and `room:read`, `room:write`, or `admin` permissions. Give ordinary clients only short-lived room tokens.
@@ -79,6 +79,6 @@ A read-only WebSocket remains connected when it attempts to publish and receives
 
 Tokens use HS256 with a fixed algorithm allowlist and the protected type `samsarix-access+jwt`. Verification requires `iss`, `aud`, `sub`, `iat`, `nbf`, `exp`, `jti`, `rooms`, and `permissions`; it rejects excessive lifetimes and malformed or duplicate authorization claims. Defaults are a 24-hour maximum lifetime and 30 seconds of clock skew.
 
-HS256 means every token issuer can also verify and mint tokens. Share the signing secret only with trusted backend components. Rotate it by restarting issuers and the engine with a new value; existing tokens are invalidated immediately. Token revocation lists, asymmetric signing, key IDs, and automated key rotation are not implemented in v0.5, so prefer lifetimes measured in minutes for browser clients.
+HS256 means every token issuer can also verify and mint tokens. Share the signing secret only with trusted backend components. Rotate it by restarting issuers and the engine with a new value; existing tokens are invalidated immediately. Token revocation lists, asymmetric signing, key IDs, and automated key rotation are not implemented in v0.6, so prefer lifetimes measured in minutes for browser clients.
 
 Never put API keys or tokens in URLs. Configure TLS at the reverse proxy, an exact `SAMSARIX_CHAT_ALLOWED_ORIGINS` list for browser deployments, filesystem protections for SQLite, and log redaction at upstream gateways.

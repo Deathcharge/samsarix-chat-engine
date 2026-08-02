@@ -13,7 +13,7 @@ def test_operations_endpoints_and_security_headers(client: TestClient) -> None:
     stats = client.get("/v1/stats")
 
     assert index.json()["name"] == "Samsarix Chat Engine"
-    assert index.json()["version"] == "0.5.0"
+    assert index.json()["version"] == "0.6.0"
     assert health.status_code == 200
     assert health.json() == {"status": "ok"}
     assert ready.status_code == 200
