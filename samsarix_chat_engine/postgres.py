@@ -23,7 +23,7 @@ from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
-POSTGRES_SCHEMA_VERSION = 4
+POSTGRES_SCHEMA_VERSION = 5
 POSTGRES_MIGRATION_LOCK_ID = 7_495_346_927_831_819_041
 POSTGRES_EVENT_SEQUENCE_LOCK_ID = 7_495_346_927_831_819_042
 REALTIME_CHANNEL = "samsarix_realtime_v1"
@@ -470,6 +470,27 @@ class PostgresFoundation:
                     """
                     CREATE INDEX IF NOT EXISTS samsarix_connection_leases_member
                     ON public.samsarix_connection_leases (room_id, subject, lease_expires_at)
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS public.samsarix_rate_buckets (
+                        scope TEXT NOT NULL CHECK (scope IN ('message', 'search', 'typing')),
+                        key_digest BYTEA NOT NULL CHECK (octet_length(key_digest) = 32),
+                        window_started_at TIMESTAMPTZ NOT NULL,
+                        event_count INTEGER NOT NULL CHECK (event_count > 0),
+                        expires_at TIMESTAMPTZ NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                        PRIMARY KEY (scope, key_digest, window_started_at),
+                        CHECK (expires_at > window_started_at)
+                    )
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS samsarix_rate_buckets_expiry
+                    ON public.samsarix_rate_buckets (expires_at, scope, key_digest)
                     """
                 )
                 await connection.execute(
