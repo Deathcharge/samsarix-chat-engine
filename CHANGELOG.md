@@ -2,7 +2,7 @@
 
 This project follows semantic versioning while it is in alpha: minor versions may add or revise public contracts, and those changes are called out here.
 
-## 0.9.0 — 2026-08-01
+## 0.9.0 — 2026-08-02
 
 ### Added
 

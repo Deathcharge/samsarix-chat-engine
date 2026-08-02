@@ -75,6 +75,7 @@ import hashlib
 import hmac
 import time
 
+
 def verify(raw_body: bytes, headers: dict[str, str], secret: str) -> str:
     delivery_id = headers["webhook-id"]
     timestamp = int(headers["webhook-timestamp"])

@@ -1,6 +1,6 @@
 # Productization record
 
-Last updated: 2026-08-01
+Last updated: 2026-08-02
 
 ## Repository assessment
 
@@ -143,6 +143,22 @@ Version 0.7 reduces adoption friction with a checked-in, framework-neutral TypeS
 Version 0.8 turns those primitives into an explicit support-room workflow. Signed users receive a persistent, non-regressing per-room cursor and a current unread count that excludes their own and deleted messages. They can remove their own state, while a per-room cap bounds storage. WebSocket writers can emit transient typing transitions under an independent limiter; starts refresh an advertised server deadline and stops occur on explicit command, successful publish, disconnect, or timeout without persistence or audit. The TypeScript client covers both contracts, and a runnable two-party support example demonstrates customer-to-agent-to-customer read state. This shape is grounded in [Stream's unread-state model](https://getstream.io/chat/docs/javascript/unread/) and Sendbird's [channel](https://sendbird.com/docs/chat/sdk/v4/javascript/channel/overview-channel) and [message](https://sendbird.com/docs/chat/sdk/v4/javascript/message/overview-message) guidance. It establishes the application state consumed by the separate v0.9 reliability milestone.
 
 Version 0.9 closes that host-application integration gap with a SQLite transactional outbox for selected committed message and moderation events. It follows the [Standard Webhooks specification](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md) for the stable ID, per-attempt timestamp, exact-body HMAC-SHA256 signature, rotation list, receiver idempotency, retry, timeout, HTTPS, and SSRF considerations. The single worker provides restart-safe at-least-once delivery, a bounded multi-day schedule with jitter and `Retry-After`, metadata-only health pagination, and manual replay. GitHub's [validation guidance](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries) supports raw-body constant-time HMAC verification, while its [webhook practices](https://docs.github.com/en/webhooks/using-webhooks/best-practices-for-using-webhooks) support HTTPS, fast acknowledgement, and stable delivery-ID replay protection. Stripe's [delivery behavior](https://docs.stripe.com/webhooks#event-delivery-behaviors) reinforces automatic retries and the absence of an ordering guarantee. The implementation deliberately rejects redirect/query-secret destinations, blocks non-public resolution by default, retains no receiver body, scrubs related payload copies on message/room deletion and age/count retention, and fails a mutation rather than silently dropping its event only when an all-pending outbox is full.
+
+Final v0.9 local verification on 2026-08-02 used Node 24.12.0, CPython 3.11.9 for the declared development environment, and CPython 3.14.6 for the clean installed artifact:
+
+| Check | Actual result |
+| --- | --- |
+| `ruff check .` / `ruff format --check .` | Passed; 49 Python/Markdown files formatted |
+| `mypy samsarix_chat_engine scripts` / `compileall` / `git diff --check` | Passed; no type issues in 12 source/script files |
+| `pytest --cov=samsarix_chat_engine --cov-report=term-missing` | 99 passed in 95.62s; 88.28% total branch coverage; no warnings |
+| TypeScript `check` / Node test runner | Passed; strict declaration build and 17/17 fake-transport/API tests |
+| TypeScript audit / package inspection | Zero runtime dependencies, no known vulnerabilities, and 23 intended artifact files |
+| Python sdist / wheel / `twine check` | Wheel built through the sdist; webhook docs, source, smoke, tests, license, and notice included; both metadata checks passed |
+| clean Python 3.14 wheel install | Version 0.9.0 resolved from `site-packages`; Samsarix LLC/contact/support/MPL metadata and declared dependencies passed |
+| expanded installed-wheel smoke | HTTP, WebSocket, read state, typing, controls, seven exact-body signed webhooks, export, lifecycle, backup, and graceful shutdown passed |
+| source/runtime dependency audits | No known third-party vulnerabilities; the unpublished local Samsarix distribution was explicitly reported as unauditable |
+
+Exact artifact digests are recorded in the pull request because embedding them in packaged source would change those digests. The GitHub matrix remains the cross-platform merge gate; artifact digests will change if review fixes alter the source.
 
 Final v0.8 local verification on 2026-08-01 used Node 24.12.0, CPython 3.11.9 for the declared development environment, and CPython 3.14.6 for the clean installed artifact:
 
