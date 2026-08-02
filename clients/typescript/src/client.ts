@@ -116,6 +116,25 @@ export class SamsarixChatClient {
     return this.request<MessagePage>(`/v1/rooms/${encodeURIComponent(roomId)}/messages?${query}`);
   }
 
+  async searchMessages(
+    roomId: string,
+    search: string,
+    options: { limit?: number; before?: string } = {},
+  ): Promise<MessagePage> {
+    const normalized = search.trim().normalize("NFKC");
+    if ([...normalized].length < 2) {
+      throw new RangeError("search must contain at least 2 NFKC-normalized characters");
+    }
+    const query = new URLSearchParams({
+      q: normalized,
+      limit: String(boundedInteger(options.limit ?? 50, 1, 100, "limit")),
+    });
+    if (options.before !== undefined) {
+      query.set("before", options.before);
+    }
+    return this.request<MessagePage>(`/v1/rooms/${encodeURIComponent(roomId)}/messages/search?${query}`);
+  }
+
   async createMessage(roomId: string, payload: MessageCreate, idempotencyKey?: string): Promise<ChatMessage> {
     return this.request<ChatMessage>(`/v1/rooms/${encodeURIComponent(roomId)}/messages`, {
       method: "POST",

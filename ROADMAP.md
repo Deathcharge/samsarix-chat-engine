@@ -62,7 +62,16 @@ Attachments, search, reactions, threads, and mentions should be added only again
 - [x] expose delivery health and terminal-failure recovery without weakening local message commits;
 - [x] document receiver verification, secret rotation, network/privacy boundaries, and failure-mode runbooks.
 
-## v0.10 — measured multi-instance operation
+## v0.10 — support-room retrieval
+
+- [x] add authorized, Unicode-normalized current-message search within one room;
+- [x] preserve stable chronological pagination while excluding deleted content and reflecting edits;
+- [x] bound scan cost by retained room history and add an independent per-principal search limit;
+- [x] expose the workflow through the TypeScript client and document its privacy/performance boundary.
+
+This is deliberately per-room substring retrieval rather than global full-text ranking. It serves the named support-case journey without adding an external index, a migration, or a misleading scale claim.
+
+## v0.11 — measured multi-instance operation
 
 - define a broker/history adapter boundary without changing the single-instance default;
 - implement and test cross-worker fan-out, presence, distributed rate limits, and reconnect recovery;

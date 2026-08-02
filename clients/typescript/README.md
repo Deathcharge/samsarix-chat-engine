@@ -1,6 +1,6 @@
 # `@samsarix/chat-client`
 
-Dependency-free TypeScript client for Samsarix Chat Engine 0.8 HTTP and WebSocket contracts. It ships ESM and generated declarations, works with browser globals, and accepts injected `fetch`/`WebSocket` implementations for Node runtimes and tests.
+Dependency-free TypeScript client for Samsarix Chat Engine 0.10 HTTP and WebSocket contracts. It ships ESM and generated declarations, works with browser globals, and accepts injected `fetch`/`WebSocket` implementations for Node runtimes and tests.
 
 This package is part of the Samsarix Chat Engine repository and is not yet published to npm.
 
@@ -11,7 +11,7 @@ cd clients/typescript
 npm ci
 npm run build
 npm pack
-npm install ./samsarix-chat-client-0.2.0.tgz
+npm install ./samsarix-chat-client-0.3.0.tgz
 ```
 
 ## Token client
@@ -39,6 +39,8 @@ room.onEvent((event) => {
 });
 await room.connect();
 const unread = await client.getReadState("support-42");
+const matches = await client.searchMessages("support-42", "payment failed", { limit: 25 });
+console.log("matches", matches.items);
 console.log("unread", unread.unread_count);
 await client.markRead("support-42");
 room.setTyping(true);

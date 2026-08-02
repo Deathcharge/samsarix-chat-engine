@@ -144,6 +144,30 @@ Version 0.8 turns those primitives into an explicit support-room workflow. Signe
 
 Version 0.9 closes that host-application integration gap with a SQLite transactional outbox for selected committed message and moderation events. It follows the [Standard Webhooks specification](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md) for the stable ID, per-attempt timestamp, exact-body HMAC-SHA256 signature, rotation list, receiver idempotency, retry, timeout, HTTPS, and SSRF considerations. The single worker provides restart-safe at-least-once delivery, a bounded multi-day schedule with jitter and `Retry-After`, metadata-only health pagination, and manual replay. GitHub's [validation guidance](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries) supports raw-body constant-time HMAC verification, while its [webhook practices](https://docs.github.com/en/webhooks/using-webhooks/best-practices-for-using-webhooks) support HTTPS, fast acknowledgement, and stable delivery-ID replay protection. Stripe's [delivery behavior](https://docs.stripe.com/webhooks#event-delivery-behaviors) reinforces automatic retries and the absence of an ordering guarantee. The implementation deliberately rejects redirect/query-secret destinations, blocks non-public resolution by default, pins the validated address for the connection, retains no receiver body, scrubs related payload copies on message/room deletion and age/count retention, and fails a mutation rather than silently dropping its event only when an all-pending outbox is full.
 
+Version 0.10 adds retrieval against the named support-case journey rather than prematurely attempting generic collaboration search. Official [Sendbird message-search guidance](https://docs.sendbird.com/docs/chat/platform-api/v3/message/message-search/message-search-overview) and [Stream search guidance](https://getstream.io/chat/docs/php/search/) establish channel-scoped retrieval as a practical chat capability; [Ably's external-storage guidance](https://ably.com/docs/chat/external-storage-and-processing/data-storage) also makes the boundary clear when an application needs a separately governed long-term index. Samsarix therefore supplies authorized, Unicode-normalized substring matching over only one room's current retained messages, with cursor pagination and a separate limiter. The existing per-room history cap bounds a linear SQLite scan, schema 5 remains unchanged, and global/fuzzy/ranked search remains an explicit external-system decision.
+
+Final v0.10 local verification on 2026-08-02 used Node 24.12.0, CPython 3.11.9 for the declared development environment, and CPython 3.14.6 for the clean installed artifact:
+
+The initial verified implementation is commit `84dfecea8114a2e65e4ac4df1f936e1211eb2926`; Unicode/pagination review hardening and the final artifact surface are commit `4b1456dd1a655a173fc80eca0ad358a37e93cf52`.
+
+| Gate | Result |
+| --- | --- |
+| Ruff lint / format, mypy, compile, diff check | Passed |
+| Python integration and branch coverage | 105 passed; 88.66% total branch coverage, above the 85% gate |
+| Python dependency audit | No known third-party vulnerabilities; unpublished local project distributions were skipped by registry lookup |
+| TypeScript check / Node test runner | Passed; strict declaration build and 18/18 fake-transport/API tests |
+| TypeScript audit / package inspection | Zero runtime dependencies, no known vulnerabilities, and 23 intended artifact files |
+| real TypeScript integration smoke | Authenticated HTTP, search/edit convergence, read state, WebSocket auth/history/publish, reconnect, edit, delete, and tombstone recovery passed |
+| Python build / Twine | Wheel and source distribution built in isolation and both passed metadata checks |
+| clean Python 3.14 wheel install | Version 0.10.0 resolved from `site-packages`; HTTP, search, WebSocket, read state, typing, controls, seven exact-body signed webhooks, export, lifecycle, backup, and graceful shutdown passed |
+
+Artifact SHA-256 digests:
+
+- wheel: `6B837826522E3708ECE1AA51118B46FC9F64C45ADF14FD91BD845E64631AB239`
+- source distribution: `7235B3EBE89DD88FD078078038FE5A672417F510949824A77E473296ED678C1F`
+
+No database migration is introduced: v0.10 remains on schema 5. A rollback to v0.9 requires stopping v0.10, removing the optional search-rate environment variable, and starting v0.9 against the same database. Search queries may be copied into ordinary proxy access logs, so those logs remain part of the room-content privacy boundary. Sustained search load, multi-process behavior, fuzzy/global ranking, and an external security assessment were not claimed or run. If measured room size or query concurrency outgrows bounded scans, the next search-specific design gate is a reviewed SQLite FTS5 table or a write-maintained normalized index—not a silent scale claim.
+
 Final v0.9 local verification on 2026-08-02 used Node 24.12.0, CPython 3.11.9 for the declared development environment, and CPython 3.14.6 for the clean installed artifact:
 
 | Check | Actual result |
@@ -290,7 +314,7 @@ Public package publication, hosted deployment, domains, credentials, signing, an
 ## Known risks
 
 - The operator API key and HS256 token signing secret are high-impact symmetric credentials; token-secret rotation invalidates dependent access immediately.
-- The webhook HMAC secrets authorize receiver trust, payloads duplicate selected plaintext content in the outbox/receiver, and DNS rebinding still requires deployment-level egress controls despite default address checks.
+- The webhook HMAC secrets authorize receiver trust and payloads duplicate selected plaintext content in the outbox/receiver. Each attempt validates resolution and pins the selected address while preserving TLS hostname verification, but deployment-level egress/routing controls remain necessary defense in depth.
 - Access tokens have bounded expiry but no per-token revocation list, asymmetric keys, or automatic key rotation.
 - SQLite and the in-process connection registry intentionally limit scale and topology.
 - Count-based deletion has no audit log and is unsuitable where legal holds are required.

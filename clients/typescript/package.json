@@ -1,6 +1,6 @@
 {
   "name": "@samsarix/chat-client",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Typed, dependency-free client for Samsarix Chat Engine",
   "type": "module",
   "sideEffects": false,

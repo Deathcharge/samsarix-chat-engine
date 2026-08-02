@@ -291,6 +291,10 @@ def main() -> int:
                 base_url + "/v1/rooms/wheel-room/messages",
                 credential=("Authorization", f"Bearer {token}"),
             )
+            search = _request(
+                base_url + "/v1/rooms/wheel-room/messages/search?q=wheel+unread",
+                credential=("Authorization", f"Bearer {token}"),
+            )
             read_before = _request(
                 base_url + "/v1/rooms/wheel-room/read-state",
                 credential=("Authorization", f"Bearer {token}"),
@@ -315,7 +319,12 @@ def main() -> int:
                 body={},
             )
             websocket_sender = asyncio.run(_websocket_round_trip(base_url, token))
-            if room["id"] != "wheel-room" or message["sender"] != "wheel-user" or len(history["items"]) != 2:
+            if (
+                room["id"] != "wheel-room"
+                or message["sender"] != "wheel-user"
+                or len(history["items"]) != 2
+                or [item["content"] for item in search["items"]] != ["installed wheel unread"]
+            ):
                 raise RuntimeError("installed-wheel HTTP journey mismatch")
             _wait_for_webhooks(base_url, operator_key, 3)
             edited = _request(
@@ -416,7 +425,8 @@ def main() -> int:
             if not database.is_file() or database.stat().st_size == 0:
                 raise RuntimeError("installed-wheel database was not persisted")
             print(
-                f"http=ok websocket=ok read_state=ok typing=ok controls=ok webhook=ok export=ok lifecycle=ok backup=ok "
+                f"http=ok search=ok websocket=ok read_state=ok typing=ok controls=ok webhook=ok export=ok "
+                f"lifecycle=ok backup=ok "
                 f"sender={websocket_sender} history={len(history['items'])}"
             )
         finally:

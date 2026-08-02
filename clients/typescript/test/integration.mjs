@@ -23,6 +23,8 @@ const created = await client.createMessage(
   "sdk-http-1",
 );
 assert.equal(created.sender, "sdk-user");
+const search = await client.searchMessages("sdk-room", "typescript http");
+assert.deepEqual(search.items.map((message) => message.id), [created.id]);
 const markedRead = await client.markRead("sdk-room", created.id);
 assert.equal(markedRead.unread_count, 0);
 await client.clearReadState("sdk-room");
@@ -46,6 +48,7 @@ const updatedEvent = nextEvent(session, "message.updated");
 const updated = await client.updateMessage("sdk-room", created.id, "TypeScript edited");
 assert.equal(updated.content, "TypeScript edited");
 assert.equal((await updatedEvent).message.id, created.id);
+assert.equal((await client.searchMessages("sdk-room", "typescript http")).items.length, 0);
 
 const deletedEvent = nextEvent(session, "message.deleted");
 await client.deleteMessage("sdk-room", created.id);
@@ -57,7 +60,7 @@ assert.equal(tombstone?.content, "");
 assert.ok(tombstone?.deleted_at);
 session.close();
 
-console.log("typescript_client_http=ok websocket=ok reconnect_contract=ok edit_delete=ok");
+console.log("typescript_client_http=ok search=ok websocket=ok reconnect_contract=ok edit_delete=ok");
 
 function nextEvent(roomSession, type) {
   return new Promise((resolve, reject) => {

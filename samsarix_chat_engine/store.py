@@ -11,6 +11,7 @@ import logging
 import os
 import sqlite3
 import tempfile
+import unicodedata
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import closing
@@ -33,6 +34,25 @@ from .models import (
 T = TypeVar("T")
 SCHEMA_VERSION = 5
 logger = logging.getLogger(__name__)
+
+
+def _normalize_search_text(value: str | None) -> str:
+    return unicodedata.normalize("NFKC", value or "").casefold()
+
+
+def normalize_search_query(query: str) -> str:
+    """Return a bounded normalized query without retaining invalid input."""
+
+    normalized = _normalize_search_text(query.strip())
+    if not 2 <= len(normalized) <= 100:
+        raise InvalidSearchQueryError
+    return normalized
+
+
+def _paginate_rows(rows: list[sqlite3.Row], limit: int, *, chronological: bool) -> tuple[list[sqlite3.Row], str | None]:
+    page_rows = rows[:limit]
+    next_before = page_rows[-1]["id"] if len(rows) > limit and page_rows else None
+    return (list(reversed(page_rows)) if chronological else page_rows), next_before
 
 
 def copy_sqlite_database(source: Path, target: Path, *, replace: bool = False) -> None:
@@ -109,6 +129,10 @@ class RoomNotArchivedError(StoreError):
 
 class InvalidCursorError(StoreError):
     """Raised when a message pagination cursor is unknown for a room."""
+
+
+class InvalidSearchQueryError(StoreError):
+    """Raised when a message search query is empty or outside supported bounds."""
 
 
 class InvalidAuditCursorError(StoreError):
@@ -460,6 +484,18 @@ class ChatStore:
     ) -> tuple[list[Message], str | None]:
         return await asyncio.to_thread(self._list_messages_sync, room_id, limit, before)
 
+    async def search_messages(
+        self,
+        room_id: str,
+        query: str,
+        *,
+        limit: int = 50,
+        before: str | None = None,
+    ) -> tuple[list[Message], str | None]:
+        """Search current, retained message content within one room."""
+
+        return await asyncio.to_thread(self._search_messages_sync, room_id, query, limit, before)
+
     async def get_read_state(self, room_id: str, subject: str) -> ReadState:
         """Return a signed subject's cursor and a current derived unread count."""
 
@@ -567,6 +603,7 @@ class ChatStore:
     def _connect(self, *, check_same_thread: bool = True) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path, timeout=5.0, check_same_thread=check_same_thread)
         connection.row_factory = sqlite3.Row
+        connection.create_function("samsarix_search_normalize", 1, _normalize_search_text, deterministic=True)
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 5000")
         return connection
@@ -1149,10 +1186,57 @@ class ChatStore:
                     (room_id, limit + 1),
                 ).fetchall()
 
-        has_more = len(rows) > limit
-        page_rows = rows[:limit]
-        messages = [self._message_from_row(row) for row in reversed(page_rows)]
-        next_before = page_rows[-1]["id"] if has_more and page_rows else None
+        page_rows, next_before = _paginate_rows(rows, limit, chronological=True)
+        messages = [self._message_from_row(row) for row in page_rows]
+        return messages, next_before
+
+    def _search_messages_sync(
+        self,
+        room_id: str,
+        query: str,
+        limit: int,
+        before: str | None,
+    ) -> tuple[list[Message], str | None]:
+        normalized_query = normalize_search_query(query)
+
+        with closing(self._connect()) as connection, connection:
+            if connection.execute("SELECT 1 FROM rooms WHERE id = ?", (room_id,)).fetchone() is None:
+                raise RoomNotFoundError(room_id)
+
+            cursor_created_at: str | None = None
+            cursor_id: str | None = None
+            if before:
+                cursor = connection.execute(
+                    "SELECT created_at, id FROM messages WHERE room_id = ? AND id = ?", (room_id, before)
+                ).fetchone()
+                if cursor is None:
+                    raise InvalidCursorError(before)
+                cursor_created_at = cursor["created_at"]
+                cursor_id = cursor["id"]
+            rows = connection.execute(
+                """
+                SELECT id, room_id, sender, content, created_at, client_message_id, edited_at, deleted_at
+                FROM messages
+                WHERE room_id = ?
+                  AND deleted_at IS NULL
+                  AND instr(samsarix_search_normalize(content), ?) > 0
+                  AND (? IS NULL OR created_at < ? OR (created_at = ? AND id < ?))
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (
+                    room_id,
+                    normalized_query,
+                    cursor_created_at,
+                    cursor_created_at,
+                    cursor_created_at,
+                    cursor_id,
+                    limit + 1,
+                ),
+            ).fetchall()
+
+        page_rows, next_before = _paginate_rows(rows, limit, chronological=True)
+        messages = [self._message_from_row(row) for row in page_rows]
         return messages, next_before
 
     def _get_read_state_sync(self, room_id: str, subject: str) -> ReadState:
@@ -1287,10 +1371,8 @@ class ChatStore:
                     """,
                     (limit + 1,),
                 ).fetchall()
-        has_more = len(rows) > limit
-        page_rows = rows[:limit]
-        events = [self._audit_from_row(row) for row in reversed(page_rows)]
-        next_before = page_rows[-1]["id"] if has_more and page_rows else None
+        page_rows, next_before = _paginate_rows(rows, limit, chronological=True)
+        events = [self._audit_from_row(row) for row in page_rows]
         return events, next_before
 
     def _list_webhook_deliveries_sync(
@@ -1349,10 +1431,8 @@ class ChatStore:
                     """,
                     (status, status, status, status, limit + 1),
                 ).fetchall()
-        has_more = len(rows) > limit
-        page_rows = rows[:limit]
+        page_rows, next_before = _paginate_rows(rows, limit, chronological=False)
         deliveries = [self._webhook_from_row(row) for row in page_rows]
-        next_before = page_rows[-1]["id"] if has_more and page_rows else None
         return deliveries, next_before
 
     def _next_webhook_delivery_sync(self, now: datetime) -> PendingWebhook | None:

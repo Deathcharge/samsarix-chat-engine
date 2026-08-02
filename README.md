@@ -2,13 +2,14 @@
 
 Samsarix Chat Engine is a small, local-first room chat service from Samsarix LLC for developers who need persisted messages and live WebSocket delivery without adopting a full collaboration platform. It runs as a standalone FastAPI service or as an embeddable ASGI application, stores data in SQLite, and has no dependency on Redis, an LLM provider, or any private package.
 
-Version 0.9.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, accountable data lifecycle, practical conversation controls, typed TypeScript client, support-workflow primitives, and durable application webhooks are implemented and tested. The project is licensed under the standard Mozilla Public License 2.0.
+Version 0.10.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, accountable data lifecycle, practical conversation controls, typed TypeScript client, support-workflow primitives, per-room retrieval, and durable application webhooks are implemented and tested. The project is licensed under the standard Mozilla Public License 2.0.
 
 ## What works
 
 - Create and inspect rooms over HTTP.
 - Post validated messages over HTTP or WebSocket.
 - Persist room history in SQLite and recover it after reconnect or restart.
+- Search the current retained content of one authorized room with Unicode-aware cursor pagination.
 - Broadcast messages and lightweight join/leave presence within one process.
 - Retry message submission safely with `Idempotency-Key` or `client_message_id`.
 - Protect operator actions with an optional shared API key.
@@ -58,6 +59,9 @@ curl -X POST http://127.0.0.1:8000/v1/rooms/general/messages \
   -d '{"sender":"Andrew","content":"Hello, room"}'
 
 curl http://127.0.0.1:8000/v1/rooms/general/messages
+
+curl --get http://127.0.0.1:8000/v1/rooms/general/messages/search \
+  --data-urlencode "q=hello"
 ```
 
 For a complete WebSocket client, install the test extra and run the examples after creating `general`:
@@ -118,6 +122,7 @@ All settings are optional for loopback development. Copy [.env.example](.env.exa
 | `SAMSARIX_CHAT_ALLOWED_ORIGINS` | unset | Comma-separated exact browser origins for CORS/WebSockets |
 | `SAMSARIX_CHAT_MAX_MESSAGE_CHARS` | `4000` | Per-message character limit |
 | `SAMSARIX_CHAT_MESSAGES_PER_MINUTE` | `60` | Per-client HTTP and per-connection WebSocket message rate |
+| `SAMSARIX_CHAT_SEARCHES_PER_MINUTE` | `30` | Per-subject or client-address room-search rate |
 | `SAMSARIX_CHAT_MAX_CONNECTIONS` | `200` | Process-wide WebSocket cap |
 | `SAMSARIX_CHAT_MAX_CONNECTIONS_PER_ROOM` | `100` | Per-room WebSocket cap |
 | `SAMSARIX_CHAT_MAX_ROOMS` | `1000` | Persisted room cap |
@@ -172,6 +177,7 @@ HTTP / WebSocket clients
 - A message is persisted before `message.created` is broadcast. An HTTP success therefore means the local database committed it.
 - Selected webhook rows commit in the same transaction as their message/moderation change, then deliver at least once in the background. Receivers deduplicate the stable delivery ID.
 - Signed users can persist a monotonic per-room read cursor and retrieve a current unread count that excludes their own and deleted messages.
+- Search is room-authorized, current-state Unicode-normalized substring matching over at most the configured retained messages for that room; it is not global, fuzzy, or externally indexed.
 - Typing signals are transition-only, separately rate-limited, automatically expired, and never persisted or audited.
 - WebSocket delivery and presence events are best-effort/at-most-once. Reconnecting clients recover the last 50 messages and can page older history over HTTP.
 - Running multiple worker processes is not supported: each process would have an independent connection registry and rate limiter. Use one process or add a real broker in a future release.
@@ -208,6 +214,6 @@ This is a coherent single-instance MVP, not a hosted chat platform. The highest-
 
 Copyright (c) 2026 Samsarix LLC. The source is licensed under the [Mozilla Public License 2.0](LICENSE). MPL-2.0 keeps distributed modifications to covered source files open and preserves license notices, while allowing those files to be combined with separate proprietary files in a larger work.
 
-The canonical Python package, command, and environment prefix are `samsarix_chat_engine`, `samsarix-chat`, and `SAMSARIX_CHAT_*`. Version 0.9 keeps `helix_chat_engine`, `helix-chat`, and `HELIX_CHAT_*` as deprecated compatibility aliases. If only `data/helix-chat.db` exists, the CLI reuses it so the rename does not hide existing data.
+The canonical Python package, command, and environment prefix are `samsarix_chat_engine`, `samsarix-chat`, and `SAMSARIX_CHAT_*`. Version 0.10 keeps `helix_chat_engine`, `helix-chat`, and `HELIX_CHAT_*` as deprecated compatibility aliases. If only `data/helix-chat.db` exists, the CLI reuses it so the rename does not hide existing data.
 
 For general inquiries, email contact@samsarix.com. For product support and private security reports, email support@samsarix.com or read [SECURITY.md](SECURITY.md).
