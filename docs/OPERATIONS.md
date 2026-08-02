@@ -106,9 +106,9 @@ Restoring replaces the live database state with the snapshot state. Messages, au
 
 ## Upgrade and rollback
 
-Opening an older supported database with v0.11 migrates it to schema version 5. The migration preserves existing rooms/messages, lifecycle metadata, moderation controls, read state, and audit records, then creates an empty webhook outbox. Upgrading from v0.9 or v0.10 makes no schema change. Legacy and operator/local messages still have no authenticated author and therefore count as other-authored for signed-user unread state. The engine refuses a schema version newer than it understands.
+Opening an older supported database with v0.12 migrates it to schema version 5. The migration preserves existing rooms/messages, lifecycle metadata, moderation controls, read state, and audit records, then creates an empty webhook outbox. Upgrading from v0.9, v0.10, or v0.11 makes no schema change. Legacy and operator/local messages still have no authenticated author and therefore count as other-authored for signed-user unread state. The engine refuses a schema version newer than it understands.
 
-Take a verified backup before upgrade. Releases before v0.9 do not understand schema 5. A v0.11-to-v0.10 rollback needs no database downgrade: stop v0.11, translate any new `_FILE` secret settings to protected direct variables, and start v0.10. A v0.10-to-v0.9 rollback additionally removes `SAMSARIX_CHAT_SEARCHES_PER_MINUTE`. For a rollback to an earlier schema, restore the corresponding pre-upgrade backup. Removing webhook environment variables stops new outbox insertion and delivery but is not a database downgrade.
+Take a verified backup before upgrade. Releases before v0.9 do not understand schema 5. A v0.12-to-v0.11 rollback needs no database downgrade, but asymmetric JWKS authentication must be replaced with v0.11-compatible HS256 or operator-key configuration before restart. A v0.11-to-v0.10 rollback additionally translates `_FILE` secret settings to protected direct variables; v0.10-to-v0.9 removes `SAMSARIX_CHAT_SEARCHES_PER_MINUTE`. For a rollback to an earlier schema, restore the corresponding pre-upgrade backup. Removing webhook environment variables stops new outbox insertion and delivery but is not a database downgrade.
 
 ## Read-state lifecycle
 

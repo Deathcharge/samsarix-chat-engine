@@ -12,7 +12,7 @@ Samsarix LLC will acknowledge a complete report as availability permits, coordin
 
 ## Deployment boundary
 
-The engine is not an identity provider. Deployments authenticate users in a host application, issue short-lived room tokens, terminate TLS at a trusted proxy, configure exact browser origins, and protect the SQLite file plus operator/token/webhook signing secrets. The operator API key and HS256 token secret grant high-impact access and must never be shipped to ordinary clients. Moderation targets the signed token subject, not an untrusted display name; operators must secure moderator workflows and decide their own appeal/retention policy.
+The engine is not an identity provider. Deployments authenticate users in a host application, issue short-lived room tokens, terminate TLS at a trusted proxy, configure exact browser origins, and protect the SQLite file plus operator/token/webhook credentials. The operator API key and HS256 token secret grant high-impact access and must never be shipped to ordinary clients. Prefer static public JWKS verification when the host can retain private Ed25519 or RSA signing authority. Moderation targets the signed token subject, not an untrusted display name; operators must secure moderator workflows and decide their own appeal/retention policy.
 
 The checked-in container runs as a non-root user with a read-only root filesystem in the Compose profile, but the Docker daemon, host, reverse proxy, mounted secrets, and persistent volume remain trusted boundaries. Run exactly one process/replica, never mount the Docker socket, retain the loopback-only port mapping behind TLS, and prefer the `_FILE` secret variables. See [Container deployment](docs/CONTAINER_DEPLOYMENT.md).
 

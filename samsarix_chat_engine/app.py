@@ -27,7 +27,15 @@ from starlette.background import BackgroundTask
 from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.types import Message as ASGIMessage
 
-from .auth import AccessTokenService, AuthenticationError, Permission, Principal, credentials_match
+from .auth import (
+    AccessTokenService,
+    AccessTokenVerifier,
+    AuthenticationError,
+    JWKSAccessTokenVerifier,
+    Permission,
+    Principal,
+    credentials_match,
+)
 from .config import Settings, decode_webhook_secret
 from .models import (
     AuditEventPage,
@@ -194,7 +202,7 @@ def _authenticate_credentials(
     api_key: str | None,
     bearer: str | None,
     settings: Settings,
-    token_service: AccessTokenService | None,
+    token_service: AccessTokenVerifier | None,
 ) -> Principal:
     if settings.api_key is None and token_service is None:
         return Principal.local_operator()
@@ -325,7 +333,7 @@ def _websocket_origin_allowed(websocket: WebSocket, settings: Settings) -> bool:
 async def _authenticate_websocket(
     websocket: WebSocket,
     settings: Settings,
-    token_service: AccessTokenService | None,
+    token_service: AccessTokenVerifier | None,
 ) -> Principal | None:
     header_api_key = websocket.headers.get("x-api-key")
     header_bearer = _bearer_from_headers(websocket.headers)
@@ -398,7 +406,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     limiter = MessageRateLimiter(resolved.messages_per_minute)
     search_limiter = MessageRateLimiter(resolved.searches_per_minute)
     typing_limiter = MessageRateLimiter(resolved.typing_events_per_minute)
-    token_service = (
+    token_service: AccessTokenVerifier | None = (
         AccessTokenService(
             resolved.token_signing_secret,
             issuer=resolved.token_issuer,
@@ -409,6 +417,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if resolved.token_signing_secret is not None
         else None
     )
+    if resolved.token_verification_jwks_path is not None:
+        token_service = JWKSAccessTokenVerifier.from_file(
+            resolved.token_verification_jwks_path,
+            issuer=resolved.token_issuer,
+            audience=resolved.token_audience,
+            max_lifetime_seconds=resolved.token_max_lifetime_seconds,
+            clock_skew_seconds=resolved.token_clock_skew_seconds,
+        )
     webhook_dispatcher = None
     if resolved.webhook_url is not None and resolved.webhook_signing_secret is not None:
         secrets = [decode_webhook_secret(resolved.webhook_signing_secret)]
@@ -452,7 +468,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     application = FastAPI(
         title="Samsarix Chat Engine",
-        version="0.11.0",
+        version="0.12.0",
         summary="A small persisted room-chat service with WebSocket delivery",
         lifespan=lifespan,
     )
@@ -524,7 +540,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def index() -> dict[str, Any]:
         return {
             "name": "Samsarix Chat Engine",
-            "version": "0.11.0",
+            "version": "0.12.0",
             "status": "ok",
             "docs": "/docs",
             "health": "/healthz",

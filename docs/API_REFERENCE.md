@@ -1,6 +1,6 @@
 # API reference
 
-The canonical machine-readable contract is generated at `/openapi.json`; interactive documentation is at `/docs`. This document explains the stable v0.11 behavior that OpenAPI does not fully describe, especially search, read state, streaming export, durable webhooks, and WebSockets.
+The canonical machine-readable contract is generated at `/openapi.json`; interactive documentation is at `/docs`. This document explains the stable v0.12 behavior that OpenAPI does not fully describe, especially authentication, search, read state, streaming export, durable webhooks, and WebSockets.
 
 ## Authentication
 
@@ -11,7 +11,7 @@ X-API-Key: <secret>
 Authorization: Bearer <secret>
 ```
 
-When `SAMSARIX_CHAT_TOKEN_SIGNING_SECRET` is configured, application clients send a signed token as `Authorization: Bearer <token>`. Tokens bind a `sub` identity to room IDs and `room:read`, `room:write`, or `admin`. Room creation/listing and `/v1/stats` require operator/admin access. Room lookup/history require read access; posting requires write access. Health and readiness remain unauthenticated. See [Identity and room authorization](AUTHORIZATION.md) for issuance and the strict claim profile.
+When `SAMSARIX_CHAT_TOKEN_SIGNING_SECRET` or `SAMSARIX_CHAT_TOKEN_VERIFICATION_JWKS_FILE` is configured, application clients send a signed token as `Authorization: Bearer <token>`. Tokens bind a `sub` identity to room IDs and `room:read`, `room:write`, or `admin`. Room creation/listing and `/v1/stats` require operator/admin access. Room lookup/history require read access; posting requires write access. Health and readiness remain unauthenticated. See [Identity and room authorization](AUTHORIZATION.md) for issuance, static-JWKS rotation, and the strict claim profile.
 
 ## HTTP endpoints
 
@@ -261,4 +261,4 @@ Message create/update/delete events are emitted only after SQLite commits the co
 
 When configured, selected application webhook rows commit atomically with message/moderation state and deliver later with at-least-once semantics. Retries and manual replay keep the same `webhook-id`; each attempt gets a new signed timestamp. Delivery can be duplicated or reordered, so receivers validate the Standard Webhooks signature/timestamp and durably deduplicate IDs before side effects. See [Reliable application webhooks](WEBHOOKS.md) for the exact envelope, verification procedure, retry schedule, rotation, network policy, and recovery runbook.
 
-Multi-worker or multi-host fan-out is not implemented in v0.11; lifecycle, webhook worker, and ban teardown are deterministic only within the supported single process. The checked-in [TypeScript client](../clients/typescript/README.md) implements the reconnect recovery sequence for browser and Node integrations. The [container profile](CONTAINER_DEPLOYMENT.md) packages exactly that one-process topology and must not be scaled to multiple replicas.
+Multi-worker or multi-host fan-out is not implemented in v0.12; lifecycle, webhook worker, and ban teardown are deterministic only within the supported single process. The checked-in [TypeScript client](../clients/typescript/README.md) implements the reconnect recovery sequence for browser and Node integrations. The [container profile](CONTAINER_DEPLOYMENT.md) packages exactly that one-process topology and must not be scaled to multiple replicas.

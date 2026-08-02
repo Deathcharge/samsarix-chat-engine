@@ -2,6 +2,29 @@
 
 This project follows semantic versioning while it is in alpha: minor versions may add or revise public contracts, and those changes are called out here.
 
+## 0.12.0 — 2026-08-02
+
+### Added
+
+- Verification-only access-token mode backed by a bounded static public JSON Web Key Set.
+- EdDSA/Ed25519 and RS256 verification with required `kid`, explicit per-key algorithm binding, issuer/audience/type checks, and overlapping-key rotation.
+- `asymmetric-auth` installation extra and asymmetric dependencies in the supported container image.
+- Adversarial crypto, key-set, configuration, HTTP, and WebSocket tests plus a production cutover/rotation runbook.
+
+### Changed
+
+- Python distribution and service metadata advance to 0.12.0; the TypeScript client remains 0.3.0 because its wire protocol is unchanged.
+- The HS256 issuer/verifier remains compatible, while HS256 and JWKS trust modes are intentionally mutually exclusive.
+- Measured multi-instance work moves to v0.13 so signing authority can first be separated without adding storage or network coordination failure modes.
+
+### Security and operations
+
+- Hosts can retain private token-signing authority while the chat engine receives public verification keys only.
+- Static JWKS input is limited to 64 KiB, 1–32 unique public signing keys, Ed25519 or RSA at least 2048 bits, and verification-only key use.
+- Tokens cannot redirect key loading: `jku`, `x5u`, `x5c`, critical, and unencoded-payload headers are rejected, and no remote JWKS retrieval occurs.
+- Key-set errors omit file paths and contents. Rotation is operator-controlled and requires a restart; per-token revocation and automatic remote refresh remain out of scope.
+- SQLite schema remains version 5 and the supported deployment remains one process/replica.
+
 ## 0.11.0 — 2026-08-02
 
 ### Added

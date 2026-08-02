@@ -1,6 +1,6 @@
 # Container deployment
 
-Version 0.11 provides a production-oriented **single-instance** Docker image and Compose profile. It is a repeatable packaging and hardening path, not a horizontal-scale claim. Run exactly one `chat` service against one SQLite volume.
+Version 0.12 provides a production-oriented **single-instance** Docker image and Compose profile. It is a repeatable packaging and hardening path, not a horizontal-scale claim. Run exactly one `chat` service against one SQLite volume.
 
 ## Security and process model
 
@@ -27,6 +27,20 @@ SAMSARIX_CHAT_TOKEN_SIGNING_SECRET_FILE=/run/secrets/token_signing_secret
 ```
 
 The same `_FILE` convention is supported for the current and previous webhook signing secrets. Setting both a direct secret variable and its `_FILE` counterpart is a startup error; the engine never logs file contents. File paths are operator configuration, not secret values, but should still avoid user-controlled directories.
+
+The image includes the optional asymmetric-auth dependencies. To keep signing authority outside the engine, mount a public JWKS and override the Compose environment (for example in `compose.override.yaml`):
+
+```yaml
+services:
+  chat:
+    environment:
+      SAMSARIX_CHAT_TOKEN_SIGNING_SECRET_FILE: null
+      SAMSARIX_CHAT_TOKEN_VERIFICATION_JWKS_FILE: /run/config/token-verification.jwks.json
+    volumes:
+      - ./config/token-verification.jwks.json:/run/config/token-verification.jwks.json:ro
+```
+
+The public-key file is validated at startup and need not be stored as a secret, but its integrity controls who can mint accepted tokens. Restrict changes to deployment administrators and follow the overlapping-key rotation sequence in [Identity and room authorization](AUTHORIZATION.md).
 
 ## Build and start
 
@@ -73,12 +87,12 @@ Copy backups to separately protected storage and test restore using the [operati
 For an upgrade:
 
 1. create and copy out a verified backup;
-2. record the current image ID with `docker image inspect samsarix-chat-engine:0.11.0`;
+2. record the current image ID with `docker image inspect samsarix-chat-engine:0.12.0`;
 3. rebuild from the reviewed revision with `docker compose build --pull`;
 4. run `docker compose up --detach` and wait for healthy/readiness state;
 5. exercise an authenticated room read and WebSocket reconnect.
 
-Version 0.11 still uses SQLite schema 5, so rollback to 0.10 does not require a database downgrade: stop the 0.11 container, translate the mounted `_FILE` secrets to protected direct environment values, and run the reviewed 0.10 image against the preserved volume. Restore the pre-upgrade backup for older incompatible schemas.
+Version 0.12 still uses SQLite schema 5, so rollback to 0.11 requires no database downgrade. Stop the 0.12 container, restore the prior authentication configuration and reviewed 0.11 image, then start it against the preserved volume. A deployment using asymmetric JWKS mode must return to HS256 or another v0.11-supported credential before rollback. Restore the pre-upgrade backup for older incompatible schemas.
 
 ## Operational limits
 
@@ -88,4 +102,4 @@ Version 0.11 still uses SQLite schema 5, so rollback to 0.10 does not require a 
 - Container logs are operational metadata but may include request paths and search query strings from access logging. Govern them as potentially sensitive data.
 - Compose does not configure TLS, a firewall, backups, monitoring, host patching, or a support SLA.
 
-Multi-instance support requires a shared authoritative database plus fan-out, presence, rate-limit, migration, restore, and leader-election decisions. Redis Pub/Sub alone is at-most-once and does not solve those storage/lifecycle concerns; Redis Streams or PostgreSQL `LISTEN/NOTIFY` likewise require explicit recovery and source-of-truth design. Those prerequisites are tracked for v0.12 rather than hidden behind the container image.
+Multi-instance support requires a shared authoritative database plus fan-out, presence, rate-limit, migration, restore, and leader-election decisions. Redis Pub/Sub alone is at-most-once and does not solve those storage/lifecycle concerns; Redis Streams or PostgreSQL `LISTEN/NOTIFY` likewise require explicit recovery and source-of-truth design. Those prerequisites are tracked for v0.13 rather than hidden behind the container image.

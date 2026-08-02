@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "samsarix-chat-engine"
-version = "0.11.0"
+version = "0.12.0"
 description = "Embeddable, access-controlled room chat over HTTP, WebSockets, and SQLite"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,7 +16,7 @@ authors = [
 maintainers = [
     {name = "Samsarix Support", email = "support@samsarix.com"},
 ]
-keywords = ["chat", "fastapi", "sqlite", "webhook", "websocket"]
+keywords = ["chat", "fastapi", "jwks", "sqlite", "webhook", "websocket"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -35,7 +35,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+asymmetric-auth = [
+    "cryptography>=46,<50",
+]
 test = [
+    "cryptography>=46,<50",
     "httpx2>=2,<3",
     "pytest>=8,<10",
     "pytest-asyncio>=0.24,<2.0",
@@ -44,6 +48,7 @@ test = [
 ]
 dev = [
     "build>=1.2,<2.0",
+    "cryptography>=46,<50",
     "httpx2>=2,<3",
     "mypy>=1.11,<2.0",
     "pip-audit>=2.10,<3.0",

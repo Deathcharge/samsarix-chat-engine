@@ -111,8 +111,8 @@ When using a token, connect without `?username=` because the server derives iden
 - WebSocket close `1013`: the configured connection cap is full; retry with backoff.
 - `503 storage_unavailable` or `/readyz` returning 503: check the database directory permissions and available disk.
 - `507 webhook_capacity_reached`: the optional delivery outbox contains only pending rows at its cap; restore the receiver so automatic attempts drain those rows, or raise the cap with matching disk capacity. After correcting a terminal failure, retry that specific row through `/v1/admin/webhook-deliveries/{delivery_id}/retry`.
-- CLI refuses a public bind: configure an API key or token signing secret, or bind to loopback. The insecure override is only for isolated development networks.
+- CLI refuses a public bind: configure an API key, token signing secret, or static verification JWKS, or bind to loopback. The insecure override is only for isolated development networks.
 
-## Upgrading to 0.11
+## Upgrading to 0.12
 
-Version 0.11 continues to use SQLite schema 5. Upgrading from v0.10 requires no database migration; older supported schemas migrate in place while preserving rooms, messages, lifecycle state, moderation controls, read state, and audit records. Take an integrity-checked backup first with `samsarix-chat database backup backups/pre-0.11.db`, then start v0.11. See [Data lifecycle operations](OPERATIONS.md) for migration, verification, and rollback details; use [Container deployment](CONTAINER_DEPLOYMENT.md) for the new single-replica image and mounted-secret workflow.
+Version 0.12 continues to use SQLite schema 5. Upgrading from v0.11 requires no database migration. Take an integrity-checked backup first with `samsarix-chat database backup backups/pre-0.12.db`, then start v0.12. Existing HS256 settings continue to work. To adopt verification-only asymmetric tokens, install `.[asymmetric-auth]`, stage a public JWKS, and use the explicit cutover/rotation sequence in [Identity and room authorization](AUTHORIZATION.md). See [Data lifecycle operations](OPERATIONS.md) for migration, verification, and rollback details.
