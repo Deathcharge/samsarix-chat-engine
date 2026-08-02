@@ -148,6 +148,8 @@ Version 0.10 adds retrieval against the named support-case journey rather than p
 
 Final v0.10 local verification on 2026-08-02 used Node 24.12.0, CPython 3.11.9 for the declared development environment, and CPython 3.14.6 for the clean installed artifact:
 
+The verified implementation and release surface are commit `84dfecea8114a2e65e4ac4df1f936e1211eb2926`.
+
 | Gate | Result |
 | --- | --- |
 | Ruff lint / format, mypy, compile, diff check | Passed |
