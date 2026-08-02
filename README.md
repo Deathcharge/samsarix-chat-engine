@@ -2,7 +2,7 @@
 
 Samsarix Chat Engine is a small, local-first room chat service from Samsarix LLC for developers who need persisted messages and live WebSocket delivery without adopting a full collaboration platform. It runs as a standalone FastAPI service or as an embeddable ASGI application, stores data in SQLite, and has no dependency on Redis, an LLM provider, or any private package.
 
-Version 0.6.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, accountable data lifecycle, and practical conversation controls are implemented and tested. The project is licensed under the standard Mozilla Public License 2.0.
+Version 0.7.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, accountable data lifecycle, practical conversation controls, and typed TypeScript integration client are implemented and tested. The project is licensed under the standard Mozilla Public License 2.0.
 
 ## What works
 
@@ -15,6 +15,7 @@ Version 0.6.0 is an alpha release candidate. Its core single-instance journey, t
 - Give application users signed, expiring, per-room read/write access tokens.
 - Let authors edit or delete their own messages while administrators can moderate any message.
 - Freeze rooms for administrator-only announcements, mute disruptive members, and ban room access by token subject.
+- Integrate from browser or Node applications with a typed, zero-runtime-dependency TypeScript client.
 - Stream versioned room exports, archive/reopen rooms, and require two-step confirmed deletion.
 - Apply optional age-based retention and inspect a bounded metadata-only administrative audit trail.
 - Create integrity-checked SQLite backups and restore them through the CLI.
@@ -65,6 +66,10 @@ python examples/02_websocket_chat.py
 ```
 
 See [Getting started](docs/GETTING_STARTED.md) for authentication and browser examples, [Conversation controls](docs/CONVERSATION_CONTROLS.md) for moderation workflows, and [Data lifecycle operations](docs/OPERATIONS.md) for export, deletion, retention, backup, and restore.
+
+## TypeScript client
+
+The framework-neutral [`@samsarix/chat-client`](clients/typescript/README.md) source ships in `clients/typescript`. It wraps authenticated HTTP operations and browser-safe first-message WebSocket authentication, emits generated declarations, refreshes credentials on reconnect, and applies bounded exponential backoff without runtime dependencies. The package is verified and packable but is not yet published to npm.
 
 ## WebSocket protocol
 
@@ -172,12 +177,12 @@ CI runs the tests on CPython 3.10–3.14 on Linux and CPython 3.12 on Windows. S
 
 ## Limitations and project status
 
-This is a coherent single-instance MVP, not a hosted chat platform. The highest-value future work is a stable client SDK, a multi-instance broker adapter, attachments with explicit storage policy, and load/soak testing. Those are intentionally not presented as current capabilities.
+This is a coherent single-instance MVP, not a hosted chat platform. The highest-value future work is a reference application, read/unread state, signed webhooks, a multi-instance broker adapter, attachments with explicit storage policy, and load/soak testing. Those are intentionally not presented as current capabilities.
 
 ## License
 
 Copyright (c) 2026 Samsarix LLC. The source is licensed under the [Mozilla Public License 2.0](LICENSE). MPL-2.0 keeps distributed modifications to covered source files open and preserves license notices, while allowing those files to be combined with separate proprietary files in a larger work.
 
-The canonical Python package, command, and environment prefix are `samsarix_chat_engine`, `samsarix-chat`, and `SAMSARIX_CHAT_*`. Version 0.6 keeps `helix_chat_engine`, `helix-chat`, and `HELIX_CHAT_*` as deprecated compatibility aliases. If only `data/helix-chat.db` exists, the CLI reuses it so the rename does not hide existing data.
+The canonical Python package, command, and environment prefix are `samsarix_chat_engine`, `samsarix-chat`, and `SAMSARIX_CHAT_*`. Version 0.7 keeps `helix_chat_engine`, `helix-chat`, and `HELIX_CHAT_*` as deprecated compatibility aliases. If only `data/helix-chat.db` exists, the CLI reuses it so the rename does not hide existing data.
 
 For general inquiries, email contact@samsarix.com. For product support and private security reports, email support@samsarix.com or read [SECURITY.md](SECURITY.md).

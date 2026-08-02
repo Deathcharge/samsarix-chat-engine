@@ -8,3 +8,6 @@ recursive-include docs *.md
 recursive-include examples *.py
 recursive-include scripts *.py
 recursive-include tests *.py
+recursive-include clients/typescript *.json *.md *.ts *.mjs LICENSE
+prune clients/typescript/dist
+prune clients/typescript/node_modules

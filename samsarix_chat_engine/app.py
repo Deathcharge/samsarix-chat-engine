@@ -402,7 +402,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     application = FastAPI(
         title="Samsarix Chat Engine",
-        version="0.6.0",
+        version="0.7.0",
         summary="A small persisted room-chat service with WebSocket delivery",
         lifespan=lifespan,
     )
@@ -471,7 +471,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def index() -> dict[str, Any]:
         return {
             "name": "Samsarix Chat Engine",
-            "version": "0.6.0",
+            "version": "0.7.0",
             "status": "ok",
             "docs": "/docs",
             "health": "/healthz",

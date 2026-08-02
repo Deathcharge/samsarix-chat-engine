@@ -17,7 +17,7 @@ from samsarix_chat_engine.config import ConfigurationError, Settings
 
 
 def test_public_api_and_parser_help() -> None:
-    assert samsarix_chat_engine.__version__ == "0.6.0"
+    assert samsarix_chat_engine.__version__ == "0.7.0"
     assert callable(samsarix_chat_engine.create_app)
     help_text = build_parser().format_help()
     assert "serve" in help_text
@@ -146,7 +146,7 @@ def test_legacy_import_and_environment_aliases(monkeypatch: pytest.MonkeyPatch, 
     with pytest.warns(DeprecationWarning, match="import samsarix_chat_engine"):
         legacy_package = importlib.import_module("helix_chat_engine")
     assert legacy_package.Settings is Settings
-    assert legacy_package.__version__ == "0.6.0"
+    assert legacy_package.__version__ == "0.7.0"
     assert importlib.import_module("helix_chat_engine.app").create_app is samsarix_chat_engine.create_app
     assert importlib.import_module("helix_chat_engine.cli").main is main
     assert importlib.import_module("helix_chat_engine.config").Settings is Settings

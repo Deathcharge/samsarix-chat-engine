@@ -2,6 +2,24 @@
 
 This project follows semantic versioning while it is in alpha: minor versions may add or revise public contracts, and those changes are called out here.
 
+## 0.7.0 — 2026-08-01
+
+### Added
+
+- Checked-in `@samsarix/chat-client` TypeScript package with explicit ESM exports and generated declarations.
+- Typed wrappers for room, message, lifecycle, and moderation HTTP operations with stable `SamsarixApiError` handling.
+- Browser-safe first-message WebSocket authentication, discriminated protocol events, connection-state observers, async credential refresh, and bounded exponential reconnect.
+- Fake-transport unit tests, package-content verification, production-dependency audit, and a dedicated Node 24 CI job.
+
+### Changed
+
+- Python distribution and service metadata advance to 0.7.0; the server database remains schema 3 and the NDJSON export remains schema 2.
+
+### Security
+
+- The SDK never places tokens or API keys in WebSocket URLs and does not persist credentials, messages, or telemetry.
+- API-key WebSocket use requires an explicit username and is documented for trusted processes rather than browser bundles.
+
 ## 0.6.0 — 2026-08-01
 
 ### Added
