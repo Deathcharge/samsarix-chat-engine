@@ -49,6 +49,12 @@ def normalize_search_query(query: str) -> str:
     return normalized
 
 
+def _paginate_rows(rows: list[sqlite3.Row], limit: int, *, chronological: bool) -> tuple[list[sqlite3.Row], str | None]:
+    page_rows = rows[:limit]
+    next_before = page_rows[-1]["id"] if len(rows) > limit and page_rows else None
+    return (list(reversed(page_rows)) if chronological else page_rows), next_before
+
+
 def copy_sqlite_database(source: Path, target: Path, *, replace: bool = False) -> None:
     """Create an integrity-checked SQLite snapshot and atomically place it at target."""
 
@@ -1180,10 +1186,8 @@ class ChatStore:
                     (room_id, limit + 1),
                 ).fetchall()
 
-        has_more = len(rows) > limit
-        page_rows = rows[:limit]
-        messages = [self._message_from_row(row) for row in reversed(page_rows)]
-        next_before = page_rows[-1]["id"] if has_more and page_rows else None
+        page_rows, next_before = _paginate_rows(rows, limit, chronological=True)
+        messages = [self._message_from_row(row) for row in page_rows]
         return messages, next_before
 
     def _search_messages_sync(
@@ -1199,35 +1203,40 @@ class ChatStore:
             if connection.execute("SELECT 1 FROM rooms WHERE id = ?", (room_id,)).fetchone() is None:
                 raise RoomNotFoundError(room_id)
 
-            parameters: list[object] = [room_id, normalized_query]
-            cursor_clause = ""
+            cursor_created_at: str | None = None
+            cursor_id: str | None = None
             if before:
                 cursor = connection.execute(
                     "SELECT created_at, id FROM messages WHERE room_id = ? AND id = ?", (room_id, before)
                 ).fetchone()
                 if cursor is None:
                     raise InvalidCursorError(before)
-                cursor_clause = "AND (created_at < ? OR (created_at = ? AND id < ?))"
-                parameters.extend([cursor["created_at"], cursor["created_at"], cursor["id"]])
-            parameters.append(limit + 1)
+                cursor_created_at = cursor["created_at"]
+                cursor_id = cursor["id"]
             rows = connection.execute(
-                f"""
+                """
                 SELECT id, room_id, sender, content, created_at, client_message_id, edited_at, deleted_at
                 FROM messages
                 WHERE room_id = ?
                   AND deleted_at IS NULL
                   AND instr(samsarix_search_normalize(content), ?) > 0
-                  {cursor_clause}
+                  AND (? IS NULL OR created_at < ? OR (created_at = ? AND id < ?))
                 ORDER BY created_at DESC, id DESC
                 LIMIT ?
-                """,  # noqa: S608 - cursor_clause is a fixed internal SQL fragment
-                parameters,
+                """,
+                (
+                    room_id,
+                    normalized_query,
+                    cursor_created_at,
+                    cursor_created_at,
+                    cursor_created_at,
+                    cursor_id,
+                    limit + 1,
+                ),
             ).fetchall()
 
-        has_more = len(rows) > limit
-        page_rows = rows[:limit]
-        messages = [self._message_from_row(row) for row in reversed(page_rows)]
-        next_before = page_rows[-1]["id"] if has_more and page_rows else None
+        page_rows, next_before = _paginate_rows(rows, limit, chronological=True)
+        messages = [self._message_from_row(row) for row in page_rows]
         return messages, next_before
 
     def _get_read_state_sync(self, room_id: str, subject: str) -> ReadState:
@@ -1362,10 +1371,8 @@ class ChatStore:
                     """,
                     (limit + 1,),
                 ).fetchall()
-        has_more = len(rows) > limit
-        page_rows = rows[:limit]
-        events = [self._audit_from_row(row) for row in reversed(page_rows)]
-        next_before = page_rows[-1]["id"] if has_more and page_rows else None
+        page_rows, next_before = _paginate_rows(rows, limit, chronological=True)
+        events = [self._audit_from_row(row) for row in page_rows]
         return events, next_before
 
     def _list_webhook_deliveries_sync(
@@ -1424,10 +1431,8 @@ class ChatStore:
                     """,
                     (status, status, status, status, limit + 1),
                 ).fetchall()
-        has_more = len(rows) > limit
-        page_rows = rows[:limit]
+        page_rows, next_before = _paginate_rows(rows, limit, chronological=False)
         deliveries = [self._webhook_from_row(row) for row in page_rows]
-        next_before = page_rows[-1]["id"] if has_more and page_rows else None
         return deliveries, next_before
 
     def _next_webhook_delivery_sync(self, now: datetime) -> PendingWebhook | None:

@@ -153,7 +153,7 @@ The verified implementation and release surface are commit `84dfecea8114a2e65e4a
 | Gate | Result |
 | --- | --- |
 | Ruff lint / format, mypy, compile, diff check | Passed |
-| Python integration and branch coverage | 105 passed; 88.59% total branch coverage, above the 85% gate |
+| Python integration and branch coverage | 105 passed; 88.66% total branch coverage, above the 85% gate |
 | Python dependency audit | No known third-party vulnerabilities; unpublished local project distributions were skipped by registry lookup |
 | TypeScript check / Node test runner | Passed; strict declaration build and 18/18 fake-transport/API tests |
 | TypeScript audit / package inspection | Zero runtime dependencies, no known vulnerabilities, and 23 intended artifact files |
@@ -163,10 +163,10 @@ The verified implementation and release surface are commit `84dfecea8114a2e65e4a
 
 Artifact SHA-256 digests:
 
-- wheel: `41F6B7484240C466D9B92ACF3EA5C465E011B4930FF5F3E9348F4659F730EA6A`
-- source distribution: `34A8D40F3468567B07370F32F8DF9AD36C59BB7B6743EB93F9A47DA475F6719F`
+- wheel: `6B837826522E3708ECE1AA51118B46FC9F64C45ADF14FD91BD845E64631AB239`
+- source distribution: `7235B3EBE89DD88FD078078038FE5A672417F510949824A77E473296ED678C1F`
 
-No database migration is introduced: v0.10 remains on schema 5. A rollback to v0.9 requires stopping v0.10, removing the optional search-rate environment variable, and starting v0.9 against the same database. Search queries may be copied into ordinary proxy access logs, so those logs remain part of the room-content privacy boundary. Sustained search load, multi-process behavior, fuzzy/global ranking, and an external security assessment were not claimed or run.
+No database migration is introduced: v0.10 remains on schema 5. A rollback to v0.9 requires stopping v0.10, removing the optional search-rate environment variable, and starting v0.9 against the same database. Search queries may be copied into ordinary proxy access logs, so those logs remain part of the room-content privacy boundary. Sustained search load, multi-process behavior, fuzzy/global ranking, and an external security assessment were not claimed or run. If measured room size or query concurrency outgrows bounded scans, the next search-specific design gate is a reviewed SQLite FTS5 table or a write-maintained normalized index—not a silent scale claim.
 
 Final v0.9 local verification on 2026-08-02 used Node 24.12.0, CPython 3.11.9 for the declared development environment, and CPython 3.14.6 for the clean installed artifact:
 

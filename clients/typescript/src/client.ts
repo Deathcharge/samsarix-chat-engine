@@ -122,8 +122,8 @@ export class SamsarixChatClient {
     options: { limit?: number; before?: string } = {},
   ): Promise<MessagePage> {
     const normalized = search.trim().normalize("NFKC");
-    if (normalized.length < 2 || normalized.length > 100) {
-      throw new RangeError("search must contain 2 to 100 normalized characters");
+    if ([...normalized].length < 2) {
+      throw new RangeError("search must contain at least 2 NFKC-normalized characters");
     }
     const query = new URLSearchParams({
       q: normalized,

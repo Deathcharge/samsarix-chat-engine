@@ -144,6 +144,11 @@ test("message search encodes normalized queries and pagination", async () => {
   assert.equal(url.searchParams.get("q"), "PAYMENT & café");
   assert.equal(url.searchParams.get("limit"), "25");
   assert.equal(url.searchParams.get("before"), "message-9");
+
+  await client.searchMessages("support/eu", "𝑎".repeat(51));
+  await client.searchMessages("support/eu", "ß".repeat(100));
+  assert.equal(new URL(requests[1].url).searchParams.get("q"), "a".repeat(51));
+  assert.equal(new URL(requests[2].url).searchParams.get("q"), "ß".repeat(100));
 });
 
 test("room exports preserve the streaming response for operator-controlled consumption", async () => {
@@ -198,6 +203,7 @@ test("list limits and credential shapes fail before transport", async () => {
   await assert.rejects(client.listRooms(101), RangeError);
   await assert.rejects(client.listMessages("general", { limit: 0 }), RangeError);
   await assert.rejects(client.searchMessages("general", " "), RangeError);
+  await assert.rejects(client.searchMessages("general", "𝑎"), RangeError);
   await assert.rejects(client.searchMessages("general", "valid", { limit: 101 }), RangeError);
 
   const invalid = new SamsarixChatClient({
