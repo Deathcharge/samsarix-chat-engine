@@ -10,6 +10,8 @@ The supported multi-instance topology will use PostgreSQL as both the authoritat
 
 PostgreSQL `LISTEN`/`NOTIFY` will be a low-latency wake-up hint only. Every client-visible realtime event will first be inserted into a bounded, ordered database event log in the same transaction as the state change. Each service instance reads committed rows from its own durable cursor. A listener reconnect, notification-queue loss, or process pause therefore causes polling/replay rather than silent event loss.
 
+The internal relay now implements that polling/replay correctness path. Each process registers an expiring cursor, dispatches an ordered batch to its local socket manager, and acknowledges only after every local action succeeds. A dispatch exception leaves the cursor unchanged for replay. An expired lease or database interruption fences all local sockets before the process renews the same cursor. Only public message and room-state events are broadcast; archive and active-ban events invoke deterministic local teardown, while internal lifecycle records are not leaked onto the public protocol. Application wiring, reconnect readiness, retained-log gap fencing, and notification-assisted latency remain release gates.
+
 The initial event-log implementation serializes sequence allocation with a transaction-scoped advisory lock. PostgreSQL identity values alone are not commit ordered: without this lock, a later sequence could commit and be acknowledged before an earlier transaction becomes visible. Event append must remain the final lock-taking phase of a domain mutation. Sustained-load acceptance tests will determine whether this intentionally simple global sequencer is sufficient or must be partitioned without weakening cursor correctness.
 
 Schema v3 uses PostgreSQL database time for room/message/moderation ordering, read cursors, webhook due times and leases, and retention boundaries. The internal store now implements the full storage protocol, including monotonic subject-scoped read state, transactionally stable bounded-memory exports, explicit retention, and a leased transactional webhook outbox. Transaction-scoped capacity locks currently serialize room creation, message mutation/retention, bounded audit insertion, and webhook capacity changes across replicas. Deletion and retention cancel unsent sensitive webhook payloads and scrub message bodies from older durable event and terminal-webhook envelopes before commit. These conservative global locks make correctness inspectable first; the load gate must measure their throughput before v0.13 receives a scale claim.
@@ -67,7 +69,7 @@ Application replicas must run the exact same Samsarix version and security confi
 v0.13 cannot claim multi-instance support until CI proves:
 
 - two or more real app processes share one PostgreSQL database and deliver create/update/delete events exactly once to each connected test socket under normal operation;
-- a listener disconnect/reconnect replays committed event rows without relying on `NOTIFY` delivery;
+- a listener disconnect/reconnect replays committed event rows without relying on `NOTIFY` delivery (the internal polling relay and cursor replay case are implemented; the real-process listener gate remains);
 - concurrent idempotent message creation returns one authoritative message;
 - global and per-room connection caps plus rate limits hold across processes;
 - archive and ban actions close matching sockets on every process;
