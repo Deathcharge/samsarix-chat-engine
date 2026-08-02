@@ -72,13 +72,9 @@ class PostgresRateLimiter:
         async with self.foundation.transaction() as connection:
             now, window_started_at = await self._database_window(connection)
 
-            count = await self._increment_existing(connection, digest, window_started_at)
-            if count is not None:
-                return self._decision(True, count, now, window_started_at)
-            existing = await self._read_existing(connection, digest, window_started_at)
-            if existing is not None:
-                count, observed_at = existing
-                return self._decision(False, count, observed_at, window_started_at)
+            decision = await self._consume_existing(connection, digest, now, window_started_at)
+            if decision is not None:
+                return decision
 
             # Only new-cardinality work takes the global capacity lock. Hot
             # identities contend on their own bucket row rather than a global
@@ -90,13 +86,9 @@ class PostgresRateLimiter:
             # never inserted for the prior window.
             now, window_started_at = await self._database_window(connection)
 
-            count = await self._increment_existing(connection, digest, window_started_at)
-            if count is not None:
-                return self._decision(True, count, now, window_started_at)
-            existing = await self._read_existing(connection, digest, window_started_at)
-            if existing is not None:
-                count, observed_at = existing
-                return self._decision(False, count, observed_at, window_started_at)
+            decision = await self._consume_existing(connection, digest, now, window_started_at)
+            if decision is not None:
+                return decision
 
             cursor = await connection.execute("SELECT COUNT(*) FROM public.samsarix_rate_buckets")
             row = await cursor.fetchone()
@@ -160,6 +152,27 @@ class PostgresRateLimiter:
         )
         row = await cursor.fetchone()
         return int(row[0]) if row is not None else None
+
+    async def _consume_existing(
+        self,
+        connection: AsyncConnection[tuple[Any, ...]],
+        digest: bytes,
+        now: datetime,
+        window_started_at: datetime,
+    ) -> RateLimitDecision | None:
+        while True:
+            count = await self._increment_existing(connection, digest, window_started_at)
+            if count is not None:
+                return self._decision(True, count, now, window_started_at)
+            existing = await self._read_existing(connection, digest, window_started_at)
+            if existing is None:
+                return None
+            count, observed_at = existing
+            if count >= self.limit:
+                return self._decision(False, count, observed_at, window_started_at)
+            # The bucket committed between our UPDATE snapshot and SELECT.
+            # It still has allowance, so retry consumption rather than falsely
+            # rejecting the request merely because the row now exists.
 
     async def _database_window(
         self,
