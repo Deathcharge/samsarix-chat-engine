@@ -12,6 +12,8 @@ PostgreSQL `LISTEN`/`NOTIFY` will be a low-latency wake-up hint only. Every clie
 
 The initial event-log implementation serializes sequence allocation with a transaction-scoped advisory lock. PostgreSQL identity values alone are not commit ordered: without this lock, a later sequence could commit and be acknowledged before an earlier transaction becomes visible. Event append must remain the final lock-taking phase of a domain mutation. Sustained-load acceptance tests will determine whether this intentionally simple global sequencer is sufficient or must be partitioned without weakening cursor correctness.
 
+Schema v2 uses PostgreSQL database time for room/message/moderation ordering and retention boundaries. Transaction-scoped capacity locks currently serialize room creation, message mutation/retention, and bounded audit insertion across replicas. Deletion and retention scrub message bodies from older durable event envelopes before commit. These conservative global locks make correctness inspectable first; the load gate must measure their throughput before v0.13 receives a scale claim.
+
 No Redis dependency is planned for the first supported topology. Redis Pub/Sub is at-most-once, while Streams introduce a second durable system whose commit cannot be atomic with the authoritative database without an additional outbox relay. PostgreSQL already supplies transactions, row locks, advisory locks, `SKIP LOCKED`, and commit-coupled notifications needed by this product's current scale boundary.
 
 ## Why multi-process SQLite is rejected

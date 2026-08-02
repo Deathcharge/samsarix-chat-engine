@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import AsyncIterator
 
 import pytest
@@ -22,8 +21,6 @@ from samsarix_chat_engine.postgres import (  # noqa: E402
     _validate_event,
 )
 
-TEST_POSTGRES_URL = os.getenv("SAMSARIX_TEST_POSTGRES_URL")
-
 
 def test_event_validation_is_bounded_and_canonical() -> None:
     assert _validate_event("room-1", "message.created", {"emoji": "🌀"}) == {"emoji": "🌀"}
@@ -35,7 +32,7 @@ def test_event_validation_is_bounded_and_canonical() -> None:
     with pytest.raises(InvalidRealtimeEventError):
         _validate_event("room", "message.created", {"invalid": float("nan")})
     with pytest.raises(InvalidRealtimeEventError):
-        _validate_event("room", "message.created", {"content": "x" * (64 * 1024)})
+        _validate_event("room", "message.created", {"content": "x" * (128 * 1024)})
 
 
 def test_pool_configuration_rejects_invalid_bounds_without_echoing_conninfo() -> None:
@@ -46,19 +43,8 @@ def test_pool_configuration_rejects_invalid_bounds_without_echoing_conninfo() ->
 
 
 @pytest.fixture
-async def clean_test_database() -> AsyncIterator[str]:
-    if TEST_POSTGRES_URL is None:
-        pytest.skip("SAMSARIX_TEST_POSTGRES_URL is not configured")
-    await _reset_test_database(TEST_POSTGRES_URL)
-    try:
-        yield TEST_POSTGRES_URL
-    finally:
-        await _reset_test_database(TEST_POSTGRES_URL)
-
-
-@pytest.fixture
-async def foundation(clean_test_database: str) -> AsyncIterator[PostgresFoundation]:
-    service = PostgresFoundation(clean_test_database)
+async def foundation(clean_postgres_database: str) -> AsyncIterator[PostgresFoundation]:
+    service = PostgresFoundation(clean_postgres_database)
     await service.open()
     try:
         yield service
@@ -156,12 +142,15 @@ async def test_registration_starts_at_head_and_heartbeat_requires_live_lease(
 
 
 @pytest.mark.asyncio
-async def test_concurrent_initialization_is_serialized(clean_test_database: str) -> None:
-    first = PostgresFoundation(clean_test_database)
-    second = PostgresFoundation(clean_test_database)
+async def test_concurrent_initialization_is_serialized(clean_postgres_database: str) -> None:
+    first = PostgresFoundation(clean_postgres_database)
+    second = PostgresFoundation(clean_postgres_database)
     try:
         await asyncio.gather(first.open(), second.open())
-        assert await asyncio.gather(first.schema_version(), second.schema_version()) == [1, 1]
+        assert await asyncio.gather(first.schema_version(), second.schema_version()) == [
+            POSTGRES_SCHEMA_VERSION,
+            POSTGRES_SCHEMA_VERSION,
+        ]
     finally:
         await asyncio.gather(first.close(), second.close())
 
@@ -212,8 +201,8 @@ async def test_event_sequence_cannot_commit_out_of_order(foundation: PostgresFou
 
 
 @pytest.mark.asyncio
-async def test_newer_schema_fails_closed(clean_test_database: str) -> None:
-    async with await psycopg.AsyncConnection.connect(clean_test_database, autocommit=True) as connection:
+async def test_newer_schema_fails_closed(clean_postgres_database: str) -> None:
+    async with await psycopg.AsyncConnection.connect(clean_postgres_database, autocommit=True) as connection:
         await connection.execute(
             """
             CREATE TABLE public.samsarix_schema_metadata (
@@ -228,20 +217,9 @@ async def test_newer_schema_fails_closed(clean_test_database: str) -> None:
             (POSTGRES_SCHEMA_VERSION + 1,),
         )
 
-    service = PostgresFoundation(clean_test_database)
+    service = PostgresFoundation(clean_postgres_database)
     with pytest.raises(UnsupportedPostgresSchemaError, match="newer"):
         await service.open()
     await service.close()
     with pytest.raises(PostgresFoundationError, match="not open"):
         await service.current_head()
-
-
-async def _reset_test_database(conninfo: str) -> None:
-    async with await psycopg.AsyncConnection.connect(conninfo, autocommit=True) as connection:
-        cursor = await connection.execute("SELECT current_database()")
-        row = await cursor.fetchone()
-        if row is None or row[0] != "samsarix_test":
-            raise RuntimeError("live PostgreSQL tests require the dedicated samsarix_test database")
-        await connection.execute("DROP TABLE IF EXISTS public.samsarix_instance_cursors")
-        await connection.execute("DROP TABLE IF EXISTS public.samsarix_realtime_events")
-        await connection.execute("DROP TABLE IF EXISTS public.samsarix_schema_metadata")
