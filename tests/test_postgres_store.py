@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import AsyncIterator
 
 import pytest
@@ -25,8 +24,6 @@ from samsarix_chat_engine.store import (  # noqa: E402
     RoomNotArchivedError,
 )
 
-TEST_POSTGRES_URL = os.getenv("SAMSARIX_TEST_POSTGRES_URL")
-
 
 def _store(conninfo: str, **overrides: int) -> PostgresChatStore:
     return PostgresChatStore(
@@ -34,24 +31,14 @@ def _store(conninfo: str, **overrides: int) -> PostgresChatStore:
         max_rooms=overrides.get("max_rooms", 10),
         max_stored_messages=overrides.get("max_stored_messages", 20),
         max_stored_messages_per_room=overrides.get("max_stored_messages_per_room", 10),
+        message_retention_days=overrides.get("message_retention_days"),
         max_audit_events=overrides.get("max_audit_events", 50),
     )
 
 
 @pytest.fixture
-async def clean_test_database() -> AsyncIterator[str]:
-    if TEST_POSTGRES_URL is None:
-        pytest.skip("SAMSARIX_TEST_POSTGRES_URL is not configured")
-    await _reset_test_database(TEST_POSTGRES_URL)
-    try:
-        yield TEST_POSTGRES_URL
-    finally:
-        await _reset_test_database(TEST_POSTGRES_URL)
-
-
-@pytest.fixture
-async def store(clean_test_database: str) -> AsyncIterator[PostgresChatStore]:
-    service = _store(clean_test_database)
+async def store(clean_postgres_database: str) -> AsyncIterator[PostgresChatStore]:
+    service = _store(clean_postgres_database)
     await service.initialize()
     try:
         yield service
@@ -60,8 +47,8 @@ async def store(clean_test_database: str) -> AsyncIterator[PostgresChatStore]:
 
 
 @pytest.mark.asyncio
-async def test_schema_v1_migrates_transactionally(clean_test_database: str) -> None:
-    async with await psycopg.AsyncConnection.connect(clean_test_database, autocommit=True) as connection:
+async def test_schema_v1_migrates_transactionally(clean_postgres_database: str) -> None:
+    async with await psycopg.AsyncConnection.connect(clean_postgres_database, autocommit=True) as connection:
         await connection.execute(
             """
             CREATE TABLE public.samsarix_schema_metadata (
@@ -73,7 +60,7 @@ async def test_schema_v1_migrates_transactionally(clean_test_database: str) -> N
         )
         await connection.execute("INSERT INTO public.samsarix_schema_metadata (singleton, version) VALUES (TRUE, 1)")
 
-    service = _store(clean_test_database)
+    service = _store(clean_postgres_database)
     await service.initialize()
     try:
         assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 2
@@ -116,9 +103,9 @@ async def test_room_lifecycle_audit_and_events_are_atomic(store: PostgresChatSto
 
 
 @pytest.mark.asyncio
-async def test_room_capacity_is_global_across_store_instances(clean_test_database: str) -> None:
-    first = _store(clean_test_database, max_rooms=1)
-    second = _store(clean_test_database, max_rooms=1)
+async def test_room_capacity_is_global_across_store_instances(clean_postgres_database: str) -> None:
+    first = _store(clean_postgres_database, max_rooms=1)
+    second = _store(clean_postgres_database, max_rooms=1)
     await asyncio.gather(first.initialize(), second.initialize())
     try:
         results = await asyncio.gather(
@@ -134,9 +121,9 @@ async def test_room_capacity_is_global_across_store_instances(clean_test_databas
 
 
 @pytest.mark.asyncio
-async def test_concurrent_message_idempotency_and_event_delivery(clean_test_database: str) -> None:
-    first = _store(clean_test_database)
-    second = _store(clean_test_database)
+async def test_concurrent_message_idempotency_and_event_delivery(clean_postgres_database: str) -> None:
+    first = _store(clean_postgres_database)
+    second = _store(clean_postgres_database)
     await asyncio.gather(first.initialize(), second.initialize())
     try:
         await first.create_room(RoomCreate(id="general", name="General"))
@@ -171,9 +158,9 @@ async def test_concurrent_message_idempotency_and_event_delivery(clean_test_data
 
 
 @pytest.mark.asyncio
-async def test_message_mutation_search_pagination_and_retention(clean_test_database: str) -> None:
+async def test_message_mutation_search_pagination_and_retention(clean_postgres_database: str) -> None:
     service = _store(
-        clean_test_database,
+        clean_postgres_database,
         max_stored_messages=2,
         max_stored_messages_per_room=2,
     )
@@ -241,6 +228,9 @@ async def test_message_mutation_search_pagination_and_retention(clean_test_datab
         assert changed and deleted.content == "" and deleted.deleted_at is not None
         assert await service.search_messages("general", "revised") == ([], None)
         events = await service.foundation.read_events("privacy-observer")
+        first_events = [event for event in events if event.payload.get("message", {}).get("id") == first.id]
+        assert [event.event_type for event in first_events] == ["message.created"]
+        assert first_events[0].payload["message"]["content"] == ""
         second_events = [event for event in events if event.payload.get("message", {}).get("id") == second.id]
         assert [event.event_type for event in second_events] == [
             "message.created",
@@ -253,8 +243,69 @@ async def test_message_mutation_search_pagination_and_retention(clean_test_datab
 
 
 @pytest.mark.asyncio
+async def test_age_retention_scrubs_evicted_event_body(clean_postgres_database: str) -> None:
+    service = _store(clean_postgres_database, message_retention_days=1)
+    await service.initialize()
+    try:
+        await service.create_room(RoomCreate(id="general", name="General"))
+        await service.foundation.register_instance("age-observer", lease_seconds=30)
+        expired, _ = await service.create_message(
+            room_id="general",
+            sender="alice",
+            content="expired secret",
+            client_message_id=None,
+            allow_frozen=False,
+        )
+        async with service.foundation.transaction() as connection:
+            await connection.execute(
+                """
+                UPDATE public.samsarix_messages
+                SET created_at = clock_timestamp() - interval '2 days'
+                WHERE id = %s
+                """,
+                (expired.id,),
+            )
+        retained, _ = await service.create_message(
+            room_id="general",
+            sender="alice",
+            content="retained",
+            client_message_id=None,
+            allow_frozen=False,
+        )
+        messages, _ = await service.list_messages("general")
+        assert [message.id for message in messages] == [retained.id]
+        events = await service.foundation.read_events("age-observer")
+        expired_event = next(event for event in events if event.payload["message"]["id"] == expired.id)
+        assert expired_event.payload["message"]["content"] == ""
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_audit_history_enforces_configured_cap(clean_postgres_database: str) -> None:
+    service = _store(clean_postgres_database, max_audit_events=3)
+    await service.initialize()
+    try:
+        await service.create_room(RoomCreate(id="general", name="General"), actor="operator")
+        for frozen in (True, False, True, False):
+            await service.set_room_state(
+                "general",
+                archived=None,
+                frozen=frozen,
+                actor="operator",
+            )
+        audits, next_before = await service.list_audit_events()
+        assert len(audits) == 3
+        assert next_before is None
+        assert [audit.action for audit in audits] == ["room.unfrozen", "room.frozen", "room.unfrozen"]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_moderation_and_archived_room_rules(store: PostgresChatStore) -> None:
     await store.create_room(RoomCreate(id="general", name="General"))
+    await store.foundation.register_instance("room-delete-observer", lease_seconds=30)
     banned = await store.set_member_moderation(
         "general",
         "alice",
@@ -314,7 +365,9 @@ async def test_moderation_and_archived_room_rules(store: PostgresChatStore) -> N
         )
     assert await store.delete_room("general", actor="operator") == 1
     assert await store.get_room("general") is None
-    assert message.id
+    events = await store.foundation.read_events("room-delete-observer")
+    created_event = next(event for event in events if event.payload.get("message", {}).get("id") == message.id)
+    assert created_event.payload["message"]["content"] == ""
 
 
 @pytest.mark.asyncio
@@ -330,18 +383,3 @@ async def test_event_failure_rolls_back_domain_and_audit_rows(
         await store.create_room(RoomCreate(id="rollback", name="Rollback"), actor="operator")
     assert await store.get_room("rollback") is None
     assert await store.list_audit_events() == ([], None)
-
-
-async def _reset_test_database(conninfo: str) -> None:
-    async with await psycopg.AsyncConnection.connect(conninfo, autocommit=True) as connection:
-        cursor = await connection.execute("SELECT current_database()")
-        row = await cursor.fetchone()
-        if row is None or row[0] != "samsarix_test":
-            raise RuntimeError("live PostgreSQL tests require the dedicated samsarix_test database")
-        await connection.execute("DROP TABLE IF EXISTS public.samsarix_instance_cursors")
-        await connection.execute("DROP TABLE IF EXISTS public.samsarix_realtime_events")
-        await connection.execute("DROP TABLE IF EXISTS public.samsarix_room_member_controls")
-        await connection.execute("DROP TABLE IF EXISTS public.samsarix_messages")
-        await connection.execute("DROP TABLE IF EXISTS public.samsarix_rooms")
-        await connection.execute("DROP TABLE IF EXISTS public.samsarix_audit_events")
-        await connection.execute("DROP TABLE IF EXISTS public.samsarix_schema_metadata")

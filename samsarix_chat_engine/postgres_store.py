@@ -277,12 +277,7 @@ class PostgresChatStore:
             await connection.execute("SELECT pg_advisory_xact_lock(%s)", (POSTGRES_MESSAGE_CAP_LOCK_ID,))
             message_id = uuid.uuid4().hex
             cursor = await connection.execute(
-                """
-                INSERT INTO public.samsarix_messages (
-                    id, room_id, sender, author_subject, content, search_content, client_message_id
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-                RETURNING id, room_id, sender, content, created_at, client_message_id, edited_at, deleted_at
-                """,
+                _CREATE_MESSAGE_SQL,
                 (
                     message_id,
                     room_id,
@@ -328,12 +323,7 @@ class PostgresChatStore:
             if not is_admin and str(row[2]) != actor:
                 raise MessageOwnershipError(message_id)
             cursor = await connection.execute(
-                """
-                UPDATE public.samsarix_messages
-                SET content = %s, search_content = %s, edited_at = clock_timestamp()
-                WHERE id = %s
-                RETURNING id, room_id, sender, content, created_at, client_message_id, edited_at, deleted_at
-                """,
+                _UPDATE_MESSAGE_SQL,
                 (content, _normalize_search_text(content), message_id),
             )
             updated = await cursor.fetchone()
@@ -377,12 +367,7 @@ class PostgresChatStore:
             if row[7] is not None:
                 return _message_from_row(row), False
             cursor = await connection.execute(
-                """
-                UPDATE public.samsarix_messages
-                SET content = '', search_content = '', deleted_at = clock_timestamp()
-                WHERE id = %s
-                RETURNING id, room_id, sender, content, created_at, client_message_id, edited_at, deleted_at
-                """,
+                _DELETE_MESSAGE_SQL,
                 (message_id,),
             )
             deleted = await cursor.fetchone()
@@ -671,26 +656,40 @@ class PostgresChatStore:
             await self._scrub_message_event_payloads(connection, age_rows)
         cursor = await connection.execute(
             """
-            DELETE FROM public.samsarix_messages WHERE id IN (
-                SELECT id FROM public.samsarix_messages WHERE room_id = %s
-                ORDER BY created_at DESC, id DESC OFFSET %s
-            ) RETURNING id, room_id
+            SELECT COUNT(*) FILTER (WHERE room_id = %s), COUNT(*)
+            FROM public.samsarix_messages
             """,
-            (room_id, self.max_stored_messages_per_room),
+            (room_id,),
         )
-        room_cap_rows = await cursor.fetchall()
+        count_row = _required_row(await cursor.fetchone(), "message capacity count")
+        room_count, global_count = int(count_row[0]), int(count_row[1])
+        room_cap_rows: list[tuple[Any, ...]] = []
+        if room_count > self.max_stored_messages_per_room:
+            cursor = await connection.execute(
+                """
+                DELETE FROM public.samsarix_messages WHERE id IN (
+                    SELECT id FROM public.samsarix_messages WHERE room_id = %s
+                    ORDER BY created_at DESC, id DESC OFFSET %s
+                ) RETURNING id, room_id
+                """,
+                (room_id, self.max_stored_messages_per_room),
+            )
+            room_cap_rows = await cursor.fetchall()
         room_cap_deleted = len(room_cap_rows)
         await self._scrub_message_event_payloads(connection, room_cap_rows)
-        cursor = await connection.execute(
-            """
-            DELETE FROM public.samsarix_messages WHERE id IN (
-                SELECT id FROM public.samsarix_messages
-                ORDER BY created_at DESC, id DESC OFFSET %s
-            ) RETURNING id, room_id
-            """,
-            (self.max_stored_messages,),
-        )
-        global_cap_rows = await cursor.fetchall()
+        global_count -= room_cap_deleted
+        global_cap_rows: list[tuple[Any, ...]] = []
+        if global_count > self.max_stored_messages:
+            cursor = await connection.execute(
+                """
+                DELETE FROM public.samsarix_messages WHERE id IN (
+                    SELECT id FROM public.samsarix_messages
+                    ORDER BY created_at DESC, id DESC OFFSET %s
+                ) RETURNING id, room_id
+                """,
+                (self.max_stored_messages,),
+            )
+            global_cap_rows = await cursor.fetchall()
         global_cap_deleted = len(global_cap_rows)
         await self._scrub_message_event_payloads(connection, global_cap_rows)
         if age_deleted or room_cap_deleted or global_cap_deleted:
@@ -762,10 +761,26 @@ class PostgresChatStore:
         )
 
 
-_MESSAGE_SELECT = """
-SELECT id, room_id, sender, content, created_at, client_message_id, edited_at, deleted_at
-FROM public.samsarix_messages
-"""
+_MESSAGE_COLUMNS = "id, room_id, sender, content, created_at, client_message_id, edited_at, deleted_at"
+_MESSAGE_SELECT = f"SELECT {_MESSAGE_COLUMNS} FROM public.samsarix_messages"  # noqa: S608 - internal constant
+_CREATE_MESSAGE_SQL = f"""
+INSERT INTO public.samsarix_messages (
+    id, room_id, sender, author_subject, content, search_content, client_message_id
+) VALUES (%s, %s, %s, %s, %s, %s, %s)
+RETURNING {_MESSAGE_COLUMNS}
+"""  # noqa: S608 - internal constant
+_UPDATE_MESSAGE_SQL = f"""
+UPDATE public.samsarix_messages
+SET content = %s, search_content = %s, edited_at = clock_timestamp()
+WHERE id = %s
+RETURNING {_MESSAGE_COLUMNS}
+"""  # noqa: S608 - internal constant
+_DELETE_MESSAGE_SQL = f"""
+UPDATE public.samsarix_messages
+SET content = '', search_content = '', deleted_at = clock_timestamp()
+WHERE id = %s
+RETURNING {_MESSAGE_COLUMNS}
+"""  # noqa: S608 - internal constant
 
 
 async def _require_room(connection: AsyncConnection[tuple[Any, ...]], room_id: str) -> None:
