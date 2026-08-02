@@ -17,7 +17,7 @@ from . import __version__
 from .app import create_app
 from .auth import AccessTokenService, Permission
 from .config import ConfigurationError, Settings
-from .store import copy_sqlite_database
+from .store import DatabaseInUseError, DatabaseLifecycleLock, copy_sqlite_database
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -125,9 +125,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 copy_sqlite_database(settings.database_path, args.output, replace=args.replace)
                 completed = args.output.resolve()
             else:
-                copy_sqlite_database(args.input, settings.database_path, replace=args.replace)
+                with DatabaseLifecycleLock(settings.database_path):
+                    copy_sqlite_database(args.input, settings.database_path, replace=args.replace)
                 completed = settings.database_path.resolve()
-        except (FileExistsError, FileNotFoundError, OSError, ValueError, sqlite3.Error) as exc:
+        except (DatabaseInUseError, FileExistsError, FileNotFoundError, OSError, ValueError, sqlite3.Error) as exc:
             parser.error(str(exc))
         print(completed)
         return 0

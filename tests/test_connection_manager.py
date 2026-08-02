@@ -74,3 +74,15 @@ async def test_close_room_notifies_and_removes_only_target_room() -> None:
     assert manager.active_connections == 1
     assert manager.room_connections("target") == 0
     assert manager.room_connections("other") == 1
+
+
+@pytest.mark.asyncio
+async def test_close_room_attempts_close_when_notification_fails() -> None:
+    manager = ConnectionManager(max_connections=1, max_per_room=1, send_timeout=0.1)
+    target = FakeWebSocket(fail_send=True)
+    await manager.register(as_websocket(target), "target", "A")
+
+    await manager.close_room("target", {"type": "room.archived"})
+
+    assert target.closed == [(4409, "Room archived")]
+    assert manager.active_connections == 0

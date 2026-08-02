@@ -1,6 +1,7 @@
 """Data-lifecycle, audit, retention, and schema-migration integration tests."""
 
 import json
+import logging
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -9,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from samsarix_chat_engine import AccessTokenService, Settings, create_app
+from samsarix_chat_engine import AccessTokenService, ChatStore, RoomCreate, Settings, create_app
 from samsarix_chat_engine.store import UnsupportedSchemaVersionError
 
 
@@ -89,9 +90,34 @@ def test_export_streams_across_storage_batches(tmp_path) -> None:
     assert len(lines) == 1_006
     assert json.loads(lines[1])["message"]["content"] == "content-0000"
     assert json.loads(lines[-1])["message"]["content"] == "content-1004"
+    # Windows refuses to rename a file with an open handle, so this verifies
+    # that the completed export released its SQLite snapshot connection.
     moved = database.with_suffix(".moved")
     database.rename(moved)
     moved.rename(database)
+
+
+async def test_export_snapshot_survives_concurrent_room_deletion(tmp_path) -> None:
+    store = ChatStore(
+        tmp_path / "snapshot.db",
+        max_rooms=10,
+        max_stored_messages=100,
+        max_stored_messages_per_room=100,
+    )
+    await store.initialize()
+    await store.create_room(RoomCreate(id="general", name="General"))
+    await store.create_message(
+        room_id="general",
+        sender="Andrew",
+        content="snapshot-content",
+        client_message_id=None,
+    )
+    await store.set_room_archived("general", archived=True, actor="operator")
+
+    snapshot = await store.prepare_export("general", actor="operator")
+    await store.delete_room("general", actor="operator")
+
+    assert [message.content for message in snapshot] == ["snapshot-content"]
 
 
 def test_archive_closes_connected_clients_and_unarchive_reopens(client: TestClient, room: dict[str, str]) -> None:
@@ -182,6 +208,47 @@ def test_retention_deletes_old_messages_and_records_count(tmp_path) -> None:
     assert audit[-1]["details"]["deleted_messages"] == 1
 
 
+def test_message_commit_audits_automatic_cross_room_retention(tmp_path) -> None:
+    database = tmp_path / "automatic-retention.db"
+    settings = Settings(database_path=database, message_retention_days=1)
+    with TestClient(create_app(settings)) as client:
+        client.post("/v1/rooms", json={"id": "first", "name": "First"})
+        expired = client.post(
+            "/v1/rooms/first/messages",
+            json={"sender": "Andrew", "content": "expired"},
+        ).json()
+        client.post(
+            "/v1/rooms/first/messages",
+            json={"sender": "Andrew", "content": "current"},
+        )
+        old_timestamp = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        with closing(sqlite3.connect(database)) as connection, connection:
+            connection.execute("UPDATE messages SET created_at = ? WHERE id = ?", (old_timestamp, expired["id"]))
+        client.post("/v1/rooms", json={"id": "second", "name": "Second"})
+
+        trigger = client.post(
+            "/v1/rooms/second/messages",
+            json={"sender": "Andrew", "content": "trigger"},
+        )
+        first_history = client.get("/v1/rooms/first/messages").json()["items"]
+        second_history = client.get("/v1/rooms/second/messages").json()["items"]
+        audit = client.get("/v1/admin/audit-events").json()["items"]
+
+    assert trigger.status_code == 201
+    assert [message["content"] for message in first_history] == ["current"]
+    assert [message["content"] for message in second_history] == ["trigger"]
+    automatic = audit[-1]
+    assert automatic["action"] == "retention.automatic"
+    assert automatic["actor"] == "system:retention"
+    assert {key: value for key, value in automatic["details"].items() if key != "cutoff"} == {
+        "age_deleted": 1,
+        "global_cap_deleted": 0,
+        "room_cap_deleted": 0,
+        "trigger_room_id": "second",
+    }
+    assert datetime.fromisoformat(automatic["details"]["cutoff"]).tzinfo is not None
+
+
 def test_retention_must_be_configured_and_audit_cursor_is_validated(client: TestClient, room: dict[str, str]) -> None:
     retention = client.post("/v1/admin/retention/run")
     invalid_cursor = client.get("/v1/admin/audit-events", params={"before": "missing"})
@@ -192,7 +259,7 @@ def test_retention_must_be_configured_and_audit_cursor_is_validated(client: Test
     assert invalid_cursor.json()["error"]["code"] == "invalid_cursor"
 
 
-def test_v1_database_migrates_in_place(tmp_path) -> None:
+def test_v1_database_migrates_in_place(tmp_path, caplog: pytest.LogCaptureFixture) -> None:
     database = tmp_path / "v1.db"
     created_at = datetime.now(timezone.utc).isoformat()
     with closing(sqlite3.connect(database)) as connection, connection:
@@ -219,6 +286,7 @@ def test_v1_database_migrates_in_place(tmp_path) -> None:
             ("message-1", "legacy", "Andrew", "preserved", created_at, None),
         )
 
+    caplog.set_level(logging.INFO, logger="samsarix_chat_engine.store")
     with TestClient(create_app(Settings(database_path=database))) as client:
         room = client.get("/v1/rooms/legacy")
         history = client.get("/v1/rooms/legacy/messages")
@@ -232,6 +300,7 @@ def test_v1_database_migrates_in_place(tmp_path) -> None:
     assert history.json()["items"][0]["content"] == "preserved"
     assert version == 2
     assert "archived_at" in columns
+    assert "Migrating database schema from version 1 to 2" in caplog.text
 
 
 def test_newer_database_schema_is_refused_without_mutation(tmp_path) -> None:

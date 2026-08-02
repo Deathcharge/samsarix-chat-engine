@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
+import logging
 import os
 import sqlite3
 import tempfile
@@ -14,12 +16,13 @@ from collections.abc import Callable, Iterator
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import IO, Any, TypeVar
 
 from .models import AuditEvent, Message, Room, RoomCreate
 
 T = TypeVar("T")
 SCHEMA_VERSION = 2
+logger = logging.getLogger(__name__)
 
 
 def copy_sqlite_database(source: Path, target: Path, *, replace: bool = False) -> None:
@@ -58,6 +61,10 @@ def copy_sqlite_database(source: Path, target: Path, *, replace: bool = False) -
             # POSIX and Windows, including if another process creates the
             # target after the earlier existence check.
             os.link(temporary, target)
+        # Restoring only the main file while retaining an earlier WAL can
+        # replay stale pages into the new snapshot on its next open.
+        Path(f"{target}-wal").unlink(missing_ok=True)
+        Path(f"{target}-shm").unlink(missing_ok=True)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -94,18 +101,88 @@ class InvalidAuditCursorError(StoreError):
     """Raised when an administrative audit cursor is unknown."""
 
 
+class RetentionNotConfiguredError(StoreError):
+    """Raised when a retention pass runs without a configured maximum age."""
+
+
+class DatabaseInUseError(StoreError):
+    """Raised when another process holds the database lifecycle lock."""
+
+
 class UnsupportedSchemaVersionError(StoreError):
     """Raised rather than mutating a database written by a newer engine."""
+
+
+class DatabaseLifecycleLock:
+    """Cross-process exclusive lock used to coordinate service and restore."""
+
+    def __init__(self, database_path: Path) -> None:
+        resolved = database_path.resolve()
+        self.database_path = resolved
+        self.path = resolved.with_name(f"{resolved.name}.lock")
+        self._handle: IO[bytes] | None = None
+
+    def acquire(self) -> None:
+        if self._handle is not None:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+b")
+        try:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            if os.name == "nt":
+                msvcrt: Any = importlib.import_module("msvcrt")
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl: Any = importlib.import_module("fcntl")
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            handle.close()
+            raise DatabaseInUseError(f"database is in use: {self.database_path}") from exc
+        self._handle = handle
+
+    def release(self) -> None:
+        handle = self._handle
+        if handle is None:
+            return
+        self._handle = None
+        try:
+            handle.seek(0)
+            if os.name == "nt":
+                msvcrt: Any = importlib.import_module("msvcrt")
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl: Any = importlib.import_module("fcntl")
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+    def __enter__(self) -> DatabaseLifecycleLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
+        self.release()
 
 
 class MessageSnapshot(Iterator[Message]):
     """Serializable iterator over one eager SQLite read snapshot."""
 
-    def __init__(self, connection: sqlite3.Connection, cursor: sqlite3.Cursor, *, batch_size: int) -> None:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        cursor: sqlite3.Cursor,
+        *,
+        batch_size: int,
+        initial_rows: list[sqlite3.Row],
+    ) -> None:
         self._connection = connection
         self._cursor = cursor
         self._batch_size = batch_size
-        self._buffer: Iterator[sqlite3.Row] = iter(())
+        self._buffer: Iterator[sqlite3.Row] = iter(initial_rows)
         self._closed = False
 
     def __next__(self) -> Message:
@@ -201,9 +278,12 @@ class ChatStore:
         async with self._write_lock:
             return await asyncio.to_thread(self._delete_room_sync, room_id, actor)
 
-    async def record_export_requested(self, room_id: str, *, actor: str) -> None:
+    async def prepare_export(self, room_id: str, *, actor: str) -> MessageSnapshot:
+        """Audit and open one room snapshot without interleaving an application write."""
+
         async with self._write_lock:
             await asyncio.to_thread(self._record_export_requested_sync, room_id, actor)
+            return await asyncio.to_thread(self.iter_messages, room_id)
 
     async def create_message(
         self,
@@ -247,10 +327,13 @@ class ChatStore:
                 """,
                 (room_id,),
             )
+            # Step the statement before releasing the application write lock,
+            # establishing the SQLite read snapshot for concurrent deletion.
+            initial_rows = cursor.fetchmany(batch_size)
         except Exception:
             connection.close()
             raise
-        return MessageSnapshot(connection, cursor, batch_size=batch_size)
+        return MessageSnapshot(connection, cursor, batch_size=batch_size, initial_rows=initial_rows)
 
     async def list_audit_events(
         self,
@@ -262,7 +345,7 @@ class ChatStore:
 
     async def run_retention(self, *, actor: str) -> tuple[int, datetime]:
         if self.message_retention_days is None:
-            raise ValueError("message retention is not configured")
+            raise RetentionNotConfiguredError("message retention is not configured")
         cutoff = datetime.now(timezone.utc) - timedelta(days=self.message_retention_days)
         async with self._write_lock:
             deleted = await asyncio.to_thread(self._run_retention_sync, cutoff, actor)
@@ -287,6 +370,8 @@ class ChatStore:
                 raise UnsupportedSchemaVersionError(
                     f"database schema version {current_version} is newer than supported version {SCHEMA_VERSION}"
                 )
+            if current_version < SCHEMA_VERSION:
+                logger.info("Migrating database schema from version %s to %s", current_version, SCHEMA_VERSION)
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(
                 """
@@ -330,7 +415,7 @@ class ChatStore:
                     ON audit_events(created_at DESC, id DESC);
                 """
             )
-            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")  # noqa: S608 - constant PRAGMA literal
 
     def _create_room_sync(self, room_id: str, payload: RoomCreate, actor: str) -> Room:
         created_at = datetime.now(timezone.utc)
@@ -452,10 +537,13 @@ class ChatStore:
             return message, True
 
     def _trim_messages(self, connection: sqlite3.Connection, room_id: str, *, now: datetime) -> None:
+        age_deleted = 0
         if self.message_retention_days is not None:
             cutoff = now - timedelta(days=self.message_retention_days)
-            connection.execute("DELETE FROM messages WHERE created_at < ?", (cutoff.isoformat(),))
-        connection.execute(
+            age_deleted = connection.execute(
+                "DELETE FROM messages WHERE created_at < ?", (cutoff.isoformat(),)
+            ).rowcount
+        room_cap_deleted = connection.execute(
             """
             DELETE FROM messages
             WHERE id IN (
@@ -465,8 +553,8 @@ class ChatStore:
             )
             """,
             (room_id, room_id, self.max_stored_messages_per_room),
-        )
-        connection.execute(
+        ).rowcount
+        global_cap_deleted = connection.execute(
             """
             DELETE FROM messages
             WHERE id IN (
@@ -475,7 +563,22 @@ class ChatStore:
             )
             """,
             (self.max_stored_messages,),
-        )
+        ).rowcount
+        if age_deleted or room_cap_deleted or global_cap_deleted:
+            details: dict[str, Any] = {
+                "age_deleted": age_deleted,
+                "global_cap_deleted": global_cap_deleted,
+                "room_cap_deleted": room_cap_deleted,
+                "trigger_room_id": room_id,
+            }
+            if self.message_retention_days is not None:
+                details["cutoff"] = (now - timedelta(days=self.message_retention_days)).isoformat()
+            self._insert_audit(
+                connection,
+                action="retention.automatic",
+                actor="system:retention",
+                details=details,
+            )
 
     def _list_messages_sync(
         self,

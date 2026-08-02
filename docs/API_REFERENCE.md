@@ -90,7 +90,7 @@ Returns the current process's active WebSocket connection count.
 
 ### `GET /v1/admin/audit-events?limit=50&before={event_id}`
 
-Admin-only. Returns chronological pages of room lifecycle, export-request, and explicit retention metadata. Events contain no message bodies or credentials. The shared API-key actor is `operator-api-key`; signed admin tokens use their subject.
+Admin-only. Returns chronological pages of room lifecycle, export-request, explicit-retention, and automatic-retention metadata. Events contain no message bodies or credentials. The shared API-key actor is `operator-api-key`, automatic policy actions use `system:retention`, and signed admin tokens use their subject.
 
 ### `POST /v1/admin/retention/run`
 

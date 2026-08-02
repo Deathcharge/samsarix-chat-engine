@@ -54,7 +54,14 @@ def _read_optional_int(suffix: str, *, minimum: int, maximum: int) -> int | None
     raw = _read_env(suffix)
     if raw is None or not raw.strip():
         return None
-    return _read_int(suffix, minimum, minimum=minimum, maximum=maximum)
+    name = f"SAMSARIX_CHAT_{suffix}"
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ConfigurationError(f"{name} must be an integer") from exc
+    if not minimum <= value <= maximum:
+        raise ConfigurationError(f"{name} must be between {minimum} and {maximum}")
+    return value
 
 
 def _read_float(suffix: str, default: float, *, minimum: float, maximum: float) -> float:

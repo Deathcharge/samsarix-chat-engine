@@ -44,8 +44,10 @@ from .models import (
 )
 from .store import (
     ChatStore,
+    DatabaseLifecycleLock,
     InvalidAuditCursorError,
     InvalidCursorError,
+    RetentionNotConfiguredError,
     RoomAlreadyExistsError,
     RoomArchivedError,
     RoomCapacityError,
@@ -308,6 +310,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         message_retention_days=resolved.message_retention_days,
         max_audit_events=resolved.max_audit_events,
     )
+    lifecycle_lock = DatabaseLifecycleLock(resolved.database_path)
     manager = ConnectionManager(
         max_connections=resolved.max_connections,
         max_per_room=resolved.max_connections_per_room,
@@ -328,14 +331,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
-        await store.initialize()
-        application.state.settings = resolved
-        application.state.store = store
-        application.state.connections = manager
-        application.state.message_limiter = limiter
-        application.state.token_service = token_service
-        yield
-        await manager.close_all()
+        lifecycle_lock.acquire()
+        try:
+            await store.initialize()
+            application.state.settings = resolved
+            application.state.store = store
+            application.state.connections = manager
+            application.state.message_limiter = limiter
+            application.state.token_service = token_service
+            yield
+        finally:
+            try:
+                await manager.close_all()
+            finally:
+                lifecycle_lock.release()
 
     application = FastAPI(
         title="Samsarix Chat Engine",
@@ -497,10 +506,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise APIError(404, "room_not_found", "Room not found")
         exported_at = datetime.now(timezone.utc)
         try:
-            await store.record_export_requested(room_id, actor=_audit_actor(principal))
+            messages = await store.prepare_export(room_id, actor=_audit_actor(principal))
         except RoomNotFoundError as exc:
             raise APIError(404, "room_not_found", "Room not found") from exc
-        messages = store.iter_messages(room_id)
 
         def export_lines() -> Iterator[str]:
             metadata = {
@@ -618,9 +626,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @router.post("/admin/retention/run", response_model=RetentionResult, tags=["operations"])
     async def run_retention(principal: PrincipalDependency) -> RetentionResult:
         _authorize(principal, "admin")
-        if resolved.message_retention_days is None:
-            raise APIError(409, "retention_not_configured", "Message retention is not configured")
-        deleted_messages, cutoff = await store.run_retention(actor=_audit_actor(principal))
+        try:
+            deleted_messages, cutoff = await store.run_retention(actor=_audit_actor(principal))
+        except RetentionNotConfiguredError as exc:
+            raise APIError(409, "retention_not_configured", "Message retention is not configured") from exc
         return RetentionResult(deleted_messages=deleted_messages, cutoff=cutoff)
 
     application.include_router(router)

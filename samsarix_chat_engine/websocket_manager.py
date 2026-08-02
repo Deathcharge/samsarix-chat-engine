@@ -124,6 +124,9 @@ class ConnectionManager:
     ) -> None:
         try:
             await asyncio.wait_for(websocket.send_json(event), timeout=self.send_timeout)
+        except Exception:
+            logger.debug("WebSocket notification failed during room lifecycle change")
+        try:
             await asyncio.wait_for(websocket.close(code=code, reason=reason), timeout=self.send_timeout)
         except Exception:
             logger.debug("WebSocket was already closed during room lifecycle change")

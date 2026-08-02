@@ -8,8 +8,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi.testclient import TestClient
 
 import samsarix_chat_engine
+from samsarix_chat_engine import create_app
 from samsarix_chat_engine.cli import build_parser, main
 from samsarix_chat_engine.config import ConfigurationError, Settings
 
@@ -47,6 +49,10 @@ def test_settings_from_env_and_validation(monkeypatch: pytest.MonkeyPatch, tmp_p
         Settings(allowed_origins=("https://chat.example/path",))
     with pytest.raises(ConfigurationError, match="between 1 and 3650"):
         Settings(message_retention_days=0)
+    monkeypatch.setenv("SAMSARIX_CHAT_MESSAGE_RETENTION_DAYS", "not-a-number")
+    with pytest.raises(ConfigurationError, match="must be an integer"):
+        Settings.from_env()
+    monkeypatch.setenv("SAMSARIX_CHAT_MESSAGE_RETENTION_DAYS", "30")
 
     monkeypatch.delenv("SAMSARIX_CHAT_MAX_CONNECTIONS")
     monkeypatch.setenv("SAMSARIX_CHAT_WS_AUTH_TIMEOUT", "slow")
@@ -122,7 +128,17 @@ def test_cli_backup_and_restore_use_consistent_snapshots(tmp_path: Path, capsys:
     with pytest.raises(SystemExit) as protected:
         main(["database", "--database", str(restored), "restore", str(backup)])
     assert protected.value.code == 2
+
+    with TestClient(create_app(Settings(database_path=restored))):
+        with pytest.raises(SystemExit) as active:
+            main(["database", "--database", str(restored), "restore", str(backup), "--replace"])
+    assert active.value.code == 2
+
+    Path(f"{restored}-wal").write_bytes(b"stale-wal")
+    Path(f"{restored}-shm").write_bytes(b"stale-shm")
     assert main(["database", "--database", str(restored), "restore", str(backup), "--replace"]) == 0
+    assert not Path(f"{restored}-wal").exists()
+    assert not Path(f"{restored}-shm").exists()
 
 
 def test_legacy_import_and_environment_aliases(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

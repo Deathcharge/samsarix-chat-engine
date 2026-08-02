@@ -15,7 +15,7 @@ curl --fail-with-body \
   http://127.0.0.1:8000/v1/rooms/general/export
 ```
 
-Line 1 has `type: samsarix.room_export`, `schema_version: 1`, an export timestamp, and room metadata. Each later line has `type: message` and one complete message. The audit action is `room.export_requested`: it records that delivery began, not that the client received every byte.
+Line 1 has `type: samsarix.room_export`, `schema_version: 1`, an export timestamp, and room metadata. Each later line has `type: message` and one complete message. The audit action is `room.export_requested`: it records that the export request was accepted, not that the client received every byte.
 
 Exports contain plaintext message bodies and sender identifiers. Protect them like the database, transmit them over TLS, and delete working copies according to your policy.
 
@@ -64,7 +64,7 @@ curl --fail-with-body \
   'http://127.0.0.1:8000/v1/admin/audit-events?limit=50'
 ```
 
-The log covers room creation, archive/reopen, export requests, deletion, and explicit retention. It stores actor/room/time and small operational details, never message bodies or credentials. A shared API key can identify only `operator-api-key`, not the individual human using it. Use signed admin tokens with distinct subjects when individual attribution matters.
+The log covers room creation, archive/reopen, export requests, deletion, explicit retention, and automatic age/count-cap trimming. It stores actor/room/time and small operational details, never message bodies or credentials. Automatic policy actions use `system:retention`; a shared API key can identify only `operator-api-key`, not the individual human using it. Use signed admin tokens with distinct subjects when individual attribution matters.
 
 The trail is bounded by `SAMSARIX_CHAT_MAX_AUDIT_EVENTS` (default 100000) to prevent unbounded disk use. Export it to an appropriately protected external audit system if your policy requires longer or tamper-resistant retention. A database administrator can still modify local SQLite data.
 
@@ -92,7 +92,7 @@ Check `/readyz`, inspect representative rooms/history, then stop the test servic
 3. Start one process and verify `/readyz`, room history, and the audit trail.
 4. Keep the rollback copy until application-level verification is complete.
 
-Restoring replaces the live database state with the snapshot state. Messages and audit events created after the backup are lost. Never restore while a chat process is writing the target database.
+Restoring replaces the live database state with the snapshot state. Messages and audit events created after the backup are lost. The running service holds a cross-process database lifecycle lock, so the restore command fails while that service is active; stop it and retry. The adjacent `.lock` file may remain after shutdown—the operating-system lock, not file presence, signals use. This coordinates Samsarix processes using the same resolved database path, not unrelated tools that modify SQLite directly.
 
 ## Upgrade and rollback
 

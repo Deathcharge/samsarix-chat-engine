@@ -138,13 +138,13 @@ Initial v0.5 verification on 2026-08-01 used CPython 3.14.6 on Windows and the n
 | --- | --- |
 | `ruff check .` / `ruff format --check .` | Passed; 28 Python files formatted |
 | `mypy samsarix_chat_engine` | Passed; no issues in 9 source files |
-| `pytest --cov=samsarix_chat_engine --cov-report=term-missing` | 69 passed in 70.03s; 91.74% total branch coverage |
+| `pytest --cov=samsarix_chat_engine --cov-report=term-missing` | 72 passed in 46.89s; 91.47% total branch coverage |
 | `pip check` / isolated wheel-runtime `pip-audit` | No broken requirements; no known third-party vulnerabilities |
 | `python -m build` / `twine check` | Source archive and universal wheel built from the sdist; both passed metadata checks |
 | final wheel installed outside the source tree | Version/import/metadata and `pip check` passed |
 | expanded installed-wheel smoke | Authorized HTTP/WebSocket persistence plus NDJSON export, archive/delete, online backup, SQLite creation, and graceful shutdown passed |
 
-The lifecycle tests cover admin authorization, audit-content exclusion, idempotent archive, read-only enforcement, active-client teardown/reopen, confirmation failures, 1005-message streaming across batches, retention counts, v1 migration/data preservation, future-schema refusal, and Windows-safe backup/restore replacement. Exact final artifact digests are recorded in the pull request because including them in the packaged source would change those digests.
+The lifecycle tests cover admin authorization, audit-content exclusion, idempotent archive, read-only enforcement, active-client teardown/reopen, confirmation failures, 1005-message streaming across batches, explicit and automatic retention counts, v1 migration/data preservation, future-schema refusal, cross-process restore exclusion, stale-sidecar removal, and Windows-safe backup/restore replacement. Exact final artifact digests are recorded in the pull request because including them in the packaged source would change those digests.
 
 Initial v0.4 verification on 2026-08-01: the unchanged v0.3 baseline had 27 passing tests; after implementation and review hardening, `pytest --cov=samsarix_chat_engine --cov-report=term-missing` passed 59 tests in 33.02 seconds with 92.86% branch coverage. The new authorization tests cover tampering, expiry, issuer/audience confusion, malformed signed claims, self-verifiable token size, room and action denial, sender spoofing, subject-wide WebSocket rate limits, OpenAPI security schemes, browser WebSocket authentication, read-only sessions, origin enforcement, and CLI issuance. Final artifact and installed-wheel evidence is recorded after exact-head verification.
 
