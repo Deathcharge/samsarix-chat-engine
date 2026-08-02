@@ -9,14 +9,17 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 - Accepted PostgreSQL multi-instance architecture and explicit cross-process correctness, recovery, capacity, moderation, webhook, migration, and failure-test gates for v0.13.
 - Storage-neutral `ChatStorage` protocol between application/webhook orchestration and the existing SQLite backend.
 - Optional `postgres` installation extra and an internal PostgreSQL foundation with advisory-lock schema initialization, a transaction-coupled ordered realtime event log, and durable per-instance cursors.
-- Internal PostgreSQL schema v2 and core store for rooms, bounded messages, Unicode-normalized search, moderation, audit history, database-time ordering, and cross-instance idempotency/capacity enforcement.
+- Internal PostgreSQL schema v3 and a complete `ChatStorage` implementation for rooms, bounded messages, Unicode-normalized search, moderation, audit history, monotonic read state, stable spooled exports, explicit retention, and cross-instance idempotency/capacity enforcement.
+- Transactional PostgreSQL webhook outbox with stable delivery IDs, database-time scheduling, expiring worker-owned claims, `SKIP LOCKED` work selection, crash recovery, bounded terminal-history pruning, and operator replay.
 
 ### Security and operations
 
 - Multi-process SQLite is explicitly rejected: WAL is same-host-only, single-writer, and current SQLite documentation identifies a concurrent WAL-reset corruption race affecting versions through 3.51.2.
 - Version 0.12 remains a one-process/one-replica release until the PostgreSQL acceptance gates pass; no horizontal-scale claim is introduced by this architecture increment.
 - PostgreSQL credentials remain internal to the optional foundation and are excluded from translated availability errors; the incomplete backend is not selectable through public configuration.
-- Message deletion, room deletion, and automatic retention scrub message bodies from retained realtime event envelopes in the same transaction; the event envelope remains bounded while supporting the existing 100,000-character message contract.
+- Message deletion, room deletion, and automatic or explicit retention scrub message bodies from retained realtime event and terminal-webhook envelopes in the same transaction, and cancel unsent sensitive payloads.
+- PostgreSQL event and webhook envelopes remain bounded at 512 KiB so every valid 100,000-character message, including four-byte Unicode, fits without turning a valid domain write into a coordination failure.
+- PostgreSQL webhook claims can be acknowledged only by the live lease owner. Expired claims are safely redelivered with the same ID; receivers must still deduplicate because delivery is at least once.
 
 ## 0.12.0 — 2026-08-02
 

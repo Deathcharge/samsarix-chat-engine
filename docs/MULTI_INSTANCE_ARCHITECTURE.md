@@ -12,7 +12,7 @@ PostgreSQL `LISTEN`/`NOTIFY` will be a low-latency wake-up hint only. Every clie
 
 The initial event-log implementation serializes sequence allocation with a transaction-scoped advisory lock. PostgreSQL identity values alone are not commit ordered: without this lock, a later sequence could commit and be acknowledged before an earlier transaction becomes visible. Event append must remain the final lock-taking phase of a domain mutation. Sustained-load acceptance tests will determine whether this intentionally simple global sequencer is sufficient or must be partitioned without weakening cursor correctness.
 
-Schema v2 uses PostgreSQL database time for room/message/moderation ordering and retention boundaries. Transaction-scoped capacity locks currently serialize room creation, message mutation/retention, and bounded audit insertion across replicas. Deletion and retention scrub message bodies from older durable event envelopes before commit. These conservative global locks make correctness inspectable first; the load gate must measure their throughput before v0.13 receives a scale claim.
+Schema v3 uses PostgreSQL database time for room/message/moderation ordering, read cursors, webhook due times and leases, and retention boundaries. The internal store now implements the full storage protocol, including monotonic subject-scoped read state, transactionally stable bounded-memory exports, explicit retention, and a leased transactional webhook outbox. Transaction-scoped capacity locks currently serialize room creation, message mutation/retention, bounded audit insertion, and webhook capacity changes across replicas. Deletion and retention cancel unsent sensitive webhook payloads and scrub message bodies from older durable event and terminal-webhook envelopes before commit. These conservative global locks make correctness inspectable first; the load gate must measure their throughput before v0.13 receives a scale claim.
 
 No Redis dependency is planned for the first supported topology. Redis Pub/Sub is at-most-once, while Streams introduce a second durable system whose commit cannot be atomic with the authoritative database without an additional outbox relay. PostgreSQL already supplies transactions, row locks, advisory locks, `SKIP LOCKED`, and commit-coupled notifications needed by this product's current scale boundary.
 
@@ -46,7 +46,7 @@ PostgreSQL-backed deployments require all of the following:
 - **Rate limits:** atomic time-bucket counters enforce deployment-wide subject/client limits. Database time defines bucket boundaries so host clock skew cannot multiply quotas.
 - **Typing:** transition events use the durable event path but expire automatically and are not retained as chat history or audit content.
 - **Moderation teardown:** room archive and member-ban events reach every instance, which closes matching local sockets deterministically.
-- **Webhook work:** workers claim due rows with an expiring owner lease using row locks and `SKIP LOCKED`. A crashed claim becomes eligible for redelivery; receivers still deduplicate stable webhook IDs.
+- **Webhook work:** implemented outbox workers claim due rows with an expiring owner lease using row locks and `SKIP LOCKED`. Only the current unexpired owner can acknowledge a claim. A crashed claim becomes eligible for redelivery with its stable ID; receivers still deduplicate that ID.
 - **Maintenance leadership:** advisory locks elect one retention, stale-lease, and event-pruning worker at a time. Losing leadership is harmless and retryable.
 - **Readiness:** readiness covers pool acquisition, schema compatibility, and event-cursor health. Liveness never depends on PostgreSQL.
 
@@ -71,7 +71,7 @@ v0.13 cannot claim multi-instance support until CI proves:
 - concurrent idempotent message creation returns one authoritative message;
 - global and per-room connection caps plus rate limits hold across processes;
 - archive and ban actions close matching sockets on every process;
-- two webhook workers never hold the same live claim, and a killed worker's claim is recovered;
+- two webhook workers never hold the same live claim, and a killed worker's claim is recovered (the storage-level lease/recovery case is implemented; the killed-process gate remains);
 - migration concurrency is serialized and newer schemas fail closed;
 - crashed connection leases expire and presence converges;
 - an event-log gap fences the lagging instance and clients recover through history;

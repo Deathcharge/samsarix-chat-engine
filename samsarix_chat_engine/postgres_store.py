@@ -4,30 +4,51 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import tempfile
 import uuid
+from collections.abc import Iterator
 from datetime import datetime, timedelta
-from typing import Any
+from typing import IO, Any
 
 from psycopg import AsyncConnection
 from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
 
-from .models import AuditEvent, MemberModeration, MemberModerationUpdate, Message, Room, RoomCreate
+from .models import (
+    AuditEvent,
+    MemberModeration,
+    MemberModerationUpdate,
+    Message,
+    ReadState,
+    Room,
+    RoomCreate,
+    WebhookDelivery,
+)
 from .postgres import PostgresFoundation, PostgresFoundationError
 from .store import (
+    ChatStorage,
     InvalidAuditCursorError,
     InvalidCursorError,
+    InvalidWebhookCursorError,
     MemberBannedError,
     MemberMutedError,
     MessageDeletedError,
     MessageNotFoundError,
     MessageOwnershipError,
+    PendingWebhook,
+    ReadStateCapacityError,
+    RetentionNotConfiguredError,
     RoomAlreadyExistsError,
     RoomArchivedError,
     RoomCapacityError,
     RoomFrozenError,
     RoomNotArchivedError,
     RoomNotFoundError,
+    WebhookCapacityError,
+    WebhookDeliveryNotFoundError,
+    WebhookPayloadUnavailableError,
     _normalize_search_text,
     normalize_search_query,
 )
@@ -35,6 +56,32 @@ from .store import (
 POSTGRES_ROOM_CAP_LOCK_ID = 7_495_346_927_831_819_043
 POSTGRES_MESSAGE_CAP_LOCK_ID = 7_495_346_927_831_819_044
 POSTGRES_AUDIT_CAP_LOCK_ID = 7_495_346_927_831_819_045
+POSTGRES_WEBHOOK_CAP_LOCK_ID = 7_495_346_927_831_819_046
+
+
+class PostgresMessageSnapshot:
+    """Closable synchronous iterator backed by a bounded-memory temporary spool."""
+
+    def __init__(self, spool: IO[bytes]) -> None:
+        self._spool = spool
+        self._closed = False
+
+    def __iter__(self) -> Iterator[Message]:
+        return self
+
+    def __next__(self) -> Message:
+        if self._closed:
+            raise StopIteration
+        line = self._spool.readline()
+        if not line:
+            self.close()
+            raise StopIteration
+        return Message.model_validate_json(line)
+
+    def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            self._spool.close()
 
 
 class PostgresChatStore:
@@ -47,8 +94,13 @@ class PostgresChatStore:
         max_rooms: int,
         max_stored_messages: int,
         max_stored_messages_per_room: int,
+        max_read_states_per_room: int = 10_000,
         message_retention_days: int | None = None,
         max_audit_events: int = 100_000,
+        webhook_events: tuple[str, ...] = (),
+        max_webhook_deliveries: int = 100_000,
+        webhook_worker_id: str | None = None,
+        webhook_lease_seconds: int = 60,
         min_pool_size: int = 1,
         max_pool_size: int = 5,
         pool_timeout_seconds: float = 10.0,
@@ -61,13 +113,26 @@ class PostgresChatStore:
             raise ValueError("per-room message capacity cannot exceed global capacity")
         if message_retention_days is not None and message_retention_days < 1:
             raise ValueError("message retention days must be positive")
+        if max_read_states_per_room < 1:
+            raise ValueError("PostgreSQL read-state capacity must be positive")
         if max_audit_events < 1:
             raise ValueError("PostgreSQL audit capacity must be positive")
+        if max_webhook_deliveries < 1:
+            raise ValueError("PostgreSQL webhook capacity must be positive")
+        if not 31 <= webhook_lease_seconds <= 300:
+            raise ValueError("PostgreSQL webhook lease must be between 31 and 300 seconds")
         self.max_rooms = max_rooms
         self.max_stored_messages = max_stored_messages
         self.max_stored_messages_per_room = max_stored_messages_per_room
+        self.max_read_states_per_room = max_read_states_per_room
         self.message_retention_days = message_retention_days
         self.max_audit_events = max_audit_events
+        self.webhook_events = frozenset(webhook_events)
+        self.max_webhook_deliveries = max_webhook_deliveries
+        self.webhook_worker_id = webhook_worker_id or f"worker-{uuid.uuid4().hex}"
+        if not 1 <= len(self.webhook_worker_id) <= 128:
+            raise ValueError("PostgreSQL webhook worker ID must be between 1 and 128 characters")
+        self.webhook_lease_seconds = webhook_lease_seconds
         self.foundation = PostgresFoundation(
             conninfo,
             min_pool_size=min_pool_size,
@@ -83,7 +148,7 @@ class PostgresChatStore:
 
     async def check_ready(self) -> bool:
         try:
-            return await self.foundation.schema_version() >= 2
+            return await self.foundation.schema_version() >= 3
         except PostgresFoundationError:
             return False
 
@@ -239,6 +304,7 @@ class PostgresChatStore:
                 room_id=room_id,
                 details={"deleted_messages": deleted_messages},
             )
+            await self._scrub_room_webhooks(connection, room_id)
             await connection.execute("DELETE FROM public.samsarix_rooms WHERE id = %s", (room_id,))
             await self.foundation.append_event(
                 connection,
@@ -247,6 +313,45 @@ class PostgresChatStore:
                 payload={"type": "room.deleted", "room_id": room_id, "deleted_messages": deleted_messages},
             )
         return deleted_messages
+
+    async def prepare_export(self, room_id: str, *, actor: str) -> PostgresMessageSnapshot:
+        """Materialize one transactionally stable export into a self-deleting spool."""
+
+        spool: IO[bytes] = tempfile.SpooledTemporaryFile(max_size=1_048_576, mode="w+b")
+        try:
+            async with self.foundation.transaction() as connection:
+                cursor = await connection.execute(
+                    "SELECT 1 FROM public.samsarix_rooms WHERE id = %s FOR SHARE",
+                    (room_id,),
+                )
+                if await cursor.fetchone() is None:
+                    raise RoomNotFoundError(room_id)
+                await self._insert_audit(
+                    connection,
+                    action="room.export_requested",
+                    actor=actor,
+                    room_id=room_id,
+                )
+                cursor = await connection.execute(
+                    f"{_MESSAGE_SELECT} WHERE room_id = %s ORDER BY created_at, id",
+                    (room_id,),
+                )
+                buffer = bytearray()
+                while rows := await cursor.fetchmany(100):
+                    for row in rows:
+                        line = _message_from_row(row).model_dump_json().encode("utf-8") + b"\n"
+                        if buffer and len(buffer) + len(line) > 262_144:
+                            await asyncio.to_thread(spool.write, bytes(buffer))
+                            buffer.clear()
+                        buffer.extend(line)
+                    if buffer:
+                        await asyncio.to_thread(spool.write, bytes(buffer))
+                        buffer.clear()
+            await asyncio.to_thread(spool.seek, 0)
+        except BaseException:
+            spool.close()
+            raise
+        return PostgresMessageSnapshot(spool)
 
     async def create_message(
         self,
@@ -291,6 +396,14 @@ class PostgresChatStore:
             row = await cursor.fetchone()
             message = _message_from_row(_required_row(row, "message creation"))
             await self._trim_messages(connection, room_id=room_id, now=message.created_at)
+            await self._insert_webhook(
+                connection,
+                event_type="message.created",
+                room_id=room_id,
+                resource_id=message.id,
+                occurred_at=message.created_at,
+                data={"message": message.model_dump(mode="json")},
+            )
             await self.foundation.append_event(
                 connection,
                 room_id=room_id,
@@ -334,6 +447,14 @@ class PostgresChatStore:
                 actor=actor,
                 room_id=room_id,
                 details={"message_id": message_id},
+            )
+            await self._insert_webhook(
+                connection,
+                event_type="message.updated",
+                room_id=room_id,
+                resource_id=message.id,
+                occurred_at=message.edited_at or message.created_at,
+                data={"actor": actor, "message": message.model_dump(mode="json")},
             )
             await self.foundation.append_event(
                 connection,
@@ -379,6 +500,15 @@ class PostgresChatStore:
                 actor=actor,
                 room_id=room_id,
                 details={"message_id": message_id},
+            )
+            await self._scrub_message_webhooks(connection, [(message.id, message.room_id)])
+            await self._insert_webhook(
+                connection,
+                event_type="message.deleted",
+                room_id=room_id,
+                resource_id=message.id,
+                occurred_at=message.deleted_at or message.created_at,
+                data={"actor": actor, "message": message.model_dump(mode="json")},
             )
             await self.foundation.append_event(
                 connection,
@@ -472,6 +602,14 @@ class PostgresChatStore:
                     "banned_until": moderation_json["banned_until"],
                 },
             )
+            await self._insert_webhook(
+                connection,
+                event_type="member.moderation.updated",
+                room_id=room_id,
+                resource_id=subject,
+                occurred_at=now,
+                data={"actor": actor, "moderation": moderation_json},
+            )
             await self.foundation.append_event(
                 connection,
                 room_id=room_id,
@@ -545,6 +683,95 @@ class PostgresChatStore:
         page_rows, next_before = _page_rows(rows, limit, chronological=True)
         return [_message_from_row(row) for row in page_rows], next_before
 
+    async def get_read_state(self, room_id: str, subject: str) -> ReadState:
+        """Return one subject's monotonic cursor and current unread count."""
+
+        async with self.foundation.transaction() as connection:
+            await _require_room(connection, room_id)
+            return await _read_state_from_connection(connection, room_id, subject)
+
+    async def mark_read(self, room_id: str, subject: str, message_id: str | None) -> ReadState:
+        """Advance a room cursor using database ordering without allowing regression."""
+
+        async with self.foundation.transaction() as connection:
+            cursor = await connection.execute(
+                "SELECT 1 FROM public.samsarix_rooms WHERE id = %s FOR UPDATE",
+                (room_id,),
+            )
+            if await cursor.fetchone() is None:
+                raise RoomNotFoundError(room_id)
+            if message_id is None:
+                cursor = await connection.execute(
+                    """
+                    SELECT id, created_at FROM public.samsarix_messages
+                    WHERE room_id = %s ORDER BY created_at DESC, id DESC LIMIT 1
+                    """,
+                    (room_id,),
+                )
+            else:
+                cursor = await connection.execute(
+                    """
+                    SELECT id, created_at FROM public.samsarix_messages
+                    WHERE room_id = %s AND id = %s
+                    """,
+                    (room_id, message_id),
+                )
+            message_row = await cursor.fetchone()
+            if message_id is not None and message_row is None:
+                raise MessageNotFoundError(message_id)
+            cursor = await connection.execute("SELECT clock_timestamp()")
+            now = _required_row(await cursor.fetchone(), "database clock")[0]
+            candidate_created_at = message_row[1] if message_row is not None else now
+            candidate_message_id = str(message_row[0]) if message_row is not None else None
+            cursor = await connection.execute(
+                """
+                SELECT message_id, message_created_at
+                FROM public.samsarix_room_read_states
+                WHERE room_id = %s AND subject = %s FOR UPDATE
+                """,
+                (room_id, subject),
+            )
+            existing = await cursor.fetchone()
+            if existing is None:
+                cursor = await connection.execute(
+                    "SELECT COUNT(*) FROM public.samsarix_room_read_states WHERE room_id = %s",
+                    (room_id,),
+                )
+                count_row = await cursor.fetchone()
+                if count_row is not None and int(count_row[0]) >= self.max_read_states_per_room:
+                    raise ReadStateCapacityError(room_id)
+            existing_key = (existing[1], str(existing[0] or "")) if existing is not None else None
+            candidate_key = (candidate_created_at, candidate_message_id or "")
+            if existing_key is None or candidate_key > existing_key:
+                await connection.execute(
+                    """
+                    INSERT INTO public.samsarix_room_read_states (
+                        room_id, subject, message_id, message_created_at, updated_at
+                    ) VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (room_id, subject) DO UPDATE SET
+                        message_id = EXCLUDED.message_id,
+                        message_created_at = EXCLUDED.message_created_at,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (room_id, subject, candidate_message_id, candidate_created_at, now),
+                )
+            return await _read_state_from_connection(connection, room_id, subject)
+
+    async def clear_read_state(self, room_id: str, subject: str) -> None:
+        """Remove one subject's persisted cursor after verifying the room."""
+
+        async with self.foundation.transaction() as connection:
+            cursor = await connection.execute(
+                "SELECT 1 FROM public.samsarix_rooms WHERE id = %s FOR UPDATE",
+                (room_id,),
+            )
+            if await cursor.fetchone() is None:
+                raise RoomNotFoundError(room_id)
+            await connection.execute(
+                "DELETE FROM public.samsarix_room_read_states WHERE room_id = %s AND subject = %s",
+                (room_id, subject),
+            )
+
     async def list_audit_events(
         self,
         *,
@@ -585,6 +812,217 @@ class PostgresChatStore:
             rows = await cursor.fetchall()
         page_rows, next_before = _page_rows(rows, limit, chronological=True)
         return [_audit_from_row(row) for row in page_rows], next_before
+
+    async def list_webhook_deliveries(
+        self,
+        *,
+        limit: int = 50,
+        before: str | None = None,
+        status: str | None = None,
+    ) -> tuple[list[WebhookDelivery], str | None]:
+        """List bounded webhook metadata without exposing retained payload bytes."""
+
+        _validate_page_limit(limit)
+        if status not in {None, "pending", "delivered", "failed"}:
+            raise ValueError("invalid webhook delivery status")
+        async with self.foundation.transaction() as connection:
+            cursor_key: tuple[datetime, str] | None = None
+            if before is not None:
+                cursor = await connection.execute(
+                    "SELECT created_at, id FROM public.samsarix_webhook_deliveries WHERE id = %s",
+                    (before,),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    raise InvalidWebhookCursorError(before)
+                cursor_key = (row[0], str(row[1]))
+            cursor = await connection.execute(
+                """
+                SELECT id, event_type, room_id, created_at, attempt_count, next_attempt_at,
+                       last_attempt_at, delivered_at, failed_at, last_status_code, last_error,
+                       payload IS NOT NULL
+                FROM public.samsarix_webhook_deliveries
+                WHERE (
+                    %s::text IS NULL
+                    OR (%s = 'pending' AND delivered_at IS NULL AND failed_at IS NULL)
+                    OR (%s = 'delivered' AND delivered_at IS NOT NULL)
+                    OR (%s = 'failed' AND failed_at IS NOT NULL)
+                )
+                  AND (
+                    %s::timestamptz IS NULL
+                    OR created_at < %s
+                    OR (created_at = %s AND id < %s)
+                  )
+                ORDER BY created_at DESC, id DESC LIMIT %s
+                """,
+                (
+                    status,
+                    status,
+                    status,
+                    status,
+                    cursor_key[0] if cursor_key else None,
+                    cursor_key[0] if cursor_key else None,
+                    cursor_key[0] if cursor_key else None,
+                    cursor_key[1] if cursor_key else None,
+                    limit + 1,
+                ),
+            )
+            rows = await cursor.fetchall()
+        page_rows, next_before = _page_rows(rows, limit, chronological=False)
+        return [_webhook_from_row(row) for row in page_rows], next_before
+
+    async def next_webhook_delivery(self, now: datetime) -> PendingWebhook | None:
+        """Claim one due row with an expiring owner lease and skip locked work."""
+
+        _ = now  # PostgreSQL time, not host time, defines due and lease boundaries.
+        async with self.foundation.transaction() as connection:
+            cursor = await connection.execute(
+                """
+                WITH candidate AS MATERIALIZED (
+                    SELECT id FROM public.samsarix_webhook_deliveries
+                    WHERE delivered_at IS NULL
+                      AND failed_at IS NULL
+                      AND payload IS NOT NULL
+                      AND next_attempt_at <= clock_timestamp()
+                      AND (lease_expires_at IS NULL OR lease_expires_at <= clock_timestamp())
+                    ORDER BY next_attempt_at, created_at, id
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT 1
+                )
+                UPDATE public.samsarix_webhook_deliveries AS delivery
+                SET lease_owner = %s,
+                    lease_expires_at = clock_timestamp() + make_interval(secs => %s)
+                FROM candidate
+                WHERE delivery.id = candidate.id
+                RETURNING delivery.id, delivery.event_type, delivery.room_id, delivery.created_at,
+                          delivery.attempt_count, delivery.next_attempt_at, delivery.last_attempt_at,
+                          delivery.delivered_at, delivery.failed_at, delivery.last_status_code,
+                          delivery.last_error, delivery.payload IS NOT NULL, delivery.payload
+                """,
+                (self.webhook_worker_id, self.webhook_lease_seconds),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return PendingWebhook(delivery=_webhook_from_row(row[:12]), payload=bytes(row[12]))
+
+    async def record_webhook_attempt(
+        self,
+        delivery_id: str,
+        *,
+        attempted_at: datetime,
+        status_code: int | None,
+        error: str | None,
+        next_attempt_at: datetime | None,
+        delivered: bool,
+        failed: bool,
+    ) -> None:
+        """Record an outcome only while this worker still owns the live lease."""
+
+        if delivered and failed:
+            raise ValueError("a webhook attempt cannot be delivered and failed")
+        retry_delay_seconds = (
+            max(0.0, (next_attempt_at - attempted_at).total_seconds()) if next_attempt_at is not None else None
+        )
+        async with self.foundation.transaction() as connection:
+            cursor = await connection.execute(
+                """
+                WITH timing AS MATERIALIZED (SELECT clock_timestamp() AS attempted_at)
+                UPDATE public.samsarix_webhook_deliveries AS delivery
+                SET attempt_count = attempt_count + 1,
+                    next_attempt_at = CASE
+                        WHEN %s::double precision IS NULL THEN NULL
+                        ELSE timing.attempted_at + make_interval(secs => %s)
+                    END,
+                    last_attempt_at = timing.attempted_at,
+                    delivered_at = CASE WHEN %s THEN timing.attempted_at END,
+                    failed_at = CASE WHEN %s THEN timing.attempted_at END,
+                    last_status_code = %s,
+                    last_error = %s,
+                    lease_owner = NULL,
+                    lease_expires_at = NULL
+                FROM timing
+                WHERE id = %s
+                  AND delivery.delivered_at IS NULL
+                  AND delivery.failed_at IS NULL
+                  AND delivery.lease_owner = %s
+                  AND delivery.lease_expires_at > timing.attempted_at
+                """,
+                (
+                    retry_delay_seconds,
+                    retry_delay_seconds,
+                    delivered,
+                    failed,
+                    status_code,
+                    error[:1000] if error is not None else None,
+                    delivery_id,
+                    self.webhook_worker_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise WebhookDeliveryNotFoundError(delivery_id)
+
+    async def retry_webhook_delivery(self, delivery_id: str) -> WebhookDelivery:
+        """Reset one replayable row with the same stable delivery identifier."""
+
+        async with self.foundation.transaction() as connection:
+            cursor = await connection.execute(
+                "SELECT payload FROM public.samsarix_webhook_deliveries WHERE id = %s FOR UPDATE",
+                (delivery_id,),
+            )
+            existing = await cursor.fetchone()
+            if existing is None:
+                raise WebhookDeliveryNotFoundError(delivery_id)
+            if existing[0] is None:
+                raise WebhookPayloadUnavailableError(delivery_id)
+            cursor = await connection.execute(
+                """
+                UPDATE public.samsarix_webhook_deliveries
+                SET attempt_count = 0,
+                    next_attempt_at = clock_timestamp(),
+                    last_attempt_at = NULL,
+                    delivered_at = NULL,
+                    failed_at = NULL,
+                    last_status_code = NULL,
+                    last_error = NULL,
+                    lease_owner = NULL,
+                    lease_expires_at = NULL
+                WHERE id = %s
+                RETURNING id, event_type, room_id, created_at, attempt_count, next_attempt_at,
+                          last_attempt_at, delivered_at, failed_at, last_status_code, last_error,
+                          payload IS NOT NULL
+                """,
+                (delivery_id,),
+            )
+            row = await cursor.fetchone()
+        return _webhook_from_row(_required_row(row, "webhook retry"))
+
+    async def run_retention(self, *, actor: str) -> tuple[int, datetime]:
+        """Delete expired messages and scrub every retained payload in one transaction."""
+
+        if self.message_retention_days is None:
+            raise RetentionNotConfiguredError("message retention is not configured")
+        async with self.foundation.transaction() as connection:
+            await connection.execute("SELECT pg_advisory_xact_lock(%s)", (POSTGRES_MESSAGE_CAP_LOCK_ID,))
+            cursor = await connection.execute(
+                "SELECT clock_timestamp() - make_interval(days => %s)",
+                (self.message_retention_days,),
+            )
+            cutoff = _required_row(await cursor.fetchone(), "retention cutoff")[0]
+            cursor = await connection.execute(
+                "DELETE FROM public.samsarix_messages WHERE created_at < %s RETURNING id, room_id",
+                (cutoff,),
+            )
+            rows = await cursor.fetchall()
+            await self._scrub_message_event_payloads(connection, rows)
+            await self._insert_audit(
+                connection,
+                action="retention.executed",
+                actor=actor,
+                details={"deleted_messages": len(rows), "cutoff": cutoff.isoformat()},
+            )
+            await self._scrub_message_webhooks(connection, rows)
+        return len(rows), cutoff
 
     async def _lock_writable_room(
         self,
@@ -646,6 +1084,7 @@ class PostgresChatStore:
         now: datetime,
     ) -> None:
         age_deleted = 0
+        age_rows: list[tuple[Any, ...]] = []
         if self.message_retention_days is not None:
             cursor = await connection.execute(
                 "DELETE FROM public.samsarix_messages WHERE created_at < %s RETURNING id, room_id",
@@ -707,6 +1146,10 @@ class PostgresChatStore:
                 actor="system:retention",
                 details=details,
             )
+            await self._scrub_message_webhooks(
+                connection,
+                [*age_rows, *room_cap_rows, *global_cap_rows],
+            )
 
     @staticmethod
     async def _scrub_message_event_payloads(
@@ -732,6 +1175,112 @@ class PostgresChatStore:
                 """,
                 (room_id, message_ids),
             )
+
+    @staticmethod
+    async def _scrub_message_webhooks(
+        connection: AsyncConnection[tuple[Any, ...]],
+        messages: list[tuple[Any, ...]],
+    ) -> None:
+        if not messages:
+            return
+        await connection.execute("SELECT pg_advisory_xact_lock(%s)", (POSTGRES_WEBHOOK_CAP_LOCK_ID,))
+        by_room: dict[str, list[str]] = {}
+        for message_id, room_id, *_rest in messages:
+            by_room.setdefault(str(room_id), []).append(str(message_id))
+        for room_id, message_ids in by_room.items():
+            await connection.execute(
+                """
+                DELETE FROM public.samsarix_webhook_deliveries
+                WHERE room_id = %s
+                  AND resource_id = ANY(%s::text[])
+                  AND event_type LIKE 'message.%%'
+                  AND delivered_at IS NULL
+                  AND failed_at IS NULL
+                """,
+                (room_id, message_ids),
+            )
+            await connection.execute(
+                """
+                UPDATE public.samsarix_webhook_deliveries
+                SET payload = NULL, lease_owner = NULL, lease_expires_at = NULL
+                WHERE room_id = %s
+                  AND resource_id = ANY(%s::text[])
+                  AND event_type LIKE 'message.%%'
+                  AND (delivered_at IS NOT NULL OR failed_at IS NOT NULL)
+                """,
+                (room_id, message_ids),
+            )
+
+    @staticmethod
+    async def _scrub_room_webhooks(
+        connection: AsyncConnection[tuple[Any, ...]],
+        room_id: str,
+    ) -> None:
+        await connection.execute("SELECT pg_advisory_xact_lock(%s)", (POSTGRES_WEBHOOK_CAP_LOCK_ID,))
+        await connection.execute(
+            """
+            DELETE FROM public.samsarix_webhook_deliveries
+            WHERE room_id = %s AND delivered_at IS NULL AND failed_at IS NULL
+            """,
+            (room_id,),
+        )
+        await connection.execute(
+            """
+            UPDATE public.samsarix_webhook_deliveries
+            SET payload = NULL, lease_owner = NULL, lease_expires_at = NULL
+            WHERE room_id = %s AND (delivered_at IS NOT NULL OR failed_at IS NOT NULL)
+            """,
+            (room_id,),
+        )
+
+    async def _insert_webhook(
+        self,
+        connection: AsyncConnection[tuple[Any, ...]],
+        *,
+        event_type: str,
+        room_id: str,
+        resource_id: str,
+        occurred_at: datetime,
+        data: dict[str, Any],
+    ) -> None:
+        if event_type not in self.webhook_events:
+            return
+        await connection.execute("SELECT pg_advisory_xact_lock(%s)", (POSTGRES_WEBHOOK_CAP_LOCK_ID,))
+        cursor = await connection.execute("SELECT COUNT(*) FROM public.samsarix_webhook_deliveries")
+        count_row = await cursor.fetchone()
+        count = int(count_row[0]) if count_row is not None else 0
+        excess = max(0, count - self.max_webhook_deliveries + 1)
+        deleted = 0
+        if excess:
+            cursor = await connection.execute(
+                """
+                DELETE FROM public.samsarix_webhook_deliveries WHERE id IN (
+                    SELECT id FROM public.samsarix_webhook_deliveries
+                    WHERE delivered_at IS NOT NULL OR failed_at IS NOT NULL
+                    ORDER BY created_at, id LIMIT %s
+                )
+                """,
+                (excess,),
+            )
+            deleted = cursor.rowcount
+        if count - deleted >= self.max_webhook_deliveries:
+            raise WebhookCapacityError("webhook delivery capacity reached")
+        delivery_id = f"wh_{uuid.uuid4().hex}"
+        envelope = {
+            "id": delivery_id,
+            "type": event_type,
+            "timestamp": occurred_at.isoformat(),
+            "data": {"room_id": room_id, **data},
+        }
+        payload = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        await connection.execute(
+            """
+            INSERT INTO public.samsarix_webhook_deliveries (
+                id, event_type, room_id, resource_id, created_at, payload, next_attempt_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (delivery_id, event_type, room_id, resource_id, occurred_at, payload, occurred_at),
+        )
 
     async def _insert_audit(
         self,
@@ -787,6 +1336,55 @@ async def _require_room(connection: AsyncConnection[tuple[Any, ...]], room_id: s
     cursor = await connection.execute("SELECT 1 FROM public.samsarix_rooms WHERE id = %s", (room_id,))
     if await cursor.fetchone() is None:
         raise RoomNotFoundError(room_id)
+
+
+async def _read_state_from_connection(
+    connection: AsyncConnection[tuple[Any, ...]],
+    room_id: str,
+    subject: str,
+) -> ReadState:
+    cursor = await connection.execute(
+        """
+        SELECT message_id, message_created_at, updated_at
+        FROM public.samsarix_room_read_states WHERE room_id = %s AND subject = %s
+        """,
+        (room_id, subject),
+    )
+    state = await cursor.fetchone()
+    if state is None:
+        cursor = await connection.execute(
+            """
+            SELECT COUNT(*) FROM public.samsarix_messages
+            WHERE room_id = %s AND deleted_at IS NULL
+              AND (author_subject IS NULL OR author_subject <> %s)
+            """,
+            (room_id, subject),
+        )
+        count_row = await cursor.fetchone()
+        return ReadState(
+            room_id=room_id,
+            subject=subject,
+            last_read_message_id=None,
+            last_read_at=None,
+            unread_count=int(count_row[0]) if count_row is not None else 0,
+        )
+    cursor = await connection.execute(
+        """
+        SELECT COUNT(*) FROM public.samsarix_messages
+        WHERE room_id = %s AND deleted_at IS NULL
+          AND (author_subject IS NULL OR author_subject <> %s)
+          AND (created_at > %s OR (created_at = %s AND id > %s))
+        """,
+        (room_id, subject, state[1], state[1], state[0] or ""),
+    )
+    count_row = await cursor.fetchone()
+    return ReadState(
+        room_id=room_id,
+        subject=subject,
+        last_read_message_id=str(state[0]) if state[0] is not None else None,
+        last_read_at=state[2],
+        unread_count=int(count_row[0]) if count_row is not None else 0,
+    )
 
 
 async def _message_cursor(
@@ -868,3 +1466,26 @@ def _audit_from_row(row: tuple[Any, ...]) -> AuditEvent:
         created_at=row[4],
         details=dict(row[5]),
     )
+
+
+def _webhook_from_row(row: tuple[Any, ...]) -> WebhookDelivery:
+    return WebhookDelivery(
+        id=str(row[0]),
+        event_type=str(row[1]),
+        room_id=str(row[2]),
+        created_at=row[3],
+        attempt_count=int(row[4]),
+        next_attempt_at=row[5],
+        last_attempt_at=row[6],
+        delivered_at=row[7],
+        failed_at=row[8],
+        last_status_code=int(row[9]) if row[9] is not None else None,
+        last_error=str(row[10]) if row[10] is not None else None,
+        replayable=bool(row[11]),
+    )
+
+
+def _storage_contract(store: PostgresChatStore) -> ChatStorage:
+    """Make static analysis prove that PostgreSQL implements the full storage protocol."""
+
+    return store
