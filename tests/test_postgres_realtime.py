@@ -5,29 +5,39 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
 
 pytest.importorskip("psycopg")
 
-from samsarix_chat_engine.postgres import PostgresFoundation  # noqa: E402
+from samsarix_chat_engine.postgres import PostgresFoundation, RealtimeEvent  # noqa: E402
 from samsarix_chat_engine.postgres_realtime import PostgresRealtimeRelay  # noqa: E402
+
+pytestmark = pytest.mark.postgres
 
 
 class RecordingTarget:
-    def __init__(self, *, fail_broadcast_once: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_on_broadcast_number: int | None = None,
+        fail_close_all_once: bool = False,
+    ) -> None:
         self.broadcasts: list[tuple[str, dict[str, Any]]] = []
         self.closed_rooms: list[tuple[str, dict[str, Any], int, str]] = []
         self.closed_members: list[tuple[str, str, dict[str, Any], int, str]] = []
         self.close_all_calls = 0
-        self.fail_broadcast_once = fail_broadcast_once
+        self.broadcast_attempts = 0
+        self.fail_on_broadcast_number = fail_on_broadcast_number
+        self.fail_close_all_once = fail_close_all_once
         self.broadcasted = asyncio.Event()
         self.fenced = asyncio.Event()
 
     async def broadcast(self, room_id: str, event: dict[str, Any]) -> None:
-        if self.fail_broadcast_once:
-            self.fail_broadcast_once = False
+        self.broadcast_attempts += 1
+        if self.broadcast_attempts == self.fail_on_broadcast_number:
             raise RuntimeError("local dispatch failed")
         self.broadcasts.append((room_id, event))
         self.broadcasted.set()
@@ -56,6 +66,9 @@ class RecordingTarget:
 
     async def close_all(self) -> None:
         self.close_all_calls += 1
+        if self.fail_close_all_once:
+            self.fail_close_all_once = False
+            raise RuntimeError("local fence failed")
         self.fenced.set()
 
 
@@ -125,27 +138,81 @@ async def test_two_relays_receive_each_committed_public_event_once(clean_postgre
 
 
 @pytest.mark.asyncio
-async def test_dispatch_failure_is_not_acknowledged_and_replays(clean_postgres_database: str) -> None:
+async def test_dispatch_failure_checkpoints_predecessor_and_retries_from_failed_event(
+    clean_postgres_database: str,
+) -> None:
     foundation = PostgresFoundation(clean_postgres_database)
     await foundation.open()
-    target = RecordingTarget(fail_broadcast_once=True)
+    target = RecordingTarget(fail_on_broadcast_number=2)
     relay = PostgresRealtimeRelay(foundation, target, instance_id="relay-retry")
+    try:
+        await relay.initialize()
+        async with foundation.transaction() as connection:
+            first_sequence = await foundation.append_event(
+                connection,
+                room_id="general",
+                event_type="message.created",
+                payload={"type": "message.created", "message": {"id": "one"}},
+            )
+            await foundation.append_event(
+                connection,
+                room_id="general",
+                event_type="message.updated",
+                payload={"type": "message.updated", "message": {"id": "one"}},
+            )
+            final_sequence = await foundation.append_event(
+                connection,
+                room_id="general",
+                event_type="message.deleted",
+                payload={"type": "message.deleted", "message": {"id": "one"}},
+            )
+        with pytest.raises(RuntimeError, match="local dispatch failed"):
+            await relay.process_once()
+        assert await foundation.register_instance("relay-retry", lease_seconds=30) == first_sequence
+        assert await relay.process_once() == 2
+        assert await foundation.register_instance("relay-retry", lease_seconds=30) == final_sequence
+        assert [event[1]["type"] for event in target.broadcasts] == [
+            "message.created",
+            "message.updated",
+            "message.deleted",
+        ]
+    finally:
+        await foundation.close()
+
+
+@pytest.mark.asyncio
+async def test_run_survives_local_dispatch_failure(clean_postgres_database: str) -> None:
+    foundation = PostgresFoundation(clean_postgres_database)
+    await foundation.open()
+    target = RecordingTarget(fail_on_broadcast_number=1)
+    relay = PostgresRealtimeRelay(
+        foundation,
+        target,
+        instance_id="relay-local-recovery",
+        poll_interval_seconds=0.01,
+    )
+    task: asyncio.Task[None] | None = None
     try:
         await relay.initialize()
         async with foundation.transaction() as connection:
             sequence = await foundation.append_event(
                 connection,
                 room_id="general",
-                event_type="message.updated",
-                payload={"type": "message.updated", "message": {"id": "one"}},
+                event_type="message.created",
+                payload={"type": "message.created", "message": {"id": "one"}},
             )
-        with pytest.raises(RuntimeError, match="local dispatch failed"):
-            await relay.process_once()
-        assert await foundation.register_instance("relay-retry", lease_seconds=30) < sequence
-        assert await relay.process_once() == 1
-        assert await foundation.register_instance("relay-retry", lease_seconds=30) == sequence
-        assert [event[1]["type"] for event in target.broadcasts] == ["message.updated"]
+        task = asyncio.create_task(relay.run())
+        await asyncio.wait_for(target.broadcasted.wait(), timeout=2)
+        relay.stop()
+        await asyncio.wait_for(task, timeout=2)
+        task = None
+        assert target.broadcast_attempts == 2
+        assert await foundation.register_instance("relay-local-recovery", lease_seconds=30) == sequence
     finally:
+        relay.stop()
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         await foundation.close()
 
 
@@ -153,7 +220,7 @@ async def test_dispatch_failure_is_not_acknowledged_and_replays(clean_postgres_d
 async def test_expired_relay_lease_fences_then_recovers_from_cursor(clean_postgres_database: str) -> None:
     foundation = PostgresFoundation(clean_postgres_database)
     await foundation.open()
-    target = RecordingTarget()
+    target = RecordingTarget(fail_close_all_once=True)
     relay = PostgresRealtimeRelay(
         foundation,
         target,
@@ -161,6 +228,7 @@ async def test_expired_relay_lease_fences_then_recovers_from_cursor(clean_postgr
         lease_seconds=3,
         poll_interval_seconds=0.01,
     )
+    task: asyncio.Task[None] | None = None
     try:
         await relay.initialize()
         async with foundation.transaction() as connection:
@@ -184,11 +252,15 @@ async def test_expired_relay_lease_fences_then_recovers_from_cursor(clean_postgr
         await asyncio.wait_for(target.broadcasted.wait(), timeout=2)
         relay.stop()
         await asyncio.wait_for(task, timeout=2)
-        assert target.close_all_calls == 1
+        task = None
+        assert target.close_all_calls == 2
         assert [event[1]["type"] for event in target.broadcasts] == ["message.deleted"]
         assert await foundation.register_instance("relay-recovery", lease_seconds=30) == sequence
     finally:
         relay.stop()
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         await foundation.close()
 
 
@@ -201,3 +273,52 @@ def test_relay_configuration_is_bounded() -> None:
         PostgresRealtimeRelay(foundation, target, poll_interval_seconds=0)
     with pytest.raises(ValueError, match="batch size"):
         PostgresRealtimeRelay(foundation, target, batch_size=0)
+    with pytest.raises(ValueError, match="lease"):
+        PostgresRealtimeRelay(foundation, target, lease_seconds=301)
+    with pytest.raises(ValueError, match="poll interval"):
+        PostgresRealtimeRelay(foundation, target, poll_interval_seconds=5.1)
+    with pytest.raises(ValueError, match="batch size"):
+        PostgresRealtimeRelay(foundation, target, batch_size=1_001)
+    with pytest.raises(ValueError, match="instance ID"):
+        PostgresRealtimeRelay(foundation, target, instance_id="")
+    with pytest.raises(ValueError, match="instance ID"):
+        PostgresRealtimeRelay(foundation, target, instance_id="x" * 129)
+
+
+@pytest.mark.asyncio
+async def test_malformed_and_timezone_naive_moderation_events_are_discarded(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    foundation = PostgresFoundation("postgresql://unused")
+    target = RecordingTarget()
+    relay = PostgresRealtimeRelay(foundation, target)
+    created_at = datetime.now(timezone.utc)
+    await relay._dispatch(
+        RealtimeEvent(
+            sequence=1,
+            room_id="general",
+            event_type="member.moderation.updated",
+            payload={"moderation": {"invalid": True}},
+            created_at=created_at,
+        )
+    )
+    await relay._dispatch(
+        RealtimeEvent(
+            sequence=2,
+            room_id="general",
+            event_type="member.moderation.updated",
+            payload={
+                "moderation": {
+                    "room_id": "general",
+                    "subject": "alice",
+                    "muted_until": None,
+                    "banned_until": "2100-01-01T00:00:00",
+                    "updated_at": "2026-08-02T00:00:00+00:00",
+                }
+            },
+            created_at=created_at,
+        )
+    )
+    assert target.closed_members == []
+    assert "sequence 1" in caplog.text
+    assert "sequence 2" in caplog.text

@@ -31,6 +31,8 @@ from samsarix_chat_engine.store import (  # noqa: E402
     WebhookPayloadUnavailableError,
 )
 
+pytestmark = pytest.mark.postgres
+
 
 def _store(conninfo: str, **overrides: Any) -> PostgresChatStore:
     return PostgresChatStore(

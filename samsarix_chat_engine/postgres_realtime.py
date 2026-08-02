@@ -13,9 +13,8 @@ from pydantic import ValidationError
 
 from .models import MemberModeration
 from .postgres import (
-    InstanceLeaseError,
     PostgresFoundation,
-    PostgresUnavailableError,
+    PostgresFoundationError,
     RealtimeEvent,
 )
 
@@ -83,7 +82,7 @@ class PostgresRealtimeRelay:
             raise ValueError("realtime relay batch size must be between 1 and 1000")
         self.foundation = foundation
         self.target = target
-        self.instance_id = instance_id or f"relay-{uuid.uuid4().hex}"
+        self.instance_id = instance_id if instance_id is not None else f"relay-{uuid.uuid4().hex}"
         if not 1 <= len(self.instance_id) <= 128:
             raise ValueError("realtime relay instance ID must be between 1 and 128 characters")
         self.lease_seconds = lease_seconds
@@ -93,6 +92,7 @@ class PostgresRealtimeRelay:
         self._next_heartbeat = 0.0
         self._stop = asyncio.Event()
         self._fenced = False
+        self._fence_required = False
 
     async def initialize(self) -> int:
         """Register or renew this process cursor and return its acknowledged sequence."""
@@ -103,21 +103,26 @@ class PostgresRealtimeRelay:
         )
         self._next_heartbeat = asyncio.get_running_loop().time() + self.lease_seconds / 3
         self._fenced = False
+        self._fence_required = False
         return self._cursor
 
     async def process_once(self) -> int:
-        """Dispatch one ordered batch and acknowledge it only after every local action succeeds."""
+        """Dispatch one ordered batch and checkpoint its last successful local action."""
 
         if self._cursor is None:
             raise RuntimeError("realtime relay is not initialized")
         events = await self.foundation.read_events(self.instance_id, limit=self.batch_size)
-        for event in events:
-            await self._dispatch(event)
-        if events:
-            self._cursor = await self.foundation.acknowledge_events(
-                self.instance_id,
-                through_sequence=events[-1].sequence,
-            )
+        dispatched_sequence: int | None = None
+        try:
+            for event in events:
+                await self._dispatch(event)
+                dispatched_sequence = event.sequence
+        finally:
+            if dispatched_sequence is not None:
+                self._cursor = await self.foundation.acknowledge_events(
+                    self.instance_id,
+                    through_sequence=dispatched_sequence,
+                )
         return len(events)
 
     async def heartbeat(self) -> None:
@@ -132,6 +137,9 @@ class PostgresRealtimeRelay:
         """Poll forever, fencing sockets and resuming from the cursor after a lease/database loss."""
 
         while not self._stop.is_set():
+            if self._fence_required and not await self._fence():
+                await self._wait_for_work()
+                continue
             try:
                 if self._cursor is None:
                     await self.initialize()
@@ -140,24 +148,38 @@ class PostgresRealtimeRelay:
                 processed = await self.process_once()
                 if processed == self.batch_size:
                     continue
-            except (InstanceLeaseError, PostgresUnavailableError) as exc:
+            except PostgresFoundationError as exc:
                 logger.warning("Fencing local sockets after PostgreSQL relay interruption: %s", type(exc).__name__)
-                await self._fence()
                 self._cursor = None
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=self.poll_interval_seconds)
-            except asyncio.TimeoutError:
-                pass
+                self._fence_required = True
+                await self._fence()
+            except Exception as exc:
+                logger.error("Local realtime dispatch failed; retrying from the durable cursor: %s", type(exc).__name__)
+            await self._wait_for_work()
 
     def stop(self) -> None:
         """Request graceful relay shutdown without closing sockets itself."""
 
         self._stop.set()
 
-    async def _fence(self) -> None:
-        if not self._fenced:
-            self._fenced = True
+    async def _wait_for_work(self) -> None:
+        try:
+            await asyncio.wait_for(self._stop.wait(), timeout=self.poll_interval_seconds)
+        except asyncio.TimeoutError:
+            pass
+
+    async def _fence(self) -> bool:
+        if self._fenced:
+            self._fence_required = False
+            return True
+        try:
             await self.target.close_all()
+        except Exception as exc:
+            logger.error("Local socket fencing failed and will be retried: %s", type(exc).__name__)
+            return False
+        self._fenced = True
+        self._fence_required = False
+        return True
 
     async def _dispatch(self, event: RealtimeEvent) -> None:
         if event.event_type in _BROADCAST_EVENT_TYPES:
@@ -172,8 +194,22 @@ class PostgresRealtimeRelay:
         try:
             moderation = MemberModeration.model_validate(raw_moderation)
         except ValidationError:
+            logger.warning(
+                "Discarding malformed moderation event for room %s at sequence %d",
+                event.room_id,
+                event.sequence,
+            )
             return
-        if moderation.banned_until is None or moderation.banned_until <= event.created_at:
+        if moderation.banned_until is None:
+            return
+        if moderation.banned_until.tzinfo is None or moderation.banned_until.utcoffset() is None:
+            logger.warning(
+                "Discarding timezone-naive moderation event for room %s at sequence %d",
+                event.room_id,
+                event.sequence,
+            )
+            return
+        if moderation.banned_until <= event.created_at:
             return
         await self.target.close_member(
             event.room_id,

@@ -21,6 +21,8 @@ from samsarix_chat_engine.postgres import (  # noqa: E402
     _validate_event,
 )
 
+pytestmark = pytest.mark.postgres
+
 
 def test_event_validation_is_bounded_and_canonical() -> None:
     assert _validate_event("room-1", "message.created", {"emoji": "🌀"}) == {"emoji": "🌀"}
