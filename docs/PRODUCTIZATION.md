@@ -140,7 +140,7 @@ Final v0.6 local verification on 2026-08-01 used CPython 3.11.9 for the source s
 | --- | --- |
 | `ruff check .` / `ruff format --check .` | Passed; 41 Python files formatted |
 | `mypy samsarix_chat_engine` / `compileall` / `git diff --check` | Passed; no type issues in 9 source files |
-| `pytest --cov=samsarix_chat_engine --cov-report=term-missing` | 82 passed in 77.74s; 90.82% total branch coverage |
+| `pytest --cov=samsarix_chat_engine --cov-report=term-missing` | 82 passed in 136.80s; 91.20% total branch coverage |
 | fresh wheel-runtime `pip check` / `pip-audit --path` | No broken requirements; no known third-party vulnerabilities |
 | sdist build / wheel rebuilt from sdist / `twine check` | Both 0.6.0 artifacts built and passed metadata checks |
 | final wheel installed outside the source tree | Version 0.6.0, Samsarix LLC/contact metadata, dependency resolution, and imports passed |

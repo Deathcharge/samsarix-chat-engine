@@ -1,6 +1,6 @@
 # Data lifecycle operations
 
-Samsarix Chat Engine 0.5 provides explicit export, archive, deletion, retention, audit, backup, and restore controls. These controls help an operator apply a deployment-specific policy; they are not a claim of regulatory compliance.
+Samsarix Chat Engine 0.6 provides explicit export, archive, deletion, retention, audit, backup, and restore controls. These controls help an operator apply a deployment-specific policy; they are not a claim of regulatory compliance.
 
 All HTTP examples below require an operator API key or an access token with `admin`. User room tokens cannot call lifecycle or audit endpoints.
 

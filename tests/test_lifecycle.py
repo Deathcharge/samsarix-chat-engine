@@ -117,6 +117,7 @@ async def test_export_snapshot_survives_concurrent_room_deletion(tmp_path) -> No
         sender="Andrew",
         content="snapshot-content",
         client_message_id=None,
+        allow_frozen=True,
     )
     await store.set_room_archived("general", archived=True, actor="operator")
 
@@ -357,6 +358,10 @@ def test_v2_database_migrates_conversation_controls_in_place(tmp_path) -> None:
         room = client.get("/v1/rooms/legacy").json()
         message = client.get("/v1/rooms/legacy/messages").json()["items"][0]
         frozen = client.patch("/v1/rooms/legacy", json={"frozen": True})
+        moderated = client.patch(
+            "/v1/rooms/legacy/members/author/moderation",
+            json={"muted_for_seconds": 60},
+        )
 
     with closing(sqlite3.connect(database)) as connection:
         version = connection.execute("PRAGMA user_version").fetchone()[0]
@@ -372,6 +377,8 @@ def test_v2_database_migrates_conversation_controls_in_place(tmp_path) -> None:
     assert message["deleted_at"] is None
     assert frozen.status_code == 200
     assert frozen.json()["frozen_at"] is not None
+    assert moderated.status_code == 200
+    assert moderated.json()["muted_until"] is not None
 
 
 def test_newer_database_schema_is_refused_without_mutation(tmp_path) -> None:

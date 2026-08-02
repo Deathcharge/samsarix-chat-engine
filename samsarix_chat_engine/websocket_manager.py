@@ -37,7 +37,7 @@ class ConnectionManager:
             self._metadata[websocket] = (room_id, username, subject)
             return True
 
-    async def unregister(self, websocket: WebSocket) -> tuple[str, str, str | None] | None:
+    async def unregister(self, websocket: WebSocket) -> tuple[str, str] | None:
         """Remove a socket and return its room/user metadata once."""
 
         async with self._lock:
@@ -50,7 +50,7 @@ class ConnectionManager:
                 room_connections.discard(websocket)
                 if not room_connections:
                     self._rooms.pop(room_id, None)
-            return metadata
+            return metadata[0], metadata[1]
 
     async def send(self, websocket: WebSocket, event: dict[str, Any]) -> bool:
         """Send one event with a timeout and evict a failed connection."""
@@ -96,10 +96,7 @@ class ConnectionManager:
     ) -> None:
         """Notify, remove, and deterministically close every socket in one room."""
 
-        async with self._lock:
-            connections = tuple(self._rooms.pop(room_id, ()))
-            for connection in connections:
-                self._metadata.pop(connection, None)
+        connections = await self._detach_room_connections(room_id)
         if connections:
             await asyncio.gather(
                 *(self._notify_and_close(connection, event, code=code, reason=reason) for connection in connections)
@@ -116,24 +113,36 @@ class ConnectionManager:
     ) -> int:
         """Notify and close every socket for one authenticated room subject."""
 
-        async with self._lock:
-            connections = tuple(
-                connection
-                for connection, metadata in self._metadata.items()
-                if metadata[0] == room_id and metadata[2] == subject
-            )
-            for connection in connections:
-                self._metadata.pop(connection, None)
-                room_connections = self._rooms.get(room_id)
-                if room_connections is not None:
-                    room_connections.discard(connection)
-            if not self._rooms.get(room_id):
-                self._rooms.pop(room_id, None)
+        connections = await self._detach_room_connections(room_id, subject=subject)
         if connections:
             await asyncio.gather(
                 *(self._notify_and_close(connection, event, code=code, reason=reason) for connection in connections)
             )
         return len(connections)
+
+    async def _detach_room_connections(
+        self,
+        room_id: str,
+        *,
+        subject: str | None = None,
+    ) -> tuple[WebSocket, ...]:
+        """Atomically detach all room sockets or only those for one subject."""
+
+        async with self._lock:
+            room_connections = self._rooms.get(room_id)
+            if room_connections is None:
+                return ()
+            connections = tuple(
+                connection
+                for connection in room_connections
+                if subject is None or self._metadata[connection][2] == subject
+            )
+            for connection in connections:
+                self._metadata.pop(connection, None)
+                room_connections.discard(connection)
+            if not room_connections:
+                self._rooms.pop(room_id, None)
+            return connections
 
     async def _close(self, websocket: WebSocket) -> None:
         try:

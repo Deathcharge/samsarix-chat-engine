@@ -262,6 +262,30 @@ def _event(event_type: str, **payload: Any) -> dict[str, Any]:
     return {"type": event_type, **payload}
 
 
+_MESSAGE_WRITE_ERRORS: tuple[tuple[type[Exception], str, str, int | None, str | None], ...] = (
+    (RoomArchivedError, "room_archived", "Archived rooms are read-only", 4409, "Room archived"),
+    (
+        RoomFrozenError,
+        "room_frozen",
+        "Only administrators may publish while the room is frozen",
+        None,
+        None,
+    ),
+    (MemberBannedError, "room_banned", "This account is banned from the room", 4403, "Room access revoked"),
+    (MemberMutedError, "room_muted", "This account is muted in the room", None, None),
+    (RoomNotFoundError, "room_not_found", "Room not found", 4404, "Room not found"),
+)
+
+
+def _message_write_error(exc: Exception) -> tuple[str, str, int | None, str | None]:
+    """Resolve a known persistence rejection into one WebSocket action."""
+
+    for error_type, code, message, close_code, reason in _MESSAGE_WRITE_ERRORS:
+        if isinstance(exc, error_type):
+            return code, message, close_code, reason
+    raise TypeError(f"unsupported message write error: {type(exc).__name__}")
+
+
 def _websocket_origin_allowed(websocket: WebSocket, settings: Settings) -> bool:
     origin = websocket.headers.get("origin")
     if origin is None:
@@ -661,6 +685,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> Message:
         _authorize(principal, "room:write", room_id)
         await _enforce_member_access(store, principal, room_id, write=True)
+        if len(payload.content) > resolved.max_message_chars:
+            raise APIError(
+                413,
+                "message_too_large",
+                f"Message content exceeds the {resolved.max_message_chars}-character limit",
+            )
         try:
             message = await store.update_message(
                 room_id=room_id,
@@ -952,33 +982,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         _event("error", code="authorization_denied", message="Message publishing is not allowed"),
                     )
                     continue
-                moderation = (
-                    await store.get_member_moderation(room_id, principal.subject) if principal.subject else None
-                )
-                now = datetime.now(timezone.utc)
-                if (
-                    not principal.is_admin
-                    and moderation is not None
-                    and moderation.banned_until is not None
-                    and moderation.banned_until > now
-                ):
-                    await manager.send(
-                        websocket,
-                        _event("error", code="room_banned", message="This account is banned from the room"),
-                    )
-                    await websocket.close(code=4403, reason="Room access revoked")
-                    break
-                if (
-                    not principal.is_admin
-                    and moderation is not None
-                    and moderation.muted_until is not None
-                    and moderation.muted_until > now
-                ):
-                    await manager.send(
-                        websocket,
-                        _event("error", code="room_muted", message="This account is muted in the room"),
-                    )
-                    continue
                 if len(command.content) > resolved.max_message_chars:
                     await manager.send(
                         websocket,
@@ -1012,44 +1015,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     RoomFrozenError,
                     RoomNotFoundError,
                 ) as exc:
-                    archived = isinstance(exc, RoomArchivedError)
-                    frozen = isinstance(exc, RoomFrozenError)
-                    banned = isinstance(exc, MemberBannedError)
-                    muted = isinstance(exc, MemberMutedError)
+                    code, message_text, close_code, close_reason = _message_write_error(exc)
                     await manager.send(
                         websocket,
-                        _event(
-                            "error",
-                            code=(
-                                "room_archived"
-                                if archived
-                                else "room_frozen"
-                                if frozen
-                                else "room_banned"
-                                if banned
-                                else "room_muted"
-                                if muted
-                                else "room_not_found"
-                            ),
-                            message=(
-                                "Archived rooms are read-only"
-                                if archived
-                                else "Only administrators may publish while the room is frozen"
-                                if frozen
-                                else "This account is banned from the room"
-                                if banned
-                                else "This account is muted in the room"
-                                if muted
-                                else "Room not found"
-                            ),
-                        ),
+                        _event("error", code=code, message=message_text),
                     )
-                    if frozen or muted:
+                    if close_code is None:
                         continue
-                    await websocket.close(
-                        code=4409 if archived else 4403 if banned else 4404,
-                        reason="Room archived" if archived else "Room access revoked" if banned else "Room not found",
-                    )
+                    await websocket.close(code=close_code, reason=close_reason or message_text)
                     break
                 message_event = _event(
                     "message.created",

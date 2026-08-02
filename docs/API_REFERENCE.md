@@ -73,7 +73,7 @@ Persists a message, broadcasts it to the room, and returns 201:
 
 ### `PATCH /v1/rooms/{room_id}/messages/{message_id}`
 
-Replaces a non-deleted message's content and sets `edited_at`. The signed author or an administrator may edit; other writers receive `403 message_not_owned`. Deleted messages return `409 message_deleted`. Success broadcasts `message.updated` after commit. Earlier content is overwritten and is not copied to the audit trail.
+Replaces a non-deleted message's content and sets `edited_at`. The signed author or an administrator may edit; other writers receive `403 message_not_owned`. Edited content is bounded by `SAMSARIX_CHAT_MAX_MESSAGE_CHARS`; oversized edits return `413 message_too_large`. Deleted messages return `409 message_deleted`. Success broadcasts `message.updated` after commit. Earlier content is overwritten and is not copied to the audit trail.
 
 ```json
 {"content":"Corrected text"}

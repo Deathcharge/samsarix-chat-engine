@@ -217,6 +217,11 @@ def test_conversation_control_errors_are_stable(
 ) -> None:
     client, service = conversation_client
     token = _token(service, "member")
+    created = client.post(
+        "/v1/rooms/alpha/messages",
+        headers=_bearer(token),
+        json={"content": "editable"},
+    ).json()
 
     missing_edit = client.patch(
         "/v1/rooms/alpha/messages/missing",
@@ -234,6 +239,11 @@ def test_conversation_control_errors_are_stable(
         headers=_operator(),
         json={"muted_for_seconds": 60},
     )
+    oversized_edit = client.patch(
+        f"/v1/rooms/alpha/messages/{created['id']}",
+        headers=_bearer(token),
+        json={"content": "x" * 4_001},
+    )
 
     assert missing_edit.status_code == 404
     assert missing_edit.json()["error"]["code"] == "message_not_found"
@@ -243,6 +253,8 @@ def test_conversation_control_errors_are_stable(
     assert missing_room.json()["error"]["code"] == "room_not_found"
     assert padded_subject.status_code == 422
     assert padded_subject.json()["error"]["code"] == "invalid_request"
+    assert oversized_edit.status_code == 413
+    assert oversized_edit.json()["error"]["code"] == "message_too_large"
 
 
 def test_live_ban_notifies_and_closes_matching_subject(
@@ -392,6 +404,7 @@ async def test_store_rechecks_moderation_and_lifecycle_inside_write_transactions
         MemberModerationUpdate(banned_for_seconds=0),
         actor="operator",
     )
+    assert await store.get_member_moderation("alpha", "author") is None
     with pytest.raises(MessageOwnershipError):
         await store.delete_message(
             room_id="alpha",

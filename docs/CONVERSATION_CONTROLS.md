@@ -65,7 +65,7 @@ curl -X PATCH http://127.0.0.1:8000/v1/rooms/general/members/customer-42/moderat
   -d '{"muted_for_seconds":0,"banned_for_seconds":0}'
 ```
 
-Durations are evaluated in UTC and capped at 31,536,000 seconds. Supplying only one field preserves the other. An expired control stays as historical state in the bounded deployment database but no longer affects access.
+Durations are evaluated in UTC and capped at 31,536,000 seconds. Supplying only one field preserves the other. Expired controls no longer affect access; clearing every control removes the subject's moderation record.
 
 ## Edit and delete messages
 

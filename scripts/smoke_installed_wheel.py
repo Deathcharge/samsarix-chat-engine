@@ -196,15 +196,18 @@ def main() -> int:
                 credential=("X-API-Key", operator_key),
                 body={"muted_for_seconds": 0},
             )
-            if (
-                edited["edited_at"] is None
-                or deleted_message is not None
-                or frozen["frozen_at"] is None
-                or unfrozen["frozen_at"] is not None
-                or muted["muted_until"] is None
-                or cleared["muted_until"] is not None
-            ):
-                raise RuntimeError("installed-wheel conversation-control journey mismatch")
+            if edited["edited_at"] is None:
+                raise RuntimeError("installed-wheel edit control mismatch")
+            if deleted_message is not None:
+                raise RuntimeError("installed-wheel delete control mismatch")
+            if frozen["frozen_at"] is None:
+                raise RuntimeError("installed-wheel freeze control mismatch")
+            if unfrozen["frozen_at"] is not None:
+                raise RuntimeError("installed-wheel unfreeze control mismatch")
+            if muted["muted_until"] is None:
+                raise RuntimeError("installed-wheel mute control mismatch")
+            if cleared["muted_until"] is not None:
+                raise RuntimeError("installed-wheel clear-control mismatch")
             exported = _request(
                 base_url + "/v1/rooms/wheel-room/export",
                 credential=("X-API-Key", operator_key),

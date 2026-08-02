@@ -327,7 +327,7 @@ class ChatStore:
         sender: str,
         content: str,
         client_message_id: str | None,
-        allow_frozen: bool = True,
+        allow_frozen: bool,
         member_subject: str | None = None,
     ) -> tuple[Message, bool]:
         async with self._write_lock:
@@ -819,17 +819,23 @@ class ChatStore:
                     if payload.banned_for_seconds
                     else None
                 )
-            connection.execute(
-                """
-                INSERT INTO room_member_controls (room_id, subject, muted_until, banned_until, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(room_id, subject) DO UPDATE SET
-                    muted_until = excluded.muted_until,
-                    banned_until = excluded.banned_until,
-                    updated_at = excluded.updated_at
-                """,
-                (room_id, subject, muted_until, banned_until, now.isoformat()),
-            )
+            if muted_until is None and banned_until is None:
+                connection.execute(
+                    "DELETE FROM room_member_controls WHERE room_id = ? AND subject = ?",
+                    (room_id, subject),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO room_member_controls (room_id, subject, muted_until, banned_until, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(room_id, subject) DO UPDATE SET
+                        muted_until = excluded.muted_until,
+                        banned_until = excluded.banned_until,
+                        updated_at = excluded.updated_at
+                    """,
+                    (room_id, subject, muted_until, banned_until, now.isoformat()),
+                )
             self._insert_audit(
                 connection,
                 action="member.moderation_updated",
@@ -841,14 +847,13 @@ class ChatStore:
                     "banned_until": banned_until,
                 },
             )
-            row = connection.execute(
-                """
-                SELECT room_id, subject, muted_until, banned_until, updated_at
-                FROM room_member_controls WHERE room_id = ? AND subject = ?
-                """,
-                (room_id, subject),
-            ).fetchone()
-        return self._moderation_from_row(row)
+        return MemberModeration(
+            room_id=room_id,
+            subject=subject,
+            muted_until=datetime.fromisoformat(muted_until) if muted_until else None,
+            banned_until=datetime.fromisoformat(banned_until) if banned_until else None,
+            updated_at=now,
+        )
 
     @staticmethod
     def _enforce_member_write_sync(

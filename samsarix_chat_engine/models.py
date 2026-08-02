@@ -18,6 +18,19 @@ class APIModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+class _MessageContentPayload(APIModel):
+    """Shared message-content validation for every write transport."""
+
+    content: str = Field(min_length=1, max_length=100_000)
+
+    @field_validator("content")
+    @classmethod
+    def reject_blank_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("content must not be blank")
+        return value
+
+
 class RoomCreate(APIModel):
     """Payload for creating a persisted chat room."""
 
@@ -50,19 +63,11 @@ class RoomUpdate(APIModel):
         return self
 
 
-class MessageCreate(APIModel):
+class MessageCreate(_MessageContentPayload):
     """Payload for posting a message over HTTP."""
 
     sender: str | None = Field(default=None, min_length=1, max_length=64)
-    content: str = Field(min_length=1, max_length=100_000)
     client_message_id: str | None = Field(default=None, min_length=1, max_length=128)
-
-    @field_validator("content")
-    @classmethod
-    def reject_blank_content(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("content must not be blank")
-        return value
 
 
 class Message(APIModel):
@@ -78,17 +83,8 @@ class Message(APIModel):
     deleted_at: datetime | None = None
 
 
-class MessageUpdate(APIModel):
+class MessageUpdate(_MessageContentPayload):
     """Author or administrator message-content update."""
-
-    content: str = Field(min_length=1, max_length=100_000)
-
-    @field_validator("content")
-    @classmethod
-    def reject_blank_content(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("content must not be blank")
-        return value
 
 
 class MessagePage(APIModel):
@@ -146,19 +142,11 @@ class MemberModeration(APIModel):
     updated_at: datetime
 
 
-class WebSocketMessage(APIModel):
+class WebSocketMessage(_MessageContentPayload):
     """Client-to-server WebSocket message command."""
 
     type: Literal["message"]
-    content: str = Field(min_length=1, max_length=100_000)
     client_message_id: str | None = Field(default=None, min_length=1, max_length=128)
-
-    @field_validator("content")
-    @classmethod
-    def reject_blank_content(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("content must not be blank")
-        return value
 
 
 class WebSocketPing(APIModel):
