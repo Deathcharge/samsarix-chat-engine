@@ -18,6 +18,19 @@ class APIModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+class _MessageContentPayload(APIModel):
+    """Shared message-content validation for every write transport."""
+
+    content: str = Field(min_length=1, max_length=100_000)
+
+    @field_validator("content")
+    @classmethod
+    def reject_blank_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("content must not be blank")
+        return value
+
+
 class RoomCreate(APIModel):
     """Payload for creating a persisted chat room."""
 
@@ -34,27 +47,27 @@ class Room(APIModel):
     description: str
     created_at: datetime
     archived_at: datetime | None = None
+    frozen_at: datetime | None = None
 
 
 class RoomUpdate(APIModel):
     """Administrative room lifecycle update."""
 
-    archived: bool
+    archived: bool | None = None
+    frozen: bool | None = None
+
+    @model_validator(mode="after")
+    def require_lifecycle_change(self) -> RoomUpdate:
+        if self.archived is None and self.frozen is None:
+            raise ValueError("at least one of archived or frozen is required")
+        return self
 
 
-class MessageCreate(APIModel):
+class MessageCreate(_MessageContentPayload):
     """Payload for posting a message over HTTP."""
 
     sender: str | None = Field(default=None, min_length=1, max_length=64)
-    content: str = Field(min_length=1, max_length=100_000)
     client_message_id: str | None = Field(default=None, min_length=1, max_length=128)
-
-    @field_validator("content")
-    @classmethod
-    def reject_blank_content(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("content must not be blank")
-        return value
 
 
 class Message(APIModel):
@@ -66,6 +79,12 @@ class Message(APIModel):
     content: str
     created_at: datetime
     client_message_id: str | None = None
+    edited_at: datetime | None = None
+    deleted_at: datetime | None = None
+
+
+class MessageUpdate(_MessageContentPayload):
+    """Author or administrator message-content update."""
 
 
 class MessagePage(APIModel):
@@ -100,19 +119,34 @@ class RetentionResult(APIModel):
     cutoff: datetime
 
 
-class WebSocketMessage(APIModel):
+class MemberModerationUpdate(APIModel):
+    """Relative mute/ban durations; zero clears the matching control."""
+
+    muted_for_seconds: int | None = Field(default=None, ge=0, le=31_536_000)
+    banned_for_seconds: int | None = Field(default=None, ge=0, le=31_536_000)
+
+    @model_validator(mode="after")
+    def require_control(self) -> MemberModerationUpdate:
+        if self.muted_for_seconds is None and self.banned_for_seconds is None:
+            raise ValueError("at least one moderation duration is required")
+        return self
+
+
+class MemberModeration(APIModel):
+    """Persisted moderation state for one room subject."""
+
+    room_id: str
+    subject: str
+    muted_until: datetime | None
+    banned_until: datetime | None
+    updated_at: datetime
+
+
+class WebSocketMessage(_MessageContentPayload):
     """Client-to-server WebSocket message command."""
 
     type: Literal["message"]
-    content: str = Field(min_length=1, max_length=100_000)
     client_message_id: str | None = Field(default=None, min_length=1, max_length=128)
-
-    @field_validator("content")
-    @classmethod
-    def reject_blank_content(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("content must not be blank")
-        return value
 
 
 class WebSocketPing(APIModel):

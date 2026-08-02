@@ -38,7 +38,7 @@ def test_archive_export_delete_and_metadata_only_audit(client: TestClient, room:
     assert exported.headers["content-type"].startswith("application/x-ndjson")
     assert exported.headers["content-disposition"] == 'attachment; filename="general-messages.ndjson"'
     assert lines[0]["type"] == "samsarix.room_export"
-    assert lines[0]["schema_version"] == 1
+    assert lines[0]["schema_version"] == 2
     assert lines[0]["room"]["id"] == "general"
     assert lines[1] == {"type": "message", "message": created.json()}
 
@@ -82,7 +82,13 @@ def test_export_streams_across_storage_batches(tmp_path) -> None:
             for index in range(1_005)
         ]
         with closing(sqlite3.connect(database)) as connection, connection:
-            connection.executemany("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)", rows)
+            connection.executemany(
+                """
+                INSERT INTO messages (id, room_id, sender, content, created_at, client_message_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
 
         exported = client.get("/v1/rooms/general/export")
 
@@ -111,6 +117,7 @@ async def test_export_snapshot_survives_concurrent_room_deletion(tmp_path) -> No
         sender="Andrew",
         content="snapshot-content",
         client_message_id=None,
+        allow_frozen=True,
     )
     await store.set_room_archived("general", archived=True, actor="operator")
 
@@ -294,23 +301,94 @@ def test_v1_database_migrates_in_place(tmp_path, caplog: pytest.LogCaptureFixtur
     with closing(sqlite3.connect(database)) as connection:
         version = connection.execute("PRAGMA user_version").fetchone()[0]
         columns = {row[1] for row in connection.execute("PRAGMA table_info(rooms)")}
+        message_columns = {row[1] for row in connection.execute("PRAGMA table_info(messages)")}
 
     assert room.status_code == 200
     assert room.json()["archived_at"] is None
     assert history.json()["items"][0]["content"] == "preserved"
-    assert version == 2
-    assert "archived_at" in columns
-    assert "Migrating database schema from version 1 to 2" in caplog.text
+    assert version == 3
+    assert {"archived_at", "frozen_at"} <= columns
+    assert {"edited_at", "deleted_at"} <= message_columns
+    assert "Migrating database schema from version 1 to 3" in caplog.text
+
+
+def test_v2_database_migrates_conversation_controls_in_place(tmp_path) -> None:
+    database = tmp_path / "v2.db"
+    created_at = datetime.now(timezone.utc).isoformat()
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.executescript(
+            """
+            CREATE TABLE rooms (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                archived_at TEXT
+            );
+            CREATE TABLE messages (
+                id TEXT PRIMARY KEY,
+                room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+                sender TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                client_message_id TEXT,
+                UNIQUE(room_id, client_message_id)
+            );
+            CREATE TABLE audit_events (
+                id TEXT PRIMARY KEY,
+                action TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                room_id TEXT,
+                created_at TEXT NOT NULL,
+                details_json TEXT NOT NULL DEFAULT '{}'
+            );
+            PRAGMA user_version = 2;
+            """
+        )
+        connection.execute(
+            "INSERT INTO rooms VALUES (?, ?, ?, ?, ?)",
+            ("legacy", "Legacy", "", created_at, None),
+        )
+        connection.execute(
+            "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)",
+            ("message-1", "legacy", "author", "preserved", created_at, None),
+        )
+
+    with TestClient(create_app(Settings(database_path=database))) as client:
+        room = client.get("/v1/rooms/legacy").json()
+        message = client.get("/v1/rooms/legacy/messages").json()["items"][0]
+        frozen = client.patch("/v1/rooms/legacy", json={"frozen": True})
+        moderated = client.patch(
+            "/v1/rooms/legacy/members/author/moderation",
+            json={"muted_for_seconds": 60},
+        )
+
+    with closing(sqlite3.connect(database)) as connection:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        controls_table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'room_member_controls'"
+        ).fetchone()
+
+    assert version == 3
+    assert controls_table is not None
+    assert room["frozen_at"] is None
+    assert message["content"] == "preserved"
+    assert message["edited_at"] is None
+    assert message["deleted_at"] is None
+    assert frozen.status_code == 200
+    assert frozen.json()["frozen_at"] is not None
+    assert moderated.status_code == 200
+    assert moderated.json()["muted_until"] is not None
 
 
 def test_newer_database_schema_is_refused_without_mutation(tmp_path) -> None:
     database = tmp_path / "future.db"
     with closing(sqlite3.connect(database)) as connection, connection:
-        connection.execute("PRAGMA user_version = 3")
+        connection.execute("PRAGMA user_version = 4")
 
     with pytest.raises(UnsupportedSchemaVersionError, match="newer than supported"):
         with TestClient(create_app(Settings(database_path=database))):
             pass
 
     with closing(sqlite3.connect(database)) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4

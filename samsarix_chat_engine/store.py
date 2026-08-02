@@ -18,10 +18,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import IO, Any, TypeVar
 
-from .models import AuditEvent, Message, Room, RoomCreate
+from .models import AuditEvent, MemberModeration, MemberModerationUpdate, Message, Room, RoomCreate
 
 T = TypeVar("T")
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 logger = logging.getLogger(__name__)
 
 
@@ -89,6 +89,10 @@ class RoomArchivedError(StoreError):
     """Raised when a write targets an archived room."""
 
 
+class RoomFrozenError(StoreError):
+    """Raised when a non-administrator write targets a frozen room."""
+
+
 class RoomNotArchivedError(StoreError):
     """Raised when irreversible deletion targets an active room."""
 
@@ -99,6 +103,26 @@ class InvalidCursorError(StoreError):
 
 class InvalidAuditCursorError(StoreError):
     """Raised when an administrative audit cursor is unknown."""
+
+
+class MessageNotFoundError(StoreError):
+    """Raised when a requested message does not exist in the room."""
+
+
+class MessageDeletedError(StoreError):
+    """Raised when an update targets a deleted message tombstone."""
+
+
+class MessageOwnershipError(StoreError):
+    """Raised when a non-administrator attempts to change another author's message."""
+
+
+class MemberMutedError(StoreError):
+    """Raised when an active room mute blocks a member write."""
+
+
+class MemberBannedError(StoreError):
+    """Raised when an active room ban blocks a member operation."""
 
 
 class RetentionNotConfiguredError(StoreError):
@@ -250,7 +274,7 @@ class ChatStore:
         row = await asyncio.to_thread(
             self._run,
             lambda connection: connection.execute(
-                "SELECT id, name, description, created_at, archived_at FROM rooms WHERE id = ?", (room_id,)
+                "SELECT id, name, description, created_at, archived_at, frozen_at FROM rooms WHERE id = ?", (room_id,)
             ).fetchone(),
         )
         return self._room_from_row(row) if row else None
@@ -260,7 +284,7 @@ class ChatStore:
             self._run,
             lambda connection: connection.execute(
                 """
-                SELECT id, name, description, created_at, archived_at
+                SELECT id, name, description, created_at, archived_at, frozen_at
                 FROM rooms ORDER BY created_at, id LIMIT ?
                 """,
                 (limit,),
@@ -269,8 +293,19 @@ class ChatStore:
         return [self._room_from_row(row) for row in rows]
 
     async def set_room_archived(self, room_id: str, *, archived: bool, actor: str) -> tuple[Room, bool]:
+        room, changes = await self.set_room_state(room_id, archived=archived, frozen=None, actor=actor)
+        return room, "archived" in changes
+
+    async def set_room_state(
+        self,
+        room_id: str,
+        *,
+        archived: bool | None,
+        frozen: bool | None,
+        actor: str,
+    ) -> tuple[Room, frozenset[str]]:
         async with self._write_lock:
-            return await asyncio.to_thread(self._set_room_archived_sync, room_id, archived, actor)
+            return await asyncio.to_thread(self._set_room_state_sync, room_id, archived, frozen, actor)
 
     async def delete_room(self, room_id: str, *, actor: str) -> int:
         """Delete an already archived room and return its deleted message count."""
@@ -292,6 +327,8 @@ class ChatStore:
         sender: str,
         content: str,
         client_message_id: str | None,
+        allow_frozen: bool,
+        member_subject: str | None = None,
     ) -> tuple[Message, bool]:
         async with self._write_lock:
             return await asyncio.to_thread(
@@ -300,7 +337,73 @@ class ChatStore:
                 sender,
                 content,
                 client_message_id,
+                allow_frozen,
+                member_subject,
             )
+
+    async def update_message(
+        self,
+        *,
+        room_id: str,
+        message_id: str,
+        actor: str,
+        content: str,
+        is_admin: bool,
+        member_subject: str | None = None,
+    ) -> Message:
+        async with self._write_lock:
+            return await asyncio.to_thread(
+                self._update_message_sync,
+                room_id,
+                message_id,
+                actor,
+                content,
+                is_admin,
+                member_subject,
+            )
+
+    async def delete_message(
+        self,
+        *,
+        room_id: str,
+        message_id: str,
+        actor: str,
+        is_admin: bool,
+        member_subject: str | None = None,
+    ) -> tuple[Message, bool]:
+        async with self._write_lock:
+            return await asyncio.to_thread(
+                self._delete_message_sync,
+                room_id,
+                message_id,
+                actor,
+                is_admin,
+                member_subject,
+            )
+
+    async def get_member_moderation(self, room_id: str, subject: str) -> MemberModeration | None:
+        row = await asyncio.to_thread(
+            self._run,
+            lambda connection: connection.execute(
+                """
+                SELECT room_id, subject, muted_until, banned_until, updated_at
+                FROM room_member_controls WHERE room_id = ? AND subject = ?
+                """,
+                (room_id, subject),
+            ).fetchone(),
+        )
+        return self._moderation_from_row(row) if row else None
+
+    async def set_member_moderation(
+        self,
+        room_id: str,
+        subject: str,
+        payload: MemberModerationUpdate,
+        *,
+        actor: str,
+    ) -> MemberModeration:
+        async with self._write_lock:
+            return await asyncio.to_thread(self._set_member_moderation_sync, room_id, subject, payload, actor)
 
     async def list_messages(
         self,
@@ -322,7 +425,7 @@ class ChatStore:
             connection.execute("BEGIN")
             cursor = connection.execute(
                 """
-                SELECT id, room_id, sender, content, created_at, client_message_id
+                SELECT id, room_id, sender, content, created_at, client_message_id, edited_at, deleted_at
                 FROM messages WHERE room_id = ? ORDER BY created_at, id
                 """,
                 (room_id,),
@@ -401,6 +504,13 @@ class ChatStore:
             columns = {row[1] for row in connection.execute("PRAGMA table_info(rooms)")}
             if "archived_at" not in columns:
                 connection.execute("ALTER TABLE rooms ADD COLUMN archived_at TEXT")
+            if "frozen_at" not in columns:
+                connection.execute("ALTER TABLE rooms ADD COLUMN frozen_at TEXT")
+            message_columns = {row[1] for row in connection.execute("PRAGMA table_info(messages)")}
+            if "edited_at" not in message_columns:
+                connection.execute("ALTER TABLE messages ADD COLUMN edited_at TEXT")
+            if "deleted_at" not in message_columns:
+                connection.execute("ALTER TABLE messages ADD COLUMN deleted_at TEXT")
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS audit_events (
@@ -413,6 +523,17 @@ class ChatStore:
                 );
                 CREATE INDEX IF NOT EXISTS audit_events_order
                     ON audit_events(created_at DESC, id DESC);
+
+                CREATE TABLE IF NOT EXISTS room_member_controls (
+                    room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+                    subject TEXT NOT NULL,
+                    muted_until TEXT,
+                    banned_until TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (room_id, subject)
+                );
+                CREATE INDEX IF NOT EXISTS room_member_controls_subject
+                    ON room_member_controls(subject, room_id);
                 """
             )
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")  # noqa: S608 - constant PRAGMA literal
@@ -434,16 +555,22 @@ class ChatStore:
             self._insert_audit(connection, action="room.created", actor=actor, room_id=room_id)
         return Room(id=room_id, name=payload.name, description=payload.description, created_at=created_at)
 
-    def _set_room_archived_sync(self, room_id: str, archived: bool, actor: str) -> tuple[Room, bool]:
+    def _set_room_state_sync(
+        self,
+        room_id: str,
+        archived: bool | None,
+        frozen: bool | None,
+        actor: str,
+    ) -> tuple[Room, frozenset[str]]:
         with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT id, name, description, created_at, archived_at FROM rooms WHERE id = ?", (room_id,)
+                "SELECT id, name, description, created_at, archived_at, frozen_at FROM rooms WHERE id = ?", (room_id,)
             ).fetchone()
             if row is None:
                 raise RoomNotFoundError(room_id)
-            changed = (row["archived_at"] is not None) != archived
-            if changed:
+            changes: set[str] = set()
+            if archived is not None and (row["archived_at"] is not None) != archived:
                 archived_at = datetime.now(timezone.utc).isoformat() if archived else None
                 connection.execute("UPDATE rooms SET archived_at = ? WHERE id = ?", (archived_at, room_id))
                 self._insert_audit(
@@ -452,10 +579,23 @@ class ChatStore:
                     actor=actor,
                     room_id=room_id,
                 )
+                changes.add("archived")
+            if frozen is not None and (row["frozen_at"] is not None) != frozen:
+                frozen_at = datetime.now(timezone.utc).isoformat() if frozen else None
+                connection.execute("UPDATE rooms SET frozen_at = ? WHERE id = ?", (frozen_at, room_id))
+                self._insert_audit(
+                    connection,
+                    action="room.frozen" if frozen else "room.unfrozen",
+                    actor=actor,
+                    room_id=room_id,
+                )
+                changes.add("frozen")
+            if changes:
                 row = connection.execute(
-                    "SELECT id, name, description, created_at, archived_at FROM rooms WHERE id = ?", (room_id,)
+                    "SELECT id, name, description, created_at, archived_at, frozen_at FROM rooms WHERE id = ?",
+                    (room_id,),
                 ).fetchone()
-        return self._room_from_row(row), changed
+        return self._room_from_row(row), frozenset(changes)
 
     def _delete_room_sync(self, room_id: str, actor: str) -> int:
         with closing(self._connect()) as connection, connection:
@@ -491,19 +631,24 @@ class ChatStore:
         sender: str,
         content: str,
         client_message_id: str | None,
+        allow_frozen: bool,
+        member_subject: str | None,
     ) -> tuple[Message, bool]:
         with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
-            room = connection.execute("SELECT archived_at FROM rooms WHERE id = ?", (room_id,)).fetchone()
+            room = connection.execute("SELECT archived_at, frozen_at FROM rooms WHERE id = ?", (room_id,)).fetchone()
             if room is None:
                 raise RoomNotFoundError(room_id)
             if room["archived_at"] is not None:
                 raise RoomArchivedError(room_id)
+            if room["frozen_at"] is not None and not allow_frozen:
+                raise RoomFrozenError(room_id)
+            self._enforce_member_write_sync(connection, room_id, member_subject)
 
             if client_message_id:
                 existing = connection.execute(
                     """
-                    SELECT id, room_id, sender, content, created_at, client_message_id
+                    SELECT id, room_id, sender, content, created_at, client_message_id, edited_at, deleted_at
                     FROM messages WHERE room_id = ? AND client_message_id = ?
                     """,
                     (room_id, client_message_id),
@@ -535,6 +680,200 @@ class ChatStore:
             )
             self._trim_messages(connection, room_id, now=message.created_at)
             return message, True
+
+    def _update_message_sync(
+        self,
+        room_id: str,
+        message_id: str,
+        actor: str,
+        content: str,
+        is_admin: bool,
+        member_subject: str | None,
+    ) -> Message:
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            room = connection.execute("SELECT archived_at, frozen_at FROM rooms WHERE id = ?", (room_id,)).fetchone()
+            if room is None:
+                raise RoomNotFoundError(room_id)
+            if room["archived_at"] is not None:
+                raise RoomArchivedError(room_id)
+            if room["frozen_at"] is not None and not is_admin:
+                raise RoomFrozenError(room_id)
+            self._enforce_member_write_sync(connection, room_id, member_subject)
+            row = connection.execute(
+                """
+                SELECT id, room_id, sender, content, created_at, client_message_id, edited_at, deleted_at
+                FROM messages WHERE room_id = ? AND id = ?
+                """,
+                (room_id, message_id),
+            ).fetchone()
+            if row is None:
+                raise MessageNotFoundError(message_id)
+            if row["deleted_at"] is not None:
+                raise MessageDeletedError(message_id)
+            if not is_admin and row["sender"] != actor:
+                raise MessageOwnershipError(message_id)
+            edited_at = datetime.now(timezone.utc)
+            connection.execute(
+                "UPDATE messages SET content = ?, edited_at = ? WHERE id = ?",
+                (content, edited_at.isoformat(), message_id),
+            )
+            self._insert_audit(
+                connection,
+                action="message.updated",
+                actor=actor,
+                room_id=room_id,
+                details={"message_id": message_id},
+            )
+            row = connection.execute(
+                """
+                SELECT id, room_id, sender, content, created_at, client_message_id, edited_at, deleted_at
+                FROM messages WHERE id = ?
+                """,
+                (message_id,),
+            ).fetchone()
+        return self._message_from_row(row)
+
+    def _delete_message_sync(
+        self,
+        room_id: str,
+        message_id: str,
+        actor: str,
+        is_admin: bool,
+        member_subject: str | None,
+    ) -> tuple[Message, bool]:
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            room = connection.execute("SELECT archived_at, frozen_at FROM rooms WHERE id = ?", (room_id,)).fetchone()
+            if room is None:
+                raise RoomNotFoundError(room_id)
+            if not is_admin and room["archived_at"] is not None:
+                raise RoomArchivedError(room_id)
+            if not is_admin and room["frozen_at"] is not None:
+                raise RoomFrozenError(room_id)
+            self._enforce_member_write_sync(connection, room_id, member_subject)
+            row = connection.execute(
+                """
+                SELECT id, room_id, sender, content, created_at, client_message_id, edited_at, deleted_at
+                FROM messages WHERE room_id = ? AND id = ?
+                """,
+                (room_id, message_id),
+            ).fetchone()
+            if row is None:
+                raise MessageNotFoundError(message_id)
+            if not is_admin and row["sender"] != actor:
+                raise MessageOwnershipError(message_id)
+            if row["deleted_at"] is not None:
+                return self._message_from_row(row), False
+            deleted_at = datetime.now(timezone.utc)
+            connection.execute(
+                "UPDATE messages SET content = '', deleted_at = ? WHERE id = ?",
+                (deleted_at.isoformat(), message_id),
+            )
+            self._insert_audit(
+                connection,
+                action="message.deleted",
+                actor=actor,
+                room_id=room_id,
+                details={"message_id": message_id},
+            )
+            row = connection.execute(
+                """
+                SELECT id, room_id, sender, content, created_at, client_message_id, edited_at, deleted_at
+                FROM messages WHERE id = ?
+                """,
+                (message_id,),
+            ).fetchone()
+        return self._message_from_row(row), True
+
+    def _set_member_moderation_sync(
+        self,
+        room_id: str,
+        subject: str,
+        payload: MemberModerationUpdate,
+        actor: str,
+    ) -> MemberModeration:
+        now = datetime.now(timezone.utc)
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute("SELECT 1 FROM rooms WHERE id = ?", (room_id,)).fetchone() is None:
+                raise RoomNotFoundError(room_id)
+            existing = connection.execute(
+                """
+                SELECT room_id, subject, muted_until, banned_until, updated_at
+                FROM room_member_controls WHERE room_id = ? AND subject = ?
+                """,
+                (room_id, subject),
+            ).fetchone()
+            muted_until = existing["muted_until"] if existing else None
+            banned_until = existing["banned_until"] if existing else None
+            if payload.muted_for_seconds is not None:
+                muted_until = (
+                    (now + timedelta(seconds=payload.muted_for_seconds)).isoformat()
+                    if payload.muted_for_seconds
+                    else None
+                )
+            if payload.banned_for_seconds is not None:
+                banned_until = (
+                    (now + timedelta(seconds=payload.banned_for_seconds)).isoformat()
+                    if payload.banned_for_seconds
+                    else None
+                )
+            if muted_until is None and banned_until is None:
+                connection.execute(
+                    "DELETE FROM room_member_controls WHERE room_id = ? AND subject = ?",
+                    (room_id, subject),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO room_member_controls (room_id, subject, muted_until, banned_until, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(room_id, subject) DO UPDATE SET
+                        muted_until = excluded.muted_until,
+                        banned_until = excluded.banned_until,
+                        updated_at = excluded.updated_at
+                    """,
+                    (room_id, subject, muted_until, banned_until, now.isoformat()),
+                )
+            self._insert_audit(
+                connection,
+                action="member.moderation_updated",
+                actor=actor,
+                room_id=room_id,
+                details={
+                    "subject": subject,
+                    "muted_until": muted_until,
+                    "banned_until": banned_until,
+                },
+            )
+        return MemberModeration(
+            room_id=room_id,
+            subject=subject,
+            muted_until=datetime.fromisoformat(muted_until) if muted_until else None,
+            banned_until=datetime.fromisoformat(banned_until) if banned_until else None,
+            updated_at=now,
+        )
+
+    @staticmethod
+    def _enforce_member_write_sync(
+        connection: sqlite3.Connection,
+        room_id: str,
+        subject: str | None,
+    ) -> None:
+        if subject is None:
+            return
+        row = connection.execute(
+            "SELECT muted_until, banned_until FROM room_member_controls WHERE room_id = ? AND subject = ?",
+            (room_id, subject),
+        ).fetchone()
+        if row is None:
+            return
+        now = datetime.now(timezone.utc)
+        if row["banned_until"] is not None and datetime.fromisoformat(row["banned_until"]) > now:
+            raise MemberBannedError(subject)
+        if row["muted_until"] is not None and datetime.fromisoformat(row["muted_until"]) > now:
+            raise MemberMutedError(subject)
 
     def _trim_messages(self, connection: sqlite3.Connection, room_id: str, *, now: datetime) -> None:
         age_deleted = 0
@@ -599,7 +938,7 @@ class ChatStore:
                     raise InvalidCursorError(before)
                 rows = connection.execute(
                     """
-                    SELECT id, room_id, sender, content, created_at, client_message_id
+                    SELECT id, room_id, sender, content, created_at, client_message_id, edited_at, deleted_at
                     FROM messages
                     WHERE room_id = ? AND (created_at < ? OR (created_at = ? AND id < ?))
                     ORDER BY created_at DESC, id DESC
@@ -610,7 +949,7 @@ class ChatStore:
             else:
                 rows = connection.execute(
                     """
-                    SELECT id, room_id, sender, content, created_at, client_message_id
+                    SELECT id, room_id, sender, content, created_at, client_message_id, edited_at, deleted_at
                     FROM messages
                     WHERE room_id = ?
                     ORDER BY created_at DESC, id DESC
@@ -709,6 +1048,7 @@ class ChatStore:
             description=row["description"],
             created_at=datetime.fromisoformat(row["created_at"]),
             archived_at=datetime.fromisoformat(row["archived_at"]) if row["archived_at"] else None,
+            frozen_at=datetime.fromisoformat(row["frozen_at"]) if row["frozen_at"] else None,
         )
 
     @staticmethod
@@ -720,6 +1060,18 @@ class ChatStore:
             content=row["content"],
             created_at=datetime.fromisoformat(row["created_at"]),
             client_message_id=row["client_message_id"],
+            edited_at=datetime.fromisoformat(row["edited_at"]) if row["edited_at"] else None,
+            deleted_at=datetime.fromisoformat(row["deleted_at"]) if row["deleted_at"] else None,
+        )
+
+    @staticmethod
+    def _moderation_from_row(row: sqlite3.Row) -> MemberModeration:
+        return MemberModeration(
+            room_id=row["room_id"],
+            subject=row["subject"],
+            muted_until=datetime.fromisoformat(row["muted_until"]) if row["muted_until"] else None,
+            banned_until=datetime.fromisoformat(row["banned_until"]) if row["banned_until"] else None,
+            updated_at=datetime.fromisoformat(row["updated_at"]),
         )
 
     @staticmethod

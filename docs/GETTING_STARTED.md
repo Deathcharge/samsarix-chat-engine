@@ -112,6 +112,6 @@ When using a token, connect without `?username=` because the server derives iden
 - `503 storage_unavailable` or `/readyz` returning 503: check the database directory permissions and available disk.
 - CLI refuses a public bind: configure an API key or token signing secret, or bind to loopback. The insecure override is only for isolated development networks.
 
-## Upgrading from 0.4
+## Upgrading to 0.6
 
-Version 0.5 migrates the v0.4 SQLite schema in place while preserving rooms and messages. Take an integrity-checked backup first with `samsarix-chat database backup backups/pre-0.5.db`, then start v0.5. See [Data lifecycle operations](OPERATIONS.md) for migration, verification, and rollback details.
+Version 0.6 migrates v0.4/v0.5 SQLite schemas in place while preserving rooms and messages. Take an integrity-checked backup first with `samsarix-chat database backup backups/pre-0.6.db`, then start v0.6. See [Data lifecycle operations](OPERATIONS.md) for migration, verification, and rollback details.

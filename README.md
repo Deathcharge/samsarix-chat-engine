@@ -2,7 +2,7 @@
 
 Samsarix Chat Engine is a small, local-first room chat service from Samsarix LLC for developers who need persisted messages and live WebSocket delivery without adopting a full collaboration platform. It runs as a standalone FastAPI service or as an embeddable ASGI application, stores data in SQLite, and has no dependency on Redis, an LLM provider, or any private package.
 
-Version 0.5.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, and accountable data-lifecycle controls are implemented and tested. The project is licensed under the standard Mozilla Public License 2.0.
+Version 0.6.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, accountable data lifecycle, and practical conversation controls are implemented and tested. The project is licensed under the standard Mozilla Public License 2.0.
 
 ## What works
 
@@ -13,13 +13,15 @@ Version 0.5.0 is an alpha release candidate. Its core single-instance journey, t
 - Retry message submission safely with `Idempotency-Key` or `client_message_id`.
 - Protect operator actions with an optional shared API key.
 - Give application users signed, expiring, per-room read/write access tokens.
+- Let authors edit or delete their own messages while administrators can moderate any message.
+- Freeze rooms for administrator-only announcements, mute disruptive members, and ban room access by token subject.
 - Stream versioned room exports, archive/reopen rooms, and require two-step confirmed deletion.
 - Apply optional age-based retention and inspect a bounded metadata-only administrative audit trail.
 - Create integrity-checked SQLite backups and restore them through the CLI.
 - Bound message size, send rate, connections, room count, and retained history.
 - Check liveness at `/healthz`, storage readiness at `/readyz`, and OpenAPI docs at `/docs`.
 
-It deliberately does not provide user registration, password storage, attachments, moderation, end-to-end encryption, federation, multi-instance fan-out, or AI agents.
+It deliberately does not provide user registration, password storage, attachments, end-to-end encryption, federation, multi-instance fan-out, or AI agents.
 
 ## Quick start
 
@@ -62,7 +64,7 @@ python examples/01_rest_chat.py
 python examples/02_websocket_chat.py
 ```
 
-See [Getting started](docs/GETTING_STARTED.md) for authentication and browser examples, and [Data lifecycle operations](docs/OPERATIONS.md) for export, deletion, retention, backup, and restore.
+See [Getting started](docs/GETTING_STARTED.md) for authentication and browser examples, [Conversation controls](docs/CONVERSATION_CONTROLS.md) for moderation workflows, and [Data lifecycle operations](docs/OPERATIONS.md) for export, deletion, retention, backup, and restore.
 
 ## WebSocket protocol
 
@@ -82,7 +84,7 @@ The server sends `ready` and `history`, then accepts these JSON commands:
 {"type":"ping"}
 ```
 
-Clients receive `message.created`, `presence.joined`, `presence.left`, `pong`, and structured `error` events. Browser clients first receive `auth.required` and reply with `{"type":"auth","token":"..."}`. Token identity supplies the username; legacy local/operator connections still use `?username=`. API keys and tokens are never accepted in query strings.
+Clients receive `message.created`, `message.updated`, `message.deleted`, room-state, moderation, presence, `pong`, and structured `error` events. Browser clients first receive `auth.required` and reply with `{"type":"auth","token":"..."}`. Token identity supplies the username; legacy local/operator connections still use `?username=`. API keys and tokens are never accepted in query strings.
 
 The exact HTTP and event contracts are in [API reference](docs/API_REFERENCE.md). See [Identity and room authorization](docs/AUTHORIZATION.md) for issuance and permission examples.
 
@@ -170,12 +172,12 @@ CI runs the tests on CPython 3.10–3.14 on Linux and CPython 3.12 on Windows. S
 
 ## Limitations and project status
 
-This is a coherent single-instance MVP, not a hosted chat platform. The highest-value future work is conversation moderation, a stable client SDK, a multi-instance broker adapter, and load/soak testing. Those are intentionally not presented as current capabilities.
+This is a coherent single-instance MVP, not a hosted chat platform. The highest-value future work is a stable client SDK, a multi-instance broker adapter, attachments with explicit storage policy, and load/soak testing. Those are intentionally not presented as current capabilities.
 
 ## License
 
 Copyright (c) 2026 Samsarix LLC. The source is licensed under the [Mozilla Public License 2.0](LICENSE). MPL-2.0 keeps distributed modifications to covered source files open and preserves license notices, while allowing those files to be combined with separate proprietary files in a larger work.
 
-The canonical Python package, command, and environment prefix are `samsarix_chat_engine`, `samsarix-chat`, and `SAMSARIX_CHAT_*`. Version 0.5 keeps `helix_chat_engine`, `helix-chat`, and `HELIX_CHAT_*` as deprecated compatibility aliases. If only `data/helix-chat.db` exists, the CLI reuses it so the rename does not hide existing data.
+The canonical Python package, command, and environment prefix are `samsarix_chat_engine`, `samsarix-chat`, and `SAMSARIX_CHAT_*`. Version 0.6 keeps `helix_chat_engine`, `helix-chat`, and `HELIX_CHAT_*` as deprecated compatibility aliases. If only `data/helix-chat.db` exists, the CLI reuses it so the rename does not hide existing data.
 
 For general inquiries, email contact@samsarix.com. For product support and private security reports, email support@samsarix.com or read [SECURITY.md](SECURITY.md).
