@@ -91,3 +91,65 @@ jobs:
       - run: npm audit --omit=dev
       - run: python scripts/smoke_typescript_client.py
         working-directory: .
+
+  container-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Build and smoke the hardened Compose deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p secrets
+          printf '%s' 'container-ci-operator-key-123456' > secrets/operator-api-key.txt
+          printf '%s' 'container-ci-token-signing-secret-32-bytes' > secrets/token-signing-secret.txt
+          docker compose config --quiet
+          docker compose build --pull
+
+          cleanup() {
+            docker compose logs --no-color || true
+            docker compose down --volumes --remove-orphans || true
+          }
+          trap cleanup EXIT
+          docker compose up --detach
+
+          container_id=$(docker compose ps --quiet chat)
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent --show-error http://127.0.0.1:8000/readyz > /dev/null \
+              && [ "$(docker inspect --format '{{.State.Health.Status}}' "$container_id")" = 'healthy' ]; then
+              break
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              echo 'container did not become ready' >&2
+              exit 1
+            fi
+            sleep 1
+          done
+
+          test "$(docker inspect --format '{{.Config.User}}' "$container_id")" = '10001:10001'
+          if docker compose exec -T chat sh -c 'touch /root-filesystem-must-remain-read-only'; then
+            echo 'container root filesystem was writable' >&2
+            exit 1
+          fi
+
+          curl --fail --silent --show-error \
+            --header 'X-API-Key: container-ci-operator-key-123456' \
+            --header 'Content-Type: application/json' \
+            --data '{"id":"container-room","name":"Container Room"}' \
+            http://127.0.0.1:8000/v1/rooms > /dev/null
+
+          docker compose restart chat
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent --show-error \
+              --header 'X-API-Key: container-ci-operator-key-123456' \
+              http://127.0.0.1:8000/v1/rooms/container-room > /dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              echo 'persisted room did not recover after restart' >&2
+              exit 1
+            fi
+            sleep 1
+          done

@@ -2,7 +2,7 @@
 
 Samsarix Chat Engine is a small, local-first room chat service from Samsarix LLC for developers who need persisted messages and live WebSocket delivery without adopting a full collaboration platform. It runs as a standalone FastAPI service or as an embeddable ASGI application, stores data in SQLite, and has no dependency on Redis, an LLM provider, or any private package.
 
-Version 0.10.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, accountable data lifecycle, practical conversation controls, typed TypeScript client, support-workflow primitives, per-room retrieval, and durable application webhooks are implemented and tested. The project is licensed under the standard Mozilla Public License 2.0.
+Version 0.11.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, accountable data lifecycle, practical conversation controls, typed TypeScript client, support workflow and retrieval, durable application webhooks, and hardened container deployment are implemented and tested. The project is licensed under the standard Mozilla Public License 2.0.
 
 ## What works
 
@@ -23,6 +23,7 @@ Version 0.10.0 is an alpha release candidate. Its core single-instance journey, 
 - Apply optional age-based retention and inspect a bounded metadata-only administrative audit trail.
 - Create integrity-checked SQLite backups and restore them through the CLI.
 - Deliver selected committed message/moderation events through a signed, durable, retrying webhook outbox.
+- Deploy one non-root process with a hardened Compose profile, mounted secret files, persistent SQLite volume, and readiness health check.
 - Bound message size, send rate, connections, room count, and retained history.
 - Check liveness at `/healthz`, storage readiness at `/readyz`, and OpenAPI docs at `/docs`.
 
@@ -76,6 +77,20 @@ See [Getting started](docs/GETTING_STARTED.md) for authentication and browser ex
 
 The [application-workflow guide](docs/APPLICATION_WORKFLOWS.md) and runnable `examples/03_support_workflow.py` show a two-party support case with separate customer and agent identities. [Reliable application webhooks](docs/WEBHOOKS.md) covers receiver verification, retries, replay, rotation, and failure recovery.
 
+## Container quick start
+
+Docker Compose packages the supported one-process topology. Create the two ignored files described in [`secrets/README.md`](secrets/README.md), then run:
+
+```bash
+docker compose config --quiet
+docker compose build --pull
+docker compose up --detach
+docker compose ps
+curl http://127.0.0.1:8000/readyz
+```
+
+The profile publishes only to host loopback, runs as UID/GID 10001, mounts `/data` as the sole durable writable volume, and reads operator/token secrets from `/run/secrets`. It is intentionally single-replica: do not add Uvicorn workers or scale the Compose service. See [Container deployment](docs/CONTAINER_DEPLOYMENT.md) before exposing it through a TLS reverse proxy or relying on its volume.
+
 ## TypeScript client
 
 The framework-neutral [`@samsarix/chat-client`](clients/typescript/README.md) source ships in `clients/typescript`. It wraps authenticated HTTP operations and browser-safe first-message WebSocket authentication, emits generated declarations, refreshes credentials on reconnect, and applies bounded exponential backoff without runtime dependencies. The package is verified and packable but is not yet published to npm.
@@ -108,13 +123,15 @@ The exact HTTP and event contracts are in [API reference](docs/API_REFERENCE.md)
 
 ## Configuration
 
-All settings are optional for loopback development. Copy [.env.example](.env.example) as a reference; the service reads process environment variables directly and does not automatically load `.env` files.
+All settings are optional for loopback development. Copy [.env.example](.env.example) as a reference; the service reads process environment variables directly and does not automatically load `.env` files. Sensitive settings also accept a mutually exclusive `_FILE` form containing one UTF-8 line, which is preferred for container/orchestrator secrets.
 
 | Variable | Default | Purpose |
 | --- | ---: | --- |
 | `SAMSARIX_CHAT_DATABASE` | `data/samsarix-chat.db` | SQLite database path |
 | `SAMSARIX_CHAT_API_KEY` | unset | Shared secret protecting all `/v1` data; minimum 16 characters |
+| `SAMSARIX_CHAT_API_KEY_FILE` | unset | File alternative to `API_KEY`; never set both |
 | `SAMSARIX_CHAT_TOKEN_SIGNING_SECRET` | unset | Enables signed application-user tokens; minimum 32 bytes |
+| `SAMSARIX_CHAT_TOKEN_SIGNING_SECRET_FILE` | unset | File alternative to `TOKEN_SIGNING_SECRET`; never set both |
 | `SAMSARIX_CHAT_TOKEN_ISSUER` | `samsarix-chat-engine` | Required JWT issuer |
 | `SAMSARIX_CHAT_TOKEN_AUDIENCE` | `samsarix-chat` | Required JWT audience |
 | `SAMSARIX_CHAT_TOKEN_MAX_LIFETIME` | `86400` | Maximum issued/accepted token lifetime in seconds |
@@ -138,7 +155,9 @@ All settings are optional for loopback development. Copy [.env.example](.env.exa
 | `SAMSARIX_CHAT_WS_MAX_BYTES` | `16384` | WebSocket command frame cap used by the CLI server |
 | `SAMSARIX_CHAT_WEBHOOK_URL` | unset | Opt-in host-application callback; HTTPS except literal loopback development |
 | `SAMSARIX_CHAT_WEBHOOK_SIGNING_SECRET` | unset | Standard Webhooks `whsec_` current HMAC secret; required with a URL |
+| `SAMSARIX_CHAT_WEBHOOK_SIGNING_SECRET_FILE` | unset | File alternative to the current webhook secret |
 | `SAMSARIX_CHAT_WEBHOOK_PREVIOUS_SIGNING_SECRET` | unset | Temporary old `whsec_` secret for zero-downtime rotation |
+| `SAMSARIX_CHAT_WEBHOOK_PREVIOUS_SIGNING_SECRET_FILE` | unset | File alternative to the previous webhook secret |
 | `SAMSARIX_CHAT_WEBHOOK_EVENTS` | all four when URL set | Comma-separated selected committed message/moderation event types |
 | `SAMSARIX_CHAT_WEBHOOK_TIMEOUT` | `10` | Per-attempt network timeout in seconds, 0.1–30 |
 | `SAMSARIX_CHAT_WEBHOOK_MAX_ATTEMPTS` | `9` | Total automatic delivery attempts, 1–20 |
@@ -204,16 +223,16 @@ python -m twine check dist/*
 python scripts/smoke_installed_wheel.py  # run with an installed wheel's Python
 ```
 
-CI runs the tests on CPython 3.10–3.14 on Linux and CPython 3.12 on Windows. See [Contributing](CONTRIBUTING.md) and the living [productization record](docs/PRODUCTIZATION.md).
+CI runs the tests on CPython 3.10–3.14 on Linux and CPython 3.12 on Windows, verifies the TypeScript package, and builds/smokes the hardened Linux container. See [Contributing](CONTRIBUTING.md) and the living [productization record](docs/PRODUCTIZATION.md).
 
 ## Limitations and project status
 
-This is a coherent single-instance MVP, not a hosted chat platform. The highest-value future work is measured multi-instance delivery, load/soak testing, and attachments with explicit storage policy. Those are intentionally not presented as current capabilities.
+This is a coherent single-instance MVP, not a hosted chat platform. The container and Compose profile support exactly one process and replica. The highest-value future work is a shared-database-plus-broker multi-instance design, load/soak testing, and attachments with explicit storage policy. Those are intentionally not presented as current capabilities.
 
 ## License
 
 Copyright (c) 2026 Samsarix LLC. The source is licensed under the [Mozilla Public License 2.0](LICENSE). MPL-2.0 keeps distributed modifications to covered source files open and preserves license notices, while allowing those files to be combined with separate proprietary files in a larger work.
 
-The canonical Python package, command, and environment prefix are `samsarix_chat_engine`, `samsarix-chat`, and `SAMSARIX_CHAT_*`. Version 0.10 keeps `helix_chat_engine`, `helix-chat`, and `HELIX_CHAT_*` as deprecated compatibility aliases. If only `data/helix-chat.db` exists, the CLI reuses it so the rename does not hide existing data.
+The canonical Python package, command, and environment prefix are `samsarix_chat_engine`, `samsarix-chat`, and `SAMSARIX_CHAT_*`. Version 0.11 keeps `helix_chat_engine`, `helix-chat`, and `HELIX_CHAT_*` as deprecated compatibility aliases. If only `data/helix-chat.db` exists, the CLI reuses it so the rename does not hide existing data.
 
 For general inquiries, email contact@samsarix.com. For product support and private security reports, email support@samsarix.com or read [SECURITY.md](SECURITY.md).

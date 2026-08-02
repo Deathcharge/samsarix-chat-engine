@@ -43,6 +43,8 @@ Samsarix Chat Engine is a self-hosted, single-instance room chat backend and emb
 - Persist before broadcast and support idempotency. This makes an acknowledged HTTP message durable and makes ordinary client retry safe.
 - Keep presence in memory and explicitly label it best effort. Current Centrifugo guidance likewise treats presence as additional state with cost and privacy implications; this product does not pretend to match Centrifugo's multi-node broker/recovery scope.
 - Keep one process. SQLite plus an in-process connection manager is coherent at this scale; adding Redis merely for a scaling claim would expand operations and failure modes.
+- Package that one-process boundary as a non-root, read-only-root container with a durable `/data` volume and mounted secret files. Docker's official [build guidance](https://docs.docker.com/build/building/best-practices/) supports multi-stage builds, `.dockerignore`, CI image tests, and numeric non-root users; [Compose secret guidance](https://docs.docker.com/compose/how-tos/use-secrets/) supports per-service file mounts instead of ordinary secret environment values. FastAPI's [container guidance](https://fastapi.tiangolo.com/deployment/docker/) supports exec-form shutdown and one application process per container.
+- Defer multi-instance claims until storage and coordination are designed together. Redis documents Pub/Sub as [at-most-once](https://redis.io/docs/latest/develop/pubsub/), while Streams add persisted cursors/acknowledgment rather than an authoritative chat database. PostgreSQL documents `LISTEN/NOTIFY` as interprocess signaling over a [shared PostgreSQL database](https://www.postgresql.org/docs/current/sql-notify.html), with payload, transaction, queue, and startup-race constraints. None alone resolves this repository's SQLite ownership, migration/restore exclusion, webhook leadership, or distributed quotas.
 - Keep identity ownership in the host application. v0.4 accepts a narrowly profiled signed assertion, derives sender identity from it, and enforces room/action authorization on every request and WebSocket publish.
 - Retain the shared API key only as an operator and compatibility credential. It is intentionally all-room and must not be distributed to ordinary browser clients.
 - Require exact non-local browser origins even for authenticated deployments; credentials do not remove cross-site WebSocket-hijacking risk.
@@ -89,6 +91,7 @@ Deployment owners control login, membership decisions, TLS/proxying, operator an
 - [x] Add host-asserted user identity and server-side per-room authorization before use with mutually untrusted users.
 - [x] Add room/message export and deletion administration for deployments with data-subject or retention obligations.
 - [x] Add transactionally durable, signed application webhooks with bounded retries, operator recovery, and explicit receiver/network/privacy contracts.
+- [x] Add a hardened, single-replica container/Compose deployment with mounted secret files, persistent-volume recovery, and CI smoke.
 - [ ] Add a broker/presence adapter and cross-instance integration tests before multiple workers or hosts are supported.
 - [ ] Run sustained concurrent load/soak tests and publish measured limits before capacity claims.
 
@@ -113,6 +116,7 @@ Deployment owners control login, membership decisions, TLS/proxying, operator an
 - [x] Strict signed access tokens, operator separation, per-room/action authorization, and server-enforced sender identity.
 - [x] Streaming room export, archive/reopen, confirmed deletion, age retention, metadata-only audit, and backup/restore.
 - [x] Standard Webhooks-compatible committed-event outbox, delivery worker, health/replay API, rotation, and failure runbook.
+- [x] Multi-stage non-root image, read-only-root Compose profile, secret files, persistent SQLite volume, and container CI gate.
 
 ## Release acceptance criteria
 
@@ -303,7 +307,7 @@ This v0.3 verification was local on Windows with CPython 3.11.9. The configured 
 
 ## Deferred and blocked work
 
-Multi-instance fan-out, attachment storage policy, reactions/search only against named journeys, and sustained load testing are genuine next-stage local engineering, ordered in the roadmap. The current single-process workflow and reliable committed-event integration are complete enough for controlled application evaluation; horizontal scale and capacity claims remain intentionally deferred until measured.
+Multi-instance storage plus fan-out, attachment storage policy, reactions only against named journeys, and sustained load testing are genuine next-stage engineering, ordered in the roadmap. The current single-process workflow, reliable committed-event integration, and hardened container profile are complete enough for controlled application evaluation; horizontal scale and capacity claims remain intentionally deferred until measured.
 
 Public package publication, hosted deployment, domains, credentials, signing, and pricing remain owner-controlled. No external accounts, infrastructure, releases, or spending were created as part of the local productization work.
 

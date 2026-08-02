@@ -113,6 +113,6 @@ When using a token, connect without `?username=` because the server derives iden
 - `507 webhook_capacity_reached`: the optional delivery outbox contains only pending rows at its cap; restore the receiver so automatic attempts drain those rows, or raise the cap with matching disk capacity. After correcting a terminal failure, retry that specific row through `/v1/admin/webhook-deliveries/{delivery_id}/retry`.
 - CLI refuses a public bind: configure an API key or token signing secret, or bind to loopback. The insecure override is only for isolated development networks.
 
-## Upgrading to 0.10
+## Upgrading to 0.11
 
-Version 0.10 continues to use SQLite schema 5. Upgrading from v0.9 requires no database migration; older supported schemas migrate in place while preserving rooms, messages, lifecycle state, moderation controls, read state, and audit records. Take an integrity-checked backup first with `samsarix-chat database backup backups/pre-0.10.db`, then start v0.10. See [Data lifecycle operations](OPERATIONS.md) for migration, verification, and rollback details; configure [Reliable application webhooks](WEBHOOKS.md) only after the receiver verifies signatures and deduplicates IDs.
+Version 0.11 continues to use SQLite schema 5. Upgrading from v0.10 requires no database migration; older supported schemas migrate in place while preserving rooms, messages, lifecycle state, moderation controls, read state, and audit records. Take an integrity-checked backup first with `samsarix-chat database backup backups/pre-0.11.db`, then start v0.11. See [Data lifecycle operations](OPERATIONS.md) for migration, verification, and rollback details; use [Container deployment](CONTAINER_DEPLOYMENT.md) for the new single-replica image and mounted-secret workflow.

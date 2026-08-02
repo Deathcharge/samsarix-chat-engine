@@ -2,6 +2,27 @@
 
 This project follows semantic versioning while it is in alpha: minor versions may add or revise public contracts, and those changes are called out here.
 
+## 0.11.0 — 2026-08-02
+
+### Added
+
+- Multi-stage Python 3.14 slim container image running one Samsarix process as numeric UID/GID 10001.
+- Hardened single-replica Compose profile with a read-only root filesystem, dropped capabilities, no-new-privileges, bounded PIDs/tmpfs, local rotating logs, loopback port publishing, and a persistent SQLite volume.
+- `_FILE` alternatives for operator, token-signing, and current/previous webhook secrets, with strict single-line UTF-8 bounds and direct/file conflict rejection.
+- Container build, health, non-root/read-only, authenticated API, restart-persistence, and cleanup smoke in CI.
+- Container deployment, secret creation, reverse-proxy, backup, upgrade, rollback, and single-replica runbook.
+
+### Changed
+
+- Python distribution and service metadata advance to 0.11.0; the TypeScript client remains 0.3.0 because its public protocol surface is unchanged.
+- Measured multi-instance work moves to v0.12: research confirmed that a broker alone would not solve authoritative storage, lifecycle leadership, migration/restore, and distributed quota semantics.
+
+### Security and operations
+
+- Compose secrets are mounted as files instead of ordinary secret environment values; secret contents are never included in configuration errors.
+- The default published port remains host-loopback only. TLS, host firewalling, Docker-daemon security, backups, and patching remain operator responsibilities.
+- SQLite schema remains version 5. Exactly one container/process/replica is supported against a volume.
+
 ## 0.10.0 — 2026-08-02
 
 ### Added
