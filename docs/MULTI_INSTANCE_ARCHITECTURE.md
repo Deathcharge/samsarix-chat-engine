@@ -10,6 +10,8 @@ The supported multi-instance topology will use PostgreSQL as both the authoritat
 
 PostgreSQL `LISTEN`/`NOTIFY` will be a low-latency wake-up hint only. Every client-visible realtime event will first be inserted into a bounded, ordered database event log in the same transaction as the state change. Each service instance reads committed rows from its own durable cursor. A listener reconnect, notification-queue loss, or process pause therefore causes polling/replay rather than silent event loss.
 
+The initial event-log implementation serializes sequence allocation with a transaction-scoped advisory lock. PostgreSQL identity values alone are not commit ordered: without this lock, a later sequence could commit and be acknowledged before an earlier transaction becomes visible. Event append must remain the final lock-taking phase of a domain mutation. Sustained-load acceptance tests will determine whether this intentionally simple global sequencer is sufficient or must be partitioned without weakening cursor correctness.
+
 No Redis dependency is planned for the first supported topology. Redis Pub/Sub is at-most-once, while Streams introduce a second durable system whose commit cannot be atomic with the authoritative database without an additional outbox relay. PostgreSQL already supplies transactions, row locks, advisory locks, `SKIP LOCKED`, and commit-coupled notifications needed by this product's current scale boundary.
 
 ## Why multi-process SQLite is rejected
