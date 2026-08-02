@@ -20,6 +20,7 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 ### Security and operations
 
 - Compose secrets are mounted as files instead of ordinary secret environment values; secret contents are never included in configuration errors.
+- First-party GitHub Actions are pinned to reviewed immutable commit SHAs.
 - The default published port remains host-loopback only. TLS, host firewalling, Docker-daemon security, backups, and patching remain operator responsibilities.
 - SQLite schema remains version 5. Exactly one container/process/replica is supported against a volume.
 
