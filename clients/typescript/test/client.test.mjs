@@ -123,6 +123,29 @@ test("read-state methods preserve the signed-subject workflow", async () => {
   assert.equal(requests[3].init.method, "DELETE");
 });
 
+test("message search encodes normalized queries and pagination", async () => {
+  const requests = [];
+  const page = { items: [], next_before: null };
+  const client = new SamsarixChatClient({
+    baseUrl: "https://chat.example",
+    credential: { token: "support-token" },
+    fetch: async (url, init) => {
+      requests.push({ url: String(url), init });
+      return jsonResponse(page);
+    },
+  });
+
+  assert.deepEqual(
+    await client.searchMessages("support/eu", "  ＰＡＹＭＥＮＴ & café  ", { limit: 25, before: "message-9" }),
+    page,
+  );
+  const url = new URL(requests[0].url);
+  assert.equal(url.pathname, "/v1/rooms/support%2Feu/messages/search");
+  assert.equal(url.searchParams.get("q"), "PAYMENT & café");
+  assert.equal(url.searchParams.get("limit"), "25");
+  assert.equal(url.searchParams.get("before"), "message-9");
+});
+
 test("room exports preserve the streaming response for operator-controlled consumption", async () => {
   const requests = [];
   const client = new SamsarixChatClient({
@@ -174,6 +197,8 @@ test("list limits and credential shapes fail before transport", async () => {
   });
   await assert.rejects(client.listRooms(101), RangeError);
   await assert.rejects(client.listMessages("general", { limit: 0 }), RangeError);
+  await assert.rejects(client.searchMessages("general", " "), RangeError);
+  await assert.rejects(client.searchMessages("general", "valid", { limit: 101 }), RangeError);
 
   const invalid = new SamsarixChatClient({
     baseUrl: "https://chat.example",

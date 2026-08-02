@@ -1,6 +1,6 @@
 # API reference
 
-The canonical machine-readable contract is generated at `/openapi.json`; interactive documentation is at `/docs`. This document explains the stable v0.9 behavior that OpenAPI does not fully describe, especially read state, streaming export, durable webhooks, and WebSockets.
+The canonical machine-readable contract is generated at `/openapi.json`; interactive documentation is at `/docs`. This document explains the stable v0.10 behavior that OpenAPI does not fully describe, especially search, read state, streaming export, durable webhooks, and WebSockets.
 
 ## Authentication
 
@@ -96,6 +96,16 @@ Returns messages in chronological order:
 
 Pages contain the newest matching messages. Message objects include nullable `edited_at` and `deleted_at`; a deleted message has empty `content`. When `next_before` is non-null, pass it as `before` to fetch the next older page. An unknown or cross-room cursor returns `400 invalid_cursor`.
 
+### `GET /v1/rooms/{room_id}/messages/search?q={query}&limit=50&before={message_id}`
+
+Requires `room:read` for the target room and returns the same chronological `MessagePage` shape as history. `q` must contain 2–100 characters after trimming and Unicode NFKC/casefold normalization. Matching is a case-insensitive normalized substring of current message `content`; sender names are not searched. Deleted messages are excluded, edits take effect immediately, and age/count retention removes results naturally.
+
+Pages contain the newest matches in chronological order. The cursor may be any current or tombstoned message in the same room and preserves the normal `(created_at, id)` boundary; an unknown or cross-room cursor returns `400 invalid_cursor`. There is no global or cross-room search, fuzzy matching, relevance rank, highlight markup, or historical-version index.
+
+Each instance allows `SAMSARIX_CHAT_SEARCHES_PER_MINUTE` searches per signed subject, falling back to the operator/local client address, independently of message and typing limits. Excess returns `429 search_rate_limit_exceeded` with `Retry-After: 60`. Work is bounded by `SAMSARIX_CHAT_MAX_STORED_MESSAGES_PER_ROOM`; operators should lower that cap or search allowance when room histories or concurrent query volume make linear scans unsuitable.
+
+Because `q` is a GET query parameter, it may appear in ordinary reverse-proxy access logs. Do not search with credentials or secrets, and configure the deployment's log collection and retention for the same sensitivity as room content.
+
 ### `GET /v1/rooms/{room_id}/read-state`
 
 Signed application users with `room:read` receive their current room cursor and a count derived from committed messages:
@@ -169,7 +179,7 @@ HTTP errors use a stable envelope:
 }
 ```
 
-Validation failures use `invalid_request` and include field locations, messages, and types without echoing submitted values. Rate limits return 429 with `Retry-After: 60`. Unexpected SQLite failures return `503 storage_unavailable` without internal details. If the configured webhook outbox contains only pending rows at its hard cap, the originating message/moderation change returns `507 webhook_capacity_reached` and its transaction is rolled back.
+Validation failures use `invalid_request` and include field locations, messages, and types without echoing submitted values. A query outside the normalized search bounds returns `invalid_search_query`. Rate limits return 429 with `Retry-After: 60`. Unexpected SQLite failures return `503 storage_unavailable` without internal details. If the configured webhook outbox contains only pending rows at its hard cap, the originating message/moderation change returns `507 webhook_capacity_reached` and its transaction is rolled back.
 
 HTTP request bodies are byte-bounded in addition to field validation. The derived limit accommodates the configured maximum message even when Unicode is JSON-escaped; oversized bodies return `413 request_too_large` before their contents are retained for validation.
 
@@ -251,4 +261,4 @@ Message create/update/delete events are emitted only after SQLite commits the co
 
 When configured, selected application webhook rows commit atomically with message/moderation state and deliver later with at-least-once semantics. Retries and manual replay keep the same `webhook-id`; each attempt gets a new signed timestamp. Delivery can be duplicated or reordered, so receivers validate the Standard Webhooks signature/timestamp and durably deduplicate IDs before side effects. See [Reliable application webhooks](WEBHOOKS.md) for the exact envelope, verification procedure, retry schedule, rotation, network policy, and recovery runbook.
 
-Multi-worker or multi-host fan-out is not implemented in v0.9; lifecycle, webhook worker, and ban teardown are deterministic only within the supported single process. The checked-in [TypeScript client](../clients/typescript/README.md) implements the reconnect recovery sequence for browser and Node integrations.
+Multi-worker or multi-host fan-out is not implemented in v0.10; lifecycle, webhook worker, and ban teardown are deterministic only within the supported single process. The checked-in [TypeScript client](../clients/typescript/README.md) implements the reconnect recovery sequence for browser and Node integrations.

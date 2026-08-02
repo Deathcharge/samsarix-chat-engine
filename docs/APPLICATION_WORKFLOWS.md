@@ -1,6 +1,6 @@
 # Application workflows
 
-Samsarix Chat Engine 0.8 adds the small amount of application state needed to build a credible one-to-one or small-team support inbox: per-user read cursors, current unread counts, and ephemeral typing signals. The host application still owns accounts, customer records, assignment, notifications, and the user interface.
+Samsarix Chat Engine 0.10 provides the small amount of application state needed to build a credible one-to-one or small-team support inbox: per-user read cursors, current unread counts, ephemeral typing signals, and authorized per-case message retrieval. The host application still owns accounts, customer records, assignment, notifications, and the user interface.
 
 ## Support-room journey
 
@@ -16,6 +16,7 @@ const chat = new SamsarixChatClient({
 
 const before = await chat.getReadState("support-case-42");
 const messages = await chat.listMessages("support-case-42");
+const paymentContext = await chat.searchMessages("support-case-42", "payment failed");
 await chat.markRead("support-case-42", messages.items.at(-1)?.id);
 
 const session = chat.roomSession("support-case-42");
@@ -65,7 +66,13 @@ On PowerShell, assign the two command results to `$env:SAMSARIX_CHAT_CUSTOMER_TO
 - Each room is capped by `SAMSARIX_CHAT_MAX_READ_STATES_PER_ROOM`. Users can erase their own row, and deleting a room cascades its read-state rows.
 - Read-state changes are intentionally excluded from the administrative audit stream and room-message export: they are high-volume, user-specific interaction metadata rather than administrative actions.
 
-The returned `unread_count` is computed at request time. Version 0.8 does not push unread-count events or aggregate counts across rooms; clients should refresh after reconnect, message activity, or marking a room read.
+The returned `unread_count` is computed at request time. Samsarix does not push unread-count events or aggregate counts across rooms; clients should refresh after reconnect, message activity, or marking a room read.
+
+## Support-case search contract
+
+Agents and customers use the same `room:read` token boundary as history; a token for one case cannot search another. Search covers only current, retained message content in that room, so an edit removes the old wording and a tombstone removes the body from results. It performs Unicode-normalized substring matching without relevance ranking or highlights, and returns the normal chronological cursor page.
+
+The scan is bounded by `SAMSARIX_CHAT_MAX_STORED_MESSAGES_PER_ROOM` and independently limited by `SAMSARIX_CHAT_SEARCHES_PER_MINUTE`. This is suitable for finding an order number, error phrase, or prior answer inside a bounded support case. Because a GET query can appear in reverse-proxy access logs, operators should govern those logs like room content and users should not search for credentials or secrets. A product needing fuzzy relevance, global discovery, analytics, or very large histories should export authorized events to a separately governed search system instead of treating this endpoint as an index.
 
 ## Typing contract
 
@@ -85,4 +92,4 @@ For offline assignment, notifications, CRM synchronization, or case timelines, v
 
 The host application should use opaque, stable internal account IDs as token subjects rather than email addresses. Read timestamps and typing activity can reveal engagement patterns, so expose them only to participants with a legitimate room relationship and document their use in the host product's privacy notice. Samsarix deliberately does not provide per-message read receipts, cross-room user activity, or durable typing history.
 
-This shape follows common chat expectations without copying an entire hosted platform: Stream documents initial and event-driven unread state, while Sendbird documents channel-scoped unread counts, typing indicators, and the need to restrict relational user data to relevant channel members. See the [Stream unread guide](https://getstream.io/chat/docs/javascript/unread/), [Sendbird channel overview](https://sendbird.com/docs/chat/sdk/v4/javascript/channel/overview-channel), and [Sendbird message overview](https://sendbird.com/docs/chat/sdk/v4/javascript/message/overview-message).
+This shape follows common chat expectations without copying an entire hosted platform: Stream documents initial and event-driven unread state and channel-filtered search, while Sendbird documents channel-scoped unread counts, typing indicators, message search, and the need to restrict relational user data to relevant channel members. See the [Stream unread guide](https://getstream.io/chat/docs/javascript/unread/), [Stream message search](https://getstream.io/chat/docs/php/search/), [Sendbird channel overview](https://sendbird.com/docs/chat/sdk/v4/javascript/channel/overview-channel), and [Sendbird message-search overview](https://docs.sendbird.com/docs/chat/platform-api/v3/message/message-search/message-search-overview).

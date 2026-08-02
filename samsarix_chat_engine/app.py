@@ -55,6 +55,7 @@ from .store import (
     DatabaseLifecycleLock,
     InvalidAuditCursorError,
     InvalidCursorError,
+    InvalidSearchQueryError,
     InvalidWebhookCursorError,
     MemberBannedError,
     MemberMutedError,
@@ -72,6 +73,7 @@ from .store import (
     WebhookCapacityError,
     WebhookDeliveryNotFoundError,
     WebhookPayloadUnavailableError,
+    normalize_search_query,
 )
 from .webhooks import WebhookDispatcher
 from .websocket_manager import ConnectionManager
@@ -394,6 +396,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         send_timeout=resolved.websocket_send_timeout_seconds,
     )
     limiter = MessageRateLimiter(resolved.messages_per_minute)
+    search_limiter = MessageRateLimiter(resolved.searches_per_minute)
     typing_limiter = MessageRateLimiter(resolved.typing_events_per_minute)
     token_service = (
         AccessTokenService(
@@ -430,6 +433,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             application.state.store = store
             application.state.connections = manager
             application.state.message_limiter = limiter
+            application.state.search_limiter = search_limiter
             application.state.typing_limiter = typing_limiter
             application.state.token_service = token_service
             application.state.webhook_dispatcher = webhook_dispatcher
@@ -448,7 +452,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     application = FastAPI(
         title="Samsarix Chat Engine",
-        version="0.9.0",
+        version="0.10.0",
         summary="A small persisted room-chat service with WebSocket delivery",
         lifespan=lifespan,
     )
@@ -456,6 +460,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.store = store
     application.state.connections = manager
     application.state.message_limiter = limiter
+    application.state.search_limiter = search_limiter
     application.state.typing_limiter = typing_limiter
     application.state.token_service = token_service
     application.state.webhook_dispatcher = webhook_dispatcher
@@ -519,7 +524,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def index() -> dict[str, Any]:
         return {
             "name": "Samsarix Chat Engine",
-            "version": "0.9.0",
+            "version": "0.10.0",
             "status": "ok",
             "docs": "/docs",
             "health": "/healthz",
@@ -655,6 +660,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await _enforce_member_access(store, principal, room_id, write=False)
         try:
             items, next_before = await store.list_messages(room_id, limit=limit, before=before)
+        except RoomNotFoundError as exc:
+            raise APIError(404, "room_not_found", "Room not found") from exc
+        except InvalidCursorError as exc:
+            raise APIError(400, "invalid_cursor", "The message cursor is not valid for this room") from exc
+        return MessagePage(items=items, next_before=next_before)
+
+    @router.get("/rooms/{room_id}/messages/search", response_model=MessagePage, tags=["messages"])
+    async def search_messages(
+        request: Request,
+        room_id: str,
+        principal: PrincipalDependency,
+        q: str = Query(min_length=1, max_length=100),
+        limit: int = Query(default=50, ge=1, le=100),
+        before: str | None = Query(default=None, min_length=1, max_length=128),
+    ) -> MessagePage:
+        _authorize(principal, "room:read", room_id)
+        await _enforce_member_access(store, principal, room_id, write=False)
+        try:
+            normalized_query = normalize_search_query(q)
+        except InvalidSearchQueryError as exc:
+            raise APIError(
+                422,
+                "invalid_search_query",
+                "Search queries must contain 2 to 100 normalized characters",
+            ) from exc
+        rate_subject = principal.subject or _client_key(request)
+        if not await search_limiter.allow(f"search:{rate_subject}"):
+            raise APIError(
+                429,
+                "search_rate_limit_exceeded",
+                "Message search rate limit exceeded",
+                headers={"Retry-After": "60"},
+            )
+        try:
+            items, next_before = await store.search_messages(room_id, normalized_query, limit=limit, before=before)
         except RoomNotFoundError as exc:
             raise APIError(404, "room_not_found", "Room not found") from exc
         except InvalidCursorError as exc:

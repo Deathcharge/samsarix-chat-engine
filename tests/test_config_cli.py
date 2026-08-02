@@ -18,7 +18,7 @@ from samsarix_chat_engine.config import ConfigurationError, Settings
 
 
 def test_public_api_and_parser_help() -> None:
-    assert samsarix_chat_engine.__version__ == "0.9.0"
+    assert samsarix_chat_engine.__version__ == "0.10.0"
     assert callable(samsarix_chat_engine.create_app)
     help_text = build_parser().format_help()
     assert "serve" in help_text
@@ -33,6 +33,7 @@ def test_settings_from_env_and_validation(monkeypatch: pytest.MonkeyPatch, tmp_p
     monkeypatch.setenv("SAMSARIX_CHAT_MAX_AUDIT_EVENTS", "500")
     monkeypatch.setenv("SAMSARIX_CHAT_MAX_READ_STATES_PER_ROOM", "250")
     monkeypatch.setenv("SAMSARIX_CHAT_TYPING_EVENTS_PER_MINUTE", "45")
+    monkeypatch.setenv("SAMSARIX_CHAT_SEARCHES_PER_MINUTE", "17")
     monkeypatch.setenv("SAMSARIX_CHAT_TYPING_TIMEOUT", "6.5")
     webhook_secret = "whsec_" + base64.b64encode(b"configuration-webhook-secret-32!!").decode("ascii")
     monkeypatch.setenv("SAMSARIX_CHAT_WEBHOOK_URL", "https://hooks.example.com/chat")
@@ -51,6 +52,7 @@ def test_settings_from_env_and_validation(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert settings.max_audit_events == 500
     assert settings.max_read_states_per_room == 250
     assert settings.typing_events_per_minute == 45
+    assert settings.searches_per_minute == 17
     assert settings.typing_timeout_seconds == 6.5
     assert settings.webhook_url == "https://hooks.example.com/chat"
     assert settings.webhook_signing_secret == webhook_secret
@@ -75,6 +77,8 @@ def test_settings_from_env_and_validation(monkeypatch: pytest.MonkeyPatch, tmp_p
         Settings(max_read_states_per_room=0)
     with pytest.raises(ConfigurationError, match="typing_timeout_seconds"):
         Settings(typing_timeout_seconds=31)
+    with pytest.raises(ConfigurationError, match="searches_per_minute"):
+        Settings(searches_per_minute=0)
     monkeypatch.setenv("SAMSARIX_CHAT_MESSAGE_RETENTION_DAYS", "not-a-number")
     with pytest.raises(ConfigurationError, match="must be an integer"):
         Settings.from_env()
@@ -172,7 +176,7 @@ def test_legacy_import_and_environment_aliases(monkeypatch: pytest.MonkeyPatch, 
     with pytest.warns(DeprecationWarning, match="import samsarix_chat_engine"):
         legacy_package = importlib.import_module("helix_chat_engine")
     assert legacy_package.Settings is Settings
-    assert legacy_package.__version__ == "0.9.0"
+    assert legacy_package.__version__ == "0.10.0"
     assert importlib.import_module("helix_chat_engine.app").create_app is samsarix_chat_engine.create_app
     assert importlib.import_module("helix_chat_engine.cli").main is main
     assert importlib.import_module("helix_chat_engine.config").Settings is Settings

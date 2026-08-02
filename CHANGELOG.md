@@ -2,6 +2,26 @@
 
 This project follows semantic versioning while it is in alpha: minor versions may add or revise public contracts, and those changes are called out here.
 
+## 0.10.0 — 2026-08-02
+
+### Added
+
+- Authorized `GET /v1/rooms/{room_id}/messages/search` retrieval for the current retained content of one room.
+- Unicode NFKC/casefold substring matching, chronological cursor pagination, and immediate edit/delete convergence.
+- An independent `SAMSARIX_CHAT_SEARCHES_PER_MINUTE` abuse limit keyed by signed subject or operator/local client address.
+- `searchMessages` in `@samsarix/chat-client` plus backend, authorization, pagination, Unicode, mutation, and SDK tests.
+
+### Changed
+
+- Python distribution and service metadata advance to 0.10.0; `@samsarix/chat-client` advances to 0.3.0.
+- The roadmap moves measured multi-instance work to v0.11 so a named support retrieval need lands without premature scale claims.
+
+### Security, privacy, and operating cost
+
+- Search requires the existing room-scoped `room:read` authorization and moderation checks; there is no cross-room or global endpoint.
+- Deleted bodies are excluded, edits replace prior searchable text immediately, and retention naturally removes content from results.
+- Query work is bounded by the configured per-room retained-message cap. Search is normalized substring matching, not fuzzy/full-text ranking, and SQLite schema 5 is unchanged.
+
 ## 0.9.0 — 2026-08-02
 
 ### Added
