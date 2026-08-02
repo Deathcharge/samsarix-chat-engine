@@ -721,12 +721,17 @@ class PostgresChatStore:
             await connection.execute(
                 """
                 UPDATE public.samsarix_realtime_events
-                SET payload = jsonb_set(payload, '{message,content}', %s, false)
+                SET payload = jsonb_set(
+                    payload,
+                    ARRAY['message', 'content'],
+                    to_jsonb(''::text),
+                    false
+                )
                 WHERE room_id = %s
                   AND event_type LIKE 'message.%'
-                  AND payload #>> '{message,id}' = ANY(%s)
+                  AND payload #>> '{message,id}' = ANY(%s::text[])
                 """,
-                (Jsonb(""), room_id, message_ids),
+                (room_id, message_ids),
             )
 
     async def _insert_audit(

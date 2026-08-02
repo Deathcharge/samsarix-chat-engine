@@ -110,9 +110,12 @@ class PostgresFoundation:
             try:
                 await self._pool.open(wait=True, timeout=self._pool_timeout_seconds)
                 await self._initialize_schema()
-            except (psycopg.Error, PoolTimeout, OSError):
+            except (psycopg.OperationalError, PoolTimeout, OSError):
                 await self._pool.close()
                 raise PostgresUnavailableError("PostgreSQL storage is unavailable") from None
+            except psycopg.DatabaseError as exc:
+                await self._pool.close()
+                raise PostgresFoundationError(_safe_database_error("schema initialization", exc)) from None
             except Exception:
                 await self._pool.close()
                 raise
@@ -135,8 +138,10 @@ class PostgresFoundation:
                 async with connection.transaction():
                     await connection.execute("SET LOCAL search_path = pg_catalog, public")
                     yield connection
-        except (psycopg.Error, PoolTimeout, OSError):
+        except (psycopg.OperationalError, PoolTimeout, OSError):
             raise PostgresUnavailableError("PostgreSQL storage is unavailable") from None
+        except psycopg.DatabaseError as exc:
+            raise PostgresFoundationError(_safe_database_error("operation", exc)) from None
 
     async def schema_version(self) -> int:
         """Return the initialized PostgreSQL schema version."""
@@ -501,3 +506,8 @@ def _validate_instance(instance_id: str, lease_seconds: int) -> None:
 def _validate_instance_id(instance_id: str) -> None:
     if not _INSTANCE_ID_PATTERN.fullmatch(instance_id):
         raise ValueError("invalid instance ID")
+
+
+def _safe_database_error(operation: str, error: psycopg.DatabaseError) -> str:
+    sqlstate = error.sqlstate or "unknown"
+    return f"PostgreSQL {operation} failed (SQLSTATE {sqlstate})"

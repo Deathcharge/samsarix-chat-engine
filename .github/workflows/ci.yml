@@ -71,6 +71,22 @@ jobs:
 
   quality:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18.4-bookworm
+        env:
+          POSTGRES_DB: samsarix_test
+          POSTGRES_PASSWORD: postgres-ci-password
+          POSTGRES_USER: samsarix_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U samsarix_ci -d samsarix_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      SAMSARIX_TEST_POSTGRES_URL: postgresql://samsarix_ci:postgres-ci-password@127.0.0.1:5432/samsarix_test
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
