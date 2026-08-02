@@ -11,6 +11,7 @@ import type {
   MemberModerationUpdate,
   MessageCreate,
   MessagePage,
+  ReadState,
   Room,
   RoomCreate,
   RoomSessionOptions,
@@ -121,6 +122,21 @@ export class SamsarixChatClient {
       body: payload,
       ...(idempotencyKey === undefined ? {} : { headers: { "Idempotency-Key": idempotencyKey } }),
     });
+  }
+
+  async getReadState(roomId: string): Promise<ReadState> {
+    return this.request<ReadState>(`/v1/rooms/${encodeURIComponent(roomId)}/read-state`);
+  }
+
+  async markRead(roomId: string, messageId?: string): Promise<ReadState> {
+    return this.request<ReadState>(`/v1/rooms/${encodeURIComponent(roomId)}/read-state`, {
+      method: "PUT",
+      body: messageId === undefined ? {} : { message_id: messageId },
+    });
+  }
+
+  async clearReadState(roomId: string): Promise<void> {
+    await this.request<void>(`/v1/rooms/${encodeURIComponent(roomId)}/read-state`, { method: "DELETE" });
   }
 
   async updateMessage(roomId: string, messageId: string, content: string): Promise<ChatMessage> {

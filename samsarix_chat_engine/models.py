@@ -94,6 +94,22 @@ class MessagePage(APIModel):
     next_before: str | None
 
 
+class ReadStateUpdate(APIModel):
+    """Advance the signed caller's read cursor through a message or the latest room state."""
+
+    message_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class ReadState(APIModel):
+    """One signed subject's monotonic room cursor and derived unread count."""
+
+    room_id: str
+    subject: str
+    last_read_message_id: str | None
+    last_read_at: datetime | None
+    unread_count: int
+
+
 class AuditEvent(APIModel):
     """Administrative event containing metadata but no message body or credential."""
 
@@ -153,6 +169,13 @@ class WebSocketPing(APIModel):
     """Client heartbeat command."""
 
     type: Literal["ping"]
+
+
+class WebSocketTyping(APIModel):
+    """Ephemeral typing state that automatically expires on the server."""
+
+    type: Literal["typing"]
+    active: bool
 
 
 class WebSocketAuth(APIModel):

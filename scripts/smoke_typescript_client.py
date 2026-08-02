@@ -94,6 +94,11 @@ def main() -> int:
                 api_key=api_key,
                 body={"id": "sdk-room", "name": "SDK Room"},
             )
+            _request(
+                base_url + "/v1/rooms/sdk-room/messages",
+                api_key=api_key,
+                body={"sender": "Operator", "content": "Unread SDK seed"},
+            )
             token = subprocess.run(  # noqa: S603 - fixed interpreter/module and controlled arguments
                 [
                     sys.executable,
@@ -125,6 +130,15 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 server.kill()
                 server.wait(timeout=5)
+            lock_path = database.with_name(f"{database.name}.lock")
+            for _ in range(50):
+                try:
+                    lock_path.unlink(missing_ok=True)
+                    break
+                except PermissionError:
+                    time.sleep(0.1)
+            else:
+                raise RuntimeError("Samsarix server did not release its database lifecycle lock")
     return 0
 
 

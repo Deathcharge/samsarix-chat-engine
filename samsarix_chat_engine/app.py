@@ -37,6 +37,8 @@ from .models import (
     MessageCreate,
     MessagePage,
     MessageUpdate,
+    ReadState,
+    ReadStateUpdate,
     RetentionResult,
     Room,
     RoomCreate,
@@ -44,6 +46,7 @@ from .models import (
     WebSocketAuth,
     WebSocketMessage,
     WebSocketPing,
+    WebSocketTyping,
 )
 from .store import (
     ChatStore,
@@ -55,6 +58,7 @@ from .store import (
     MessageDeletedError,
     MessageNotFoundError,
     MessageOwnershipError,
+    ReadStateCapacityError,
     RetentionNotConfiguredError,
     RoomAlreadyExistsError,
     RoomArchivedError,
@@ -66,7 +70,9 @@ from .store import (
 from .websocket_manager import ConnectionManager
 
 logger = logging.getLogger(__name__)
-_WS_COMMAND: TypeAdapter[WebSocketMessage | WebSocketPing] = TypeAdapter(WebSocketMessage | WebSocketPing)
+_WS_COMMAND: TypeAdapter[WebSocketMessage | WebSocketPing | WebSocketTyping] = TypeAdapter(
+    WebSocketMessage | WebSocketPing | WebSocketTyping
+)
 _WS_AUTH: TypeAdapter[WebSocketAuth] = TypeAdapter(WebSocketAuth)
 _API_KEY_SCHEME = APIKeyHeader(name="X-API-Key", scheme_name="OperatorKey", auto_error=False)
 _BEARER_SCHEME = HTTPBearer(scheme_name="AccessToken", auto_error=False)
@@ -230,6 +236,12 @@ def _authorize(principal: Principal, permission: Permission, room_id: str | None
         raise APIError(403, "authorization_denied", "This credential does not grant the required access")
 
 
+def _stable_subject(principal: Principal) -> str:
+    if principal.subject is None:
+        raise APIError(403, "stable_subject_required", "A signed access token is required for persistent read state")
+    return principal.subject
+
+
 async def _enforce_member_access(
     store: ChatStore,
     principal: Principal,
@@ -361,6 +373,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         max_rooms=resolved.max_rooms,
         max_stored_messages=resolved.max_stored_messages,
         max_stored_messages_per_room=resolved.max_stored_messages_per_room,
+        max_read_states_per_room=resolved.max_read_states_per_room,
         message_retention_days=resolved.message_retention_days,
         max_audit_events=resolved.max_audit_events,
     )
@@ -371,6 +384,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         send_timeout=resolved.websocket_send_timeout_seconds,
     )
     limiter = MessageRateLimiter(resolved.messages_per_minute)
+    typing_limiter = MessageRateLimiter(resolved.typing_events_per_minute)
     token_service = (
         AccessTokenService(
             resolved.token_signing_secret,
@@ -392,6 +406,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             application.state.store = store
             application.state.connections = manager
             application.state.message_limiter = limiter
+            application.state.typing_limiter = typing_limiter
             application.state.token_service = token_service
             yield
         finally:
@@ -402,7 +417,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     application = FastAPI(
         title="Samsarix Chat Engine",
-        version="0.7.0",
+        version="0.8.0",
         summary="A small persisted room-chat service with WebSocket delivery",
         lifespan=lifespan,
     )
@@ -410,6 +425,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.store = store
     application.state.connections = manager
     application.state.message_limiter = limiter
+    application.state.typing_limiter = typing_limiter
     application.state.token_service = token_service
 
     application.add_middleware(
@@ -422,7 +438,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             CORSMiddleware,
             allow_origins=list(resolved.allowed_origins),
             allow_credentials=False,
-            allow_methods=["GET", "POST", "PATCH", "DELETE"],
+            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
             allow_headers=[
                 "Authorization",
                 "Content-Type",
@@ -471,7 +487,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def index() -> dict[str, Any]:
         return {
             "name": "Samsarix Chat Engine",
-            "version": "0.7.0",
+            "version": "0.8.0",
             "status": "ok",
             "docs": "/docs",
             "health": "/healthz",
@@ -613,6 +629,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise APIError(400, "invalid_cursor", "The message cursor is not valid for this room") from exc
         return MessagePage(items=items, next_before=next_before)
 
+    @router.get("/rooms/{room_id}/read-state", response_model=ReadState, tags=["messages"])
+    async def get_read_state(room_id: str, principal: PrincipalDependency) -> ReadState:
+        _authorize(principal, "room:read", room_id)
+        await _enforce_member_access(store, principal, room_id, write=False)
+        subject = _stable_subject(principal)
+        try:
+            return await store.get_read_state(room_id, subject)
+        except RoomNotFoundError as exc:
+            raise APIError(404, "room_not_found", "Room not found") from exc
+
+    @router.put("/rooms/{room_id}/read-state", response_model=ReadState, tags=["messages"])
+    async def mark_read(room_id: str, payload: ReadStateUpdate, principal: PrincipalDependency) -> ReadState:
+        _authorize(principal, "room:read", room_id)
+        await _enforce_member_access(store, principal, room_id, write=False)
+        subject = _stable_subject(principal)
+        try:
+            return await store.mark_read(room_id, subject, payload.message_id)
+        except RoomNotFoundError as exc:
+            raise APIError(404, "room_not_found", "Room not found") from exc
+        except MessageNotFoundError as exc:
+            raise APIError(404, "message_not_found", "Message not found in this room") from exc
+        except ReadStateCapacityError as exc:
+            raise APIError(507, "read_state_capacity_reached", "The room read-state capacity has been reached") from exc
+
+    @router.delete("/rooms/{room_id}/read-state", status_code=204, tags=["messages"])
+    async def clear_read_state(room_id: str, principal: PrincipalDependency) -> Response:
+        _authorize(principal, "room:read", room_id)
+        await _enforce_member_access(store, principal, room_id, write=False)
+        subject = _stable_subject(principal)
+        try:
+            await store.clear_read_state(room_id, subject)
+        except RoomNotFoundError as exc:
+            raise APIError(404, "room_not_found", "Room not found") from exc
+        return Response(status_code=204)
+
     @router.post("/rooms/{room_id}/messages", response_model=Message, tags=["messages"])
     async def create_message(
         room_id: str,
@@ -659,6 +710,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 client_message_id=idempotency_key or payload.client_message_id,
                 allow_frozen=principal.is_admin,
                 member_subject=None if principal.is_admin else principal.subject,
+                author_subject=principal.subject,
             )
         except RoomNotFoundError as exc:
             raise APIError(404, "room_not_found", "Room not found") from exc
@@ -935,6 +987,50 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             exclude=websocket,
         )
 
+        typing_active = False
+        typing_deadline = 0.0
+        typing_task: asyncio.Task[None] | None = None
+
+        async def expire_typing() -> None:
+            nonlocal typing_active, typing_task
+            try:
+                while typing_active:
+                    remaining = typing_deadline - time.monotonic()
+                    if remaining > 0:
+                        await asyncio.sleep(remaining)
+                        continue
+                    typing_active = False
+                    await manager.broadcast(
+                        room_id,
+                        _event("typing.stopped", username=username),
+                        exclude=websocket,
+                    )
+            except asyncio.CancelledError:
+                pass
+            finally:
+                typing_task = None
+
+        async def set_typing(active: bool) -> None:
+            nonlocal typing_active, typing_deadline, typing_task
+            if active:
+                typing_deadline = time.monotonic() + resolved.typing_timeout_seconds
+                if not typing_active:
+                    typing_active = True
+                    await manager.broadcast(
+                        room_id,
+                        _event("typing.started", username=username, expires_in=resolved.typing_timeout_seconds),
+                        exclude=websocket,
+                    )
+                if typing_task is None:
+                    typing_task = asyncio.create_task(expire_typing())
+            elif typing_active:
+                typing_active = False
+                await manager.broadcast(
+                    room_id,
+                    _event("typing.stopped", username=username),
+                    exclude=websocket,
+                )
+
         invalid_commands = 0
         try:
             while True:
@@ -965,7 +1061,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     invalid_commands += 1
                     await manager.send(
                         websocket,
-                        _event("error", code="invalid_command", message="Expected a message or ping command"),
+                        _event("error", code="invalid_command", message="Expected a message, ping, or typing command"),
                     )
                     if invalid_commands >= 3:
                         await websocket.close(code=1008, reason="Too many invalid commands")
@@ -975,6 +1071,62 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 invalid_commands = 0
                 if isinstance(command, WebSocketPing):
                     await manager.send(websocket, _event("pong"))
+                    continue
+                if isinstance(command, WebSocketTyping):
+                    if not principal.allows("room:write", room_id):
+                        await manager.send(
+                            websocket,
+                            _event("error", code="authorization_denied", message="Typing signals are not allowed"),
+                        )
+                        continue
+                    current_room = await store.get_room(room_id)
+                    if current_room is None:
+                        await manager.send(websocket, _event("error", code="room_not_found", message="Room not found"))
+                        await websocket.close(code=4404, reason="Room not found")
+                        break
+                    if current_room.archived_at is not None:
+                        await manager.send(
+                            websocket,
+                            _event("error", code="room_archived", message="Archived rooms are read-only"),
+                        )
+                        await websocket.close(code=4409, reason="Room archived")
+                        break
+                    if current_room.frozen_at is not None and not principal.is_admin:
+                        await manager.send(
+                            websocket,
+                            _event(
+                                "error",
+                                code="room_frozen",
+                                message="Only administrators may send typing signals while the room is frozen",
+                            ),
+                        )
+                        continue
+                    moderation = (
+                        await store.get_member_moderation(room_id, principal.subject) if principal.subject else None
+                    )
+                    now = datetime.now(timezone.utc)
+                    if not principal.is_admin and moderation is not None:
+                        if moderation.banned_until is not None and moderation.banned_until > now:
+                            await manager.send(
+                                websocket,
+                                _event("error", code="room_banned", message="This account is banned from the room"),
+                            )
+                            await websocket.close(code=4403, reason="Room access revoked")
+                            break
+                        if moderation.muted_until is not None and moderation.muted_until > now:
+                            await manager.send(
+                                websocket,
+                                _event("error", code="room_muted", message="This account is muted in the room"),
+                            )
+                            continue
+                    rate_subject = principal.subject or (websocket.client.host if websocket.client else "unknown")
+                    if not await typing_limiter.allow(f"typing:{rate_subject}"):
+                        await manager.send(
+                            websocket,
+                            _event("error", code="typing_rate_limit_exceeded", message="Typing signal limit exceeded"),
+                        )
+                        continue
+                    await set_typing(command.active)
                     continue
                 if not principal.allows("room:write", room_id):
                     await manager.send(
@@ -1007,6 +1159,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         client_message_id=command.client_message_id,
                         allow_frozen=principal.is_admin,
                         member_subject=None if principal.is_admin else principal.subject,
+                        author_subject=principal.subject,
                     )
                 except (
                     MemberBannedError,
@@ -1029,6 +1182,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     message=message.model_dump(mode="json"),
                     idempotent_replay=not created,
                 )
+                await set_typing(False)
                 if created:
                     await manager.broadcast(room_id, message_event)
                 else:
@@ -1036,6 +1190,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except (WebSocketDisconnect, asyncio.CancelledError):
             pass
         finally:
+            if typing_task is not None:
+                typing_task.cancel()
+            if typing_active:
+                await manager.broadcast(room_id, _event("typing.stopped", username=username), exclude=websocket)
             metadata = await manager.unregister(websocket)
             if metadata:
                 await manager.broadcast(

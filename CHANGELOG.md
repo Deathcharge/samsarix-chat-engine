@@ -2,6 +2,26 @@
 
 This project follows semantic versioning while it is in alpha: minor versions may add or revise public contracts, and those changes are called out here.
 
+## 0.8.0 — 2026-08-01
+
+### Added
+
+- Signed-user, per-room read cursors with current unread counts and HTTP get/advance/self-clear operations.
+- Ephemeral WebSocket typing commands and transition events with independent rate limits and automatic expiry.
+- TypeScript client methods and strict event types for read state and typing.
+- A complete two-party support-room example and application-workflow integration guide.
+- SQLite schema v4 with bounded read-state storage, authenticated message-author metadata, and in-place migration.
+
+### Changed
+
+- Python distribution and service metadata advance to 0.8.0; `@samsarix/chat-client` advances to 0.2.0.
+- The application CORS contract permits `PUT` for monotonic read-cursor updates.
+
+### Security and privacy
+
+- Read state is available only to a stable signed subject, excludes self-authored and deleted messages, cannot regress, and can be erased by its owner.
+- Typing activity is transition-only, separately rate-limited, automatically cleared, and never persisted, exported, or audited.
+
 ## 0.7.0 — 2026-08-01
 
 ### Added

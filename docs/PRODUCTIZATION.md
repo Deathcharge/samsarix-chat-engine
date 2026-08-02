@@ -46,6 +46,8 @@ Samsarix Chat Engine is a self-hosted, single-instance room chat backend and emb
 - Keep identity ownership in the host application. v0.4 accepts a narrowly profiled signed assertion, derives sender identity from it, and enforces room/action authorization on every request and WebSocket publish.
 - Retain the shared API key only as an operator and compatibility credential. It is intentionally all-room and must not be distributed to ordinary browser clients.
 - Require exact non-local browser origins even for authenticated deployments; credentials do not remove cross-site WebSocket-hijacking risk.
+- Keep read state subject-scoped, monotonic, capacity-bounded, and self-erasable. Current unread counts exclude self-authored and deleted messages, while cursors survive ordinary message retention.
+- Keep typing signals ephemeral, transition-only, separately rate-limited, and automatically expired. They are not persistence or audit data and remain best-effort within one process.
 
 Current official product research checked on 2026-08-01 established the practical feature floor without changing the narrow product boundary: [Sendbird Chat](https://sendbird.com/docs/chat) documents channels, receipts, presence, reactions, files, threads, search, moderation, export, webhooks, and privacy controls; [Ably Chat](https://ably.com/chat) emphasizes support/community embeds plus rooms, presence, typing, reactions, edits, moderation, and receipts. [Centrifugo authorization](https://centrifugal.dev/docs/server/authentication) uses signed identities or application-proxy decisions and per-channel permissions, while its [recovery guidance](https://centrifugal.dev/docs/server/history_and_recovery) distinguishes broker recovery from the application's source of truth. These comparisons support the identity/authorization-first v0.4, the accountable data-lifecycle v0.5, conversation controls next, and broker work only after measured single-instance demand.
 
@@ -92,7 +94,7 @@ Deployment owners control login, membership decisions, TLS/proxying, operator an
 ### P2
 
 - [x] Add explicit room archive/reopen lifecycle state.
-- [ ] Add a small framework-neutral TypeScript protocol client.
+- [x] Add a small framework-neutral TypeScript protocol client.
 - [x] Add time-based retention in addition to count-based caps.
 - [ ] Add OpenTelemetry hooks only if operators demonstrate a need; keep telemetry off by default.
 - [ ] Add conditional HTTP caching/ETags for room lists if read load warrants it.
@@ -135,6 +137,24 @@ Version 0.5 closes the primary operational privacy gap for controlled single-ins
 Version 0.6 supplies the conversation-control layer needed by embedded support, education, private-community, and live-event products. Signed authors can edit or tombstone their own messages; administrators can moderate any message. Room freeze preserves connected readers while reserving writes for administrators. Relative mute and ban controls bind to stable token subjects, with mute preserving reads and ban immediately evicting matching live sockets. Current message state survives reconnect, and audit records only message IDs and moderation metadata. Schema versions 1 and 2 migrate in place to version 3. The design is grounded in the analogous primitives documented by [Sendbird](https://docs.sendbird.com/docs/chat/platform-api/v3/moderation/moderation-overview), [Discord](https://docs.discord.com/developers/resources/message), and [Ably](https://ably.com/docs/chat/rooms/messages).
 
 Version 0.7 reduces adoption friction with a checked-in, framework-neutral TypeScript client. It uses zero runtime dependencies, generated declarations, explicit ESM exports, injected web-standard transports, stable API errors, typed protocol events, first-message authentication, async credential refresh, and bounded reconnect state. The package shape follows [TypeScript's bundled-declaration guidance](https://www.typescriptlang.org/docs/handbook/declaration-files/publishing.html) and [Node's explicit-exports guidance](https://nodejs.org/api/packages.html); the reconnect observer surface reflects the connection states exposed by mature chat SDKs such as [Sendbird](https://sendbird.com/docs/chat/sdk/v4/javascript/event-handler/managing-connection-event-handlers/add-or-remove-a-connection-event-handler). The npm artifact is buildable and verified but remains unpublished until the owner chooses a package namespace/release gate.
+
+Version 0.8 turns those primitives into an explicit support-room workflow. Signed users receive a persistent, non-regressing per-room cursor and a current unread count that excludes their own and deleted messages. They can remove their own state, while a per-room cap bounds storage. WebSocket writers can emit transient typing transitions under an independent limiter; starts refresh an advertised server deadline and stops occur on explicit command, successful publish, disconnect, or timeout without persistence or audit. The TypeScript client covers both contracts, and a runnable two-party support example demonstrates customer-to-agent-to-customer read state. This shape is grounded in [Stream's unread-state model](https://getstream.io/chat/docs/javascript/unread/) and Sendbird's [channel](https://sendbird.com/docs/chat/sdk/v4/javascript/channel/overview-channel) and [message](https://sendbird.com/docs/chat/sdk/v4/javascript/message/overview-message) guidance. Signed outbound webhooks remain a separate v0.9 reliability milestone.
+
+Final v0.8 local verification on 2026-08-01 used Node 24.12.0, CPython 3.11.9 for the declared development environment, and CPython 3.14.6 for the clean installed artifact:
+
+| Check | Actual result |
+| --- | --- |
+| `ruff check .` / `ruff format --check .` | Passed; 46 Python files formatted |
+| `mypy samsarix_chat_engine` / `compileall` / `git diff --check` | Passed; no type issues in 9 source files |
+| `pytest --cov=samsarix_chat_engine --cov-report=term-missing` | 89 passed in 93.99s; 90.94% total branch coverage; no warnings |
+| TypeScript `check` / Node test runner | Passed; strict declaration build and 17/17 fake-transport/API tests |
+| TypeScript production audit / package inspection | Zero runtime dependencies, no known vulnerabilities, and 23 intended artifact files |
+| real TypeScript integration smoke | Authenticated HTTP, read state, first-message WebSocket auth, history, publish, reconnect, edit, delete, and tombstone recovery passed |
+| Python sdist / wheel / `twine check` | Wheel built from the 81-entry sdist; 24 wheel entries; both metadata checks passed |
+| clean npm and wheel installs | ESM/type import passed; installed wheel resolved from `site-packages` and passed HTTP, WebSocket, read-state, typing, controls, export, lifecycle, and backup smoke |
+| source/runtime dependency audits | No known third-party vulnerabilities; unpublished local Samsarix distributions were explicitly reported as unauditable |
+
+Exact Python sdist, Python wheel, and npm tarball digests are recorded in the pull request because embedding them in packaged source would change the source archive digest.
 
 Final v0.7 local verification on 2026-08-01 used Node 24.12.0 and CPython 3.14.6, including clean installs of both built artifacts:
 

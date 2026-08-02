@@ -11,6 +11,8 @@ from .models import (
     Message,
     MessageCreate,
     MessagePage,
+    ReadState,
+    ReadStateUpdate,
     RetentionResult,
     Room,
     RoomCreate,
@@ -19,7 +21,7 @@ from .models import (
 from .store import ChatStore
 from .websocket_manager import ConnectionManager
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 __all__ = [
     "AccessTokenService",
@@ -33,6 +35,8 @@ __all__ = [
     "MessageCreate",
     "MessagePage",
     "Principal",
+    "ReadState",
+    "ReadStateUpdate",
     "RetentionResult",
     "Room",
     "RoomCreate",

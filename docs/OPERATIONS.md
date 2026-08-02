@@ -96,6 +96,12 @@ Restoring replaces the live database state with the snapshot state. Messages and
 
 ## Upgrade and rollback
 
-Opening a v0.4 or v0.5 database with v0.7 migrates it to schema version 3; v0.6 databases require no schema change. The migration preserves existing rooms/messages, adds nullable room freeze and message edit/delete timestamps, and creates stable-subject moderation controls. The earlier v0.4→v0.5 lifecycle additions are applied in the same pass when needed. The engine refuses a schema version newer than it understands.
+Opening an older supported database with v0.8 migrates it to schema version 4. The migration preserves existing rooms/messages, lifecycle metadata, moderation controls, and audit records, adds nullable authenticated-author metadata to messages, then creates an empty `room_read_states` table. Legacy and operator/local messages have no authenticated author and therefore count as other-authored for signed-user unread state. The engine refuses a schema version newer than it understands.
 
-Take a verified backup before upgrade. Version 0.6 understands the same schema, but releases before v0.6 do not. For a conservative rollback to any older release, stop v0.7 and restore the pre-v0.7 backup before starting the older version.
+Take a verified backup before upgrade. Earlier releases do not understand schema 4. For a conservative rollback, stop v0.8 and restore the pre-v0.8 backup before starting the older version.
+
+## Read-state lifecycle
+
+Each explicit mark-read operation persists one row keyed by room and signed token subject, up to `SAMSARIX_CHAT_MAX_READ_STATES_PER_ROOM`. Reading the state alone creates no row. The subject can delete its own row through the API; deleting a room cascades all of its rows. Cursor timestamps remain useful when normal retention removes the referenced message.
+
+Read-state rows are contained in normal SQLite backups. They are intentionally not included in the room's NDJSON message export or administrative audit event stream. If a deployment treats read activity as personal data, its subject-erasure workflow should call `DELETE /v1/rooms/{room_id}/read-state` for each mapped room before invalidating the account's token access.

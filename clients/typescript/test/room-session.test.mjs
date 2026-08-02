@@ -97,12 +97,16 @@ test("browser authentication, typed events, publish, ping, and close", async () 
 
   session.sendMessage("hello", "client-1");
   session.ping();
+  session.setTyping(true);
+  session.setTyping(false);
   assert.throws(() => session.sendMessage(" "), TypeError);
   assert.throws(() => session.sendMessage("more than ten"), RangeError);
   assert.throws(() => session.sendMessage("hello", "x".repeat(129)), RangeError);
   assert.deepEqual(sockets[0].sent.slice(1), [
     { type: "message", content: "hello", client_message_id: "client-1" },
     { type: "ping" },
+    { type: "typing", active: true },
+    { type: "typing", active: false },
   ]);
   assert.equal(urls[0], "wss://chat.example/base/v1/rooms/room%2Fa/ws");
   assert.deepEqual(states, ["idle", "connecting", "connected"]);
@@ -274,6 +278,34 @@ test("known event types must include their required payload", async () => {
   sockets[0].receive({ type: "message.created" });
   await assert.rejects(connected, SamsarixConnectionError);
   assert.deepEqual(sockets[0].closes[0], [1002, "Invalid event envelope"]);
+});
+
+test("typing events are validated and delivered as typed events", async () => {
+  const sockets = [];
+  const events = [];
+  const client = new SamsarixChatClient({
+    baseUrl: "https://chat.example",
+    credential: { token: "token" },
+    fetch: async () => new Response(),
+    webSocketFactory: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+  });
+  const session = client.roomSession("general", { reconnect: { enabled: false } });
+  session.onEvent((event) => events.push(event));
+  const connected = session.connect();
+  await waitFor(() => sockets.length === 1);
+  sockets[0].receive({ type: "ready", room: ROOM, username: "user", active_connections: 1, max_message_chars: 4000 });
+  await connected;
+  sockets[0].receive({ type: "typing.started", username: "other", expires_in: 8 });
+  sockets[0].receive({ type: "typing.stopped", username: "other" });
+  assert.deepEqual(events.slice(-2), [
+    { type: "typing.started", username: "other", expires_in: 8 },
+    { type: "typing.stopped", username: "other" },
+  ]);
+  session.close();
 });
 
 test("a manual connect after exhaustion receives a fresh retry budget", async () => {
