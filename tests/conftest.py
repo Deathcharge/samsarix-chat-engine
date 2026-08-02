@@ -68,6 +68,7 @@ async def _reset_postgres_test_database(conninfo: str) -> None:
         if row is None or row[0] != "samsarix_test":
             raise RuntimeError("live PostgreSQL tests require the dedicated samsarix_test database")
         await connection.execute("DROP TABLE IF EXISTS public.samsarix_connection_leases")
+        await connection.execute("DROP TABLE IF EXISTS public.samsarix_rate_buckets")
         await connection.execute("DROP TABLE IF EXISTS public.samsarix_instance_cursors")
         await connection.execute("DROP TABLE IF EXISTS public.samsarix_realtime_events")
         await connection.execute("DROP TABLE IF EXISTS public.samsarix_room_read_states")

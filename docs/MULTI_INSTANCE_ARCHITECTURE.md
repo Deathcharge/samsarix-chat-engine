@@ -18,6 +18,8 @@ Schema v3 uses PostgreSQL database time for room/message/moderation ordering, re
 
 Schema v4 adds one database-owned lease per admitted WebSocket. A transaction locks the live owning instance and usable room, serializes the capacity decision, removes stale reservations, and atomically checks deployment-wide and per-room caps before inserting. Renewal and release require the owning instance ID. Counts exclude expired socket leases, expired owners, and archived rooms; cleanup returns those stale rows for future presence convergence. Re-registering an expired stable instance ID deletes its former socket rows before renewing the process lease, so a crash/restart cannot revive phantom occupancy. All replicas must use identical capacity settings; public application admission and presence wiring remain release gates.
 
+Schema v5 adds fixed-window counters for message, search, and typing controls. PostgreSQL time chooses each boundary, and an atomic row update admits no more than the configured count for a scope/key across all replicas. Existing identities contend only on their own row; creation of new identity buckets uses a separate advisory lock to prune expiry and enforce a hard cardinality bound. Raw subjects and client addresses are not stored: a scope-separated SHA-256 digest is persisted instead. That digest is data minimization, not anonymization, because predictable identities may still be guessed. All replicas must use identical limits, window lengths, and bucket capacity. Fixed windows can admit traffic on both sides of a boundary; load tests must validate whether that declared behavior is sufficient before public wiring.
+
 No Redis dependency is planned for the first supported topology. Redis Pub/Sub is at-most-once, while Streams introduce a second durable system whose commit cannot be atomic with the authoritative database without an additional outbox relay. PostgreSQL already supplies transactions, row locks, advisory locks, `SKIP LOCKED`, and commit-coupled notifications needed by this product's current scale boundary.
 
 ## Why multi-process SQLite is rejected
@@ -47,7 +49,7 @@ PostgreSQL-backed deployments require all of the following:
 - **Migrations:** one transaction-scoped advisory lock serializes schema inspection and migration. A newer unsupported schema fails closed.
 - **Connection capacity:** implemented schema-v4 per-socket leases enforce deployment-wide and per-room caps with database-time expiry and owner-bound renewal/release. Heartbeats will renew leases when application wiring lands; crashed-instance and archived-room rows are already excluded and reclaimable.
 - **Presence:** join/leave transitions derive from connection leases. A leader-elected sweeper emits bounded expiry transitions for crashed instances. Presence remains best effort and carries no authorization meaning.
-- **Rate limits:** atomic time-bucket counters enforce deployment-wide subject/client limits. Database time defines bucket boundaries so host clock skew cannot multiply quotas.
+- **Rate limits:** implemented schema-v5 atomic time-bucket counters enforce deployment-wide subject/client limits for message, search, and typing scopes. Database time defines boundaries so host clock skew cannot multiply quotas; public request-path wiring remains gated.
 - **Typing:** transition events use the durable event path but expire automatically and are not retained as chat history or audit content.
 - **Moderation teardown:** room archive and member-ban events reach every instance, which closes matching local sockets deterministically.
 - **Webhook work:** implemented outbox workers claim due rows with an expiring owner lease using row locks and `SKIP LOCKED`. Only the current unexpired owner can acknowledge a claim. A crashed claim becomes eligible for redelivery with its stable ID; receivers still deduplicate that ID.
@@ -73,7 +75,7 @@ v0.13 cannot claim multi-instance support until CI proves:
 - two or more real app processes share one PostgreSQL database and deliver create/update/delete events exactly once to each connected test socket under normal operation;
 - a listener disconnect/reconnect replays committed event rows without relying on `NOTIFY` delivery (the internal polling relay and cursor replay case are implemented; the real-process listener gate remains);
 - concurrent idempotent message creation returns one authoritative message;
-- global and per-room connection caps plus rate limits hold across processes (the storage-level concurrent connection-cap case is implemented; real-process admission and rate-limit gates remain);
+- global and per-room connection caps plus rate limits hold across processes (storage-level concurrent connection and rate-bucket cases are implemented; real-process admission/request-path gates remain);
 - archive and ban actions close matching sockets on every process;
 - two webhook workers never hold the same live claim, and a killed worker's claim is recovered (the storage-level lease/recovery case is implemented; the killed-process gate remains);
 - migration concurrency is serialized and newer schemas fail closed;

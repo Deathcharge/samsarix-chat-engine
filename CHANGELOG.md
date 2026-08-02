@@ -13,6 +13,7 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 - Transactional PostgreSQL webhook outbox with stable delivery IDs, database-time scheduling, expiring worker-owned claims, `SKIP LOCKED` work selection, crash recovery, bounded terminal-history pruning, and operator replay.
 - Internal per-process PostgreSQL realtime relay with durable cursors, ordered polling/replay, post-dispatch acknowledgement, archive/ban socket teardown, and lease-loss fencing. Polling is the correctness path; a future `LISTEN`/`NOTIFY` listener may only reduce latency.
 - PostgreSQL schema v4 and an internal connection registry with database-time socket leases, atomic deployment-wide and per-room capacity, owner-bound renewal/release, archived-room rejection, and crashed-process reclamation.
+- PostgreSQL schema v5 and internal deployment-wide message, search, and typing rate buckets with atomic per-identity consumption, database-time boundaries, bounded active cardinality, and raw-key minimization.
 
 ### Security and operations
 
@@ -24,6 +25,7 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 - PostgreSQL webhook claims can be acknowledged only by the live lease owner. Expired claims are safely redelivered with the same ID; receivers must still deduplicate because delivery is at least once.
 - A PostgreSQL relay that loses its database lease closes every local socket before renewing the same durable cursor. Unsupported internal event types are not forwarded onto the public WebSocket protocol.
 - Expired process IDs discard their stale socket rows before re-registration, preventing a restarted replica from reviving phantom occupancy. Archived and expired reservations stop consuming capacity even before physical cleanup.
+- Distributed rate buckets persist only a scope-separated SHA-256 digest of the caller key. The digest reduces routine identity exposure but is not anonymization; database access and retention still require normal privacy controls.
 
 ## 0.12.0 — 2026-08-02
 
