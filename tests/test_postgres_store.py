@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import pytest
 
@@ -19,20 +21,30 @@ from samsarix_chat_engine.store import (  # noqa: E402
     MemberBannedError,
     MemberMutedError,
     MessageOwnershipError,
+    ReadStateCapacityError,
+    RetentionNotConfiguredError,
     RoomArchivedError,
     RoomCapacityError,
     RoomNotArchivedError,
+    WebhookCapacityError,
+    WebhookDeliveryNotFoundError,
+    WebhookPayloadUnavailableError,
 )
 
 
-def _store(conninfo: str, **overrides: int) -> PostgresChatStore:
+def _store(conninfo: str, **overrides: Any) -> PostgresChatStore:
     return PostgresChatStore(
         conninfo,
         max_rooms=overrides.get("max_rooms", 10),
         max_stored_messages=overrides.get("max_stored_messages", 20),
         max_stored_messages_per_room=overrides.get("max_stored_messages_per_room", 10),
+        max_read_states_per_room=overrides.get("max_read_states_per_room", 10),
         message_retention_days=overrides.get("message_retention_days"),
         max_audit_events=overrides.get("max_audit_events", 50),
+        webhook_events=overrides.get("webhook_events", ()),
+        max_webhook_deliveries=overrides.get("max_webhook_deliveries", 50),
+        webhook_worker_id=overrides.get("webhook_worker_id"),
+        webhook_lease_seconds=overrides.get("webhook_lease_seconds", 60),
     )
 
 
@@ -63,7 +75,7 @@ async def test_schema_v1_migrates_transactionally(clean_postgres_database: str) 
     service = _store(clean_postgres_database)
     await service.initialize()
     try:
-        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 2
+        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 3
         assert await service.check_ready()
         assert await service.list_rooms() == []
     finally:
@@ -368,6 +380,248 @@ async def test_moderation_and_archived_room_rules(store: PostgresChatStore) -> N
     events = await store.foundation.read_events("room-delete-observer")
     created_event = next(event for event in events if event.payload.get("message", {}).get("id") == message.id)
     assert created_event.payload["message"]["content"] == ""
+
+
+@pytest.mark.asyncio
+async def test_read_state_is_monotonic_subject_scoped_and_bounded(clean_postgres_database: str) -> None:
+    service = _store(clean_postgres_database, max_read_states_per_room=1)
+    await service.initialize()
+    try:
+        await service.create_room(RoomCreate(id="general", name="General"))
+        own, _ = await service.create_message(
+            room_id="general",
+            sender="alice",
+            content="own message",
+            client_message_id=None,
+            allow_frozen=False,
+            author_subject="alice",
+        )
+        other, _ = await service.create_message(
+            room_id="general",
+            sender="bob",
+            content="other message",
+            client_message_id=None,
+            allow_frozen=False,
+            author_subject="bob",
+        )
+
+        initial = await service.get_read_state("general", "alice")
+        assert initial.last_read_message_id is None
+        assert initial.unread_count == 1
+        assert (await service.mark_read("general", "alice", own.id)).unread_count == 1
+        current = await service.mark_read("general", "alice", other.id)
+        assert current.last_read_message_id == other.id
+        assert current.unread_count == 0
+        assert (await service.mark_read("general", "alice", own.id)).last_read_message_id == other.id
+        with pytest.raises(ReadStateCapacityError):
+            await service.mark_read("general", "bob", None)
+
+        await service.clear_read_state("general", "alice")
+        reset = await service.get_read_state("general", "alice")
+        assert reset.last_read_message_id is None
+        assert reset.unread_count == 1
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_export_is_a_stable_closable_snapshot(store: PostgresChatStore) -> None:
+    await store.create_room(RoomCreate(id="general", name="General"))
+    first, _ = await store.create_message(
+        room_id="general",
+        sender="alice",
+        content="snapshot secret",
+        client_message_id=None,
+        allow_frozen=False,
+        author_subject="alice",
+    )
+    snapshot = await store.prepare_export("general", actor="operator")
+    await store.delete_message(
+        room_id="general",
+        message_id=first.id,
+        actor="alice",
+        is_admin=False,
+    )
+
+    exported = list(snapshot)
+    snapshot.close()
+    assert [(message.id, message.content) for message in exported] == [(first.id, "snapshot secret")]
+    audits, _ = await store.list_audit_events()
+    assert "room.export_requested" in [audit.action for audit in audits]
+
+
+@pytest.mark.asyncio
+async def test_webhook_lease_recovery_stable_id_and_payload_scrubbing(clean_postgres_database: str) -> None:
+    settings = {
+        "webhook_events": ("message.created", "message.deleted"),
+        "webhook_worker_id": "worker-one",
+    }
+    first = _store(clean_postgres_database, **settings)
+    second = _store(
+        clean_postgres_database,
+        webhook_events=settings["webhook_events"],
+        webhook_worker_id="worker-two",
+    )
+    await asyncio.gather(first.initialize(), second.initialize())
+    try:
+        await first.create_room(RoomCreate(id="general", name="General"))
+        message, _ = await first.create_message(
+            room_id="general",
+            sender="alice",
+            content="deliver me",
+            client_message_id=None,
+            allow_frozen=False,
+            author_subject="alice",
+        )
+        claims = await asyncio.gather(
+            first.next_webhook_delivery(datetime.min.replace(tzinfo=timezone.utc)),
+            second.next_webhook_delivery(datetime.max.replace(tzinfo=timezone.utc)),
+        )
+        assert sum(claim is not None for claim in claims) == 1
+        winner = first if claims[0] is not None else second
+        loser = second if winner is first else first
+        claimed = claims[0] or claims[1]
+        assert claimed is not None
+        delivery_id = claimed.delivery.id
+        assert claimed.delivery.event_type == "message.created"
+        assert b'"content":"deliver me"' in claimed.payload
+
+        async with first.foundation.transaction() as connection:
+            await connection.execute(
+                """
+                UPDATE public.samsarix_webhook_deliveries
+                SET lease_expires_at = clock_timestamp() - interval '1 second'
+                WHERE id = %s
+                """,
+                (delivery_id,),
+            )
+        reclaimed = await loser.next_webhook_delivery(datetime.now(timezone.utc))
+        assert reclaimed is not None and reclaimed.delivery.id == delivery_id
+        with pytest.raises(WebhookDeliveryNotFoundError):
+            await winner.record_webhook_attempt(
+                delivery_id,
+                attempted_at=datetime.now(timezone.utc),
+                status_code=200,
+                error=None,
+                next_attempt_at=None,
+                delivered=True,
+                failed=False,
+            )
+        attempted_at = datetime.now(timezone.utc)
+        await loser.record_webhook_attempt(
+            delivery_id,
+            attempted_at=attempted_at,
+            status_code=204,
+            error=None,
+            next_attempt_at=None,
+            delivered=True,
+            failed=False,
+        )
+        delivered, _ = await first.list_webhook_deliveries(status="delivered")
+        assert [item.id for item in delivered] == [delivery_id]
+
+        await first.delete_message(
+            room_id="general",
+            message_id=message.id,
+            actor="alice",
+            is_admin=False,
+        )
+        deliveries, _ = await first.list_webhook_deliveries()
+        original = next(item for item in deliveries if item.id == delivery_id)
+        assert not original.replayable
+        with pytest.raises(WebhookPayloadUnavailableError):
+            await first.retry_webhook_delivery(delivery_id)
+    finally:
+        await asyncio.gather(first.close(), second.close())
+
+
+@pytest.mark.asyncio
+async def test_webhook_capacity_failure_rolls_back_message_update(clean_postgres_database: str) -> None:
+    service = _store(
+        clean_postgres_database,
+        webhook_events=("message.created", "message.updated"),
+        max_webhook_deliveries=1,
+    )
+    await service.initialize()
+    try:
+        await service.create_room(RoomCreate(id="general", name="General"))
+        message, _ = await service.create_message(
+            room_id="general",
+            sender="alice",
+            content="original",
+            client_message_id=None,
+            allow_frozen=False,
+            author_subject="alice",
+        )
+        with pytest.raises(WebhookCapacityError):
+            await service.update_message(
+                room_id="general",
+                message_id=message.id,
+                actor="alice",
+                content="must roll back",
+                is_admin=False,
+            )
+        messages, _ = await service.list_messages("general")
+        assert [(item.id, item.content) for item in messages] == [(message.id, "original")]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_explicit_retention_scrubs_terminal_webhook_and_event_payload(clean_postgres_database: str) -> None:
+    unconfigured = _store(clean_postgres_database)
+    await unconfigured.initialize()
+    try:
+        with pytest.raises(RetentionNotConfiguredError):
+            await unconfigured.run_retention(actor="operator")
+    finally:
+        await unconfigured.close()
+
+    service = _store(
+        clean_postgres_database,
+        message_retention_days=1,
+        webhook_events=("message.created",),
+    )
+    await service.initialize()
+    try:
+        await service.create_room(RoomCreate(id="general", name="General"))
+        await service.foundation.register_instance("retention-observer", lease_seconds=30)
+        message, _ = await service.create_message(
+            room_id="general",
+            sender="alice",
+            content="expired secret",
+            client_message_id=None,
+            allow_frozen=False,
+            author_subject="alice",
+        )
+        pending = await service.next_webhook_delivery(datetime.now(timezone.utc))
+        assert pending is not None
+        await service.record_webhook_attempt(
+            pending.delivery.id,
+            attempted_at=datetime.now(timezone.utc),
+            status_code=200,
+            error=None,
+            next_attempt_at=None,
+            delivered=True,
+            failed=False,
+        )
+        async with service.foundation.transaction() as connection:
+            await connection.execute(
+                "UPDATE public.samsarix_messages SET created_at = clock_timestamp() - interval '2 days' WHERE id = %s",
+                (message.id,),
+            )
+
+        deleted, cutoff = await service.run_retention(actor="operator")
+        assert deleted == 1
+        assert cutoff < datetime.now(timezone.utc) - timedelta(hours=23)
+        deliveries, _ = await service.list_webhook_deliveries()
+        assert len(deliveries) == 1 and not deliveries[0].replayable
+        events = await service.foundation.read_events("retention-observer")
+        assert events[0].payload["message"]["content"] == ""
+        audits, _ = await service.list_audit_events()
+        assert audits[-1].action == "retention.executed"
+    finally:
+        await service.close()
 
 
 @pytest.mark.asyncio

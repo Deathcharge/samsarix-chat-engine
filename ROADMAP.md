@@ -80,12 +80,14 @@ This is deliberately per-room substring retrieval rather than global full-text r
 
 This makes the supported topology repeatable without implying that a container makes an in-process connection registry horizontally scalable.
 
-## v0.12 — measured multi-instance operation
+## v0.13 — measured multi-instance operation
 
-- define a broker/history adapter boundary without changing the single-instance default;
-- implement and test cross-worker fan-out, presence, distributed rate limits, and reconnect recovery;
-- run sustained load/soak and reconnect-storm tests and publish measured limits;
-- add OpenTelemetry hooks only when an operator needs them, with telemetry disabled by default.
+- [x] define a storage-neutral application boundary without changing the single-instance default;
+- [x] implement the internal PostgreSQL authoritative store, ordered event log, read state, stable exports, retention, and leased webhook outbox;
+- [ ] expose guarded PostgreSQL configuration only after the remaining topology gates are proven;
+- [ ] implement and test cross-worker fan-out, presence, distributed rate limits, and reconnect recovery;
+- [ ] run sustained load/soak and reconnect-storm tests and publish measured limits;
+- [ ] add OpenTelemetry hooks only when an operator needs them, with telemetry disabled by default.
 
 No horizontal-scale claim is acceptable before those tests pass. Redis Pub/Sub is at-most-once and does not solve shared storage, migration/restore coordination, webhook leadership, or distributed quotas. A broker and shared authoritative database must solve a demonstrated topology together rather than decorate the architecture.
 

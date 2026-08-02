@@ -24,6 +24,7 @@ from samsarix_chat_engine.postgres import (  # noqa: E402
 
 def test_event_validation_is_bounded_and_canonical() -> None:
     assert _validate_event("room-1", "message.created", {"emoji": "🌀"}) == {"emoji": "🌀"}
+    assert len(_validate_event("room", "message.created", {"content": "🌀" * 100_000})["content"]) == 100_000
 
     with pytest.raises(InvalidRealtimeEventError):
         _validate_event("INVALID", "message.created", {})
@@ -32,7 +33,7 @@ def test_event_validation_is_bounded_and_canonical() -> None:
     with pytest.raises(InvalidRealtimeEventError):
         _validate_event("room", "message.created", {"invalid": float("nan")})
     with pytest.raises(InvalidRealtimeEventError):
-        _validate_event("room", "message.created", {"content": "x" * (128 * 1024)})
+        _validate_event("room", "message.created", {"content": "x" * (512 * 1024)})
 
 
 def test_pool_configuration_rejects_invalid_bounds_without_echoing_conninfo() -> None:

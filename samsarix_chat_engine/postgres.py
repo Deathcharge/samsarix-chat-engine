@@ -23,11 +23,11 @@ from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
-POSTGRES_SCHEMA_VERSION = 2
+POSTGRES_SCHEMA_VERSION = 3
 POSTGRES_MIGRATION_LOCK_ID = 7_495_346_927_831_819_041
 POSTGRES_EVENT_SEQUENCE_LOCK_ID = 7_495_346_927_831_819_042
 REALTIME_CHANNEL = "samsarix_realtime_v1"
-MAX_EVENT_PAYLOAD_BYTES = 128 * 1024
+MAX_EVENT_PAYLOAD_BYTES = 512 * 1024
 MAX_INSTANCE_ID_CHARS = 128
 MAX_EVENT_TYPE_CHARS = 80
 _INSTANCE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -346,9 +346,10 @@ class PostgresFoundation:
                     "SELECT version FROM public.samsarix_schema_metadata WHERE singleton = TRUE FOR UPDATE"
                 )
                 row = await cursor.fetchone()
-                if row is not None and int(row[0]) > POSTGRES_SCHEMA_VERSION:
+                current_version = int(row[0]) if row is not None else 0
+                if current_version > POSTGRES_SCHEMA_VERSION:
                     raise UnsupportedPostgresSchemaError(
-                        f"PostgreSQL schema version {int(row[0])} is newer than supported version "
+                        f"PostgreSQL schema version {current_version} is newer than supported version "
                         f"{POSTGRES_SCHEMA_VERSION}"
                     )
                 await connection.execute(
@@ -363,7 +364,7 @@ class PostgresFoundation:
                             char_length(event_type) BETWEEN 1 AND 80
                             AND event_type ~ '^[a-z][a-z0-9_.-]*$'
                         ),
-                        payload JSONB NOT NULL CHECK (octet_length(payload::text) <= 262144),
+                        payload JSONB NOT NULL CHECK (octet_length(payload::text) <= 524288),
                         created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
                     )
                     """
@@ -381,6 +382,20 @@ class PostgresFoundation:
                     )
                     """
                 )
+                if current_version < 3:
+                    await connection.execute(
+                        """
+                        ALTER TABLE public.samsarix_realtime_events
+                        DROP CONSTRAINT IF EXISTS samsarix_realtime_events_payload_check
+                        """
+                    )
+                    await connection.execute(
+                        """
+                        ALTER TABLE public.samsarix_realtime_events
+                        ADD CONSTRAINT samsarix_realtime_events_payload_check
+                        CHECK (octet_length(payload::text) <= 524288)
+                        """
+                    )
                 await connection.execute(
                     """
                     CREATE TABLE IF NOT EXISTS public.samsarix_rooms (
@@ -467,6 +482,66 @@ class PostgresFoundation:
                 )
                 await connection.execute(
                     """
+                    CREATE TABLE IF NOT EXISTS public.samsarix_room_read_states (
+                        room_id TEXT NOT NULL REFERENCES public.samsarix_rooms(id) ON DELETE CASCADE,
+                        subject TEXT NOT NULL CHECK (char_length(subject) BETWEEN 1 AND 64),
+                        message_id TEXT,
+                        message_created_at TIMESTAMPTZ NOT NULL,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                        PRIMARY KEY (room_id, subject)
+                    )
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS samsarix_room_read_states_subject
+                    ON public.samsarix_room_read_states (subject, room_id)
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS public.samsarix_webhook_deliveries (
+                        id TEXT PRIMARY KEY CHECK (char_length(id) BETWEEN 1 AND 128),
+                        event_type TEXT NOT NULL CHECK (char_length(event_type) BETWEEN 1 AND 80),
+                        room_id TEXT NOT NULL CHECK (char_length(room_id) BETWEEN 1 AND 64),
+                        resource_id TEXT NOT NULL CHECK (char_length(resource_id) BETWEEN 1 AND 128),
+                        created_at TIMESTAMPTZ NOT NULL,
+                        payload BYTEA CHECK (payload IS NULL OR octet_length(payload) <= 524288),
+                        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+                        next_attempt_at TIMESTAMPTZ,
+                        last_attempt_at TIMESTAMPTZ,
+                        delivered_at TIMESTAMPTZ,
+                        failed_at TIMESTAMPTZ,
+                        last_status_code INTEGER,
+                        last_error TEXT CHECK (last_error IS NULL OR char_length(last_error) <= 1000),
+                        lease_owner TEXT CHECK (lease_owner IS NULL OR char_length(lease_owner) BETWEEN 1 AND 128),
+                        lease_expires_at TIMESTAMPTZ,
+                        CHECK ((lease_owner IS NULL) = (lease_expires_at IS NULL))
+                    )
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS samsarix_webhook_deliveries_due
+                    ON public.samsarix_webhook_deliveries (
+                        delivered_at, failed_at, next_attempt_at, lease_expires_at, created_at, id
+                    )
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS samsarix_webhook_deliveries_order
+                    ON public.samsarix_webhook_deliveries (created_at DESC, id DESC)
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS samsarix_webhook_deliveries_resource
+                    ON public.samsarix_webhook_deliveries (room_id, resource_id, event_type)
+                    """
+                )
+                await connection.execute(
+                    """
                     INSERT INTO public.samsarix_schema_metadata (singleton, version, updated_at)
                     VALUES (TRUE, %s, clock_timestamp())
                     ON CONFLICT (singleton) DO UPDATE SET
@@ -493,7 +568,7 @@ def _validate_event(room_id: str, event_type: str, payload: dict[str, Any]) -> d
     except (TypeError, ValueError):
         raise InvalidRealtimeEventError("realtime event payload must be finite JSON") from None
     if len(encoded) > MAX_EVENT_PAYLOAD_BYTES:
-        raise InvalidRealtimeEventError("realtime event payload exceeds 128 KiB")
+        raise InvalidRealtimeEventError("realtime event payload exceeds 512 KiB")
     return cast(dict[str, Any], json.loads(encoded))
 
 
