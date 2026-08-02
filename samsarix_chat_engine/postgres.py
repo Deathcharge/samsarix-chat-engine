@@ -23,7 +23,7 @@ from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
-POSTGRES_SCHEMA_VERSION = 3
+POSTGRES_SCHEMA_VERSION = 4
 POSTGRES_MIGRATION_LOCK_ID = 7_495_346_927_831_819_041
 POSTGRES_EVENT_SEQUENCE_LOCK_ID = 7_495_346_927_831_819_042
 REALTIME_CHANNEL = "samsarix_realtime_v1"
@@ -198,6 +198,24 @@ class PostgresFoundation:
 
         _validate_instance(instance_id, lease_seconds)
         async with self.transaction() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT lease_expires_at <= clock_timestamp()
+                FROM public.samsarix_instance_cursors
+                WHERE instance_id = %s
+                FOR UPDATE
+                """,
+                (instance_id,),
+            )
+            existing = await cursor.fetchone()
+            if existing is not None and bool(existing[0]):
+                # A stable instance ID may be reused after a crash. Its old
+                # sockets no longer exist and must not become live again when
+                # the owner lease is renewed.
+                await connection.execute(
+                    "DELETE FROM public.samsarix_connection_leases WHERE instance_id = %s",
+                    (instance_id,),
+                )
             cursor = await connection.execute(
                 """
                 INSERT INTO public.samsarix_instance_cursors (
@@ -409,6 +427,49 @@ class PostgresFoundation:
                         archived_at TIMESTAMPTZ,
                         frozen_at TIMESTAMPTZ
                     )
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS public.samsarix_connection_leases (
+                        connection_id TEXT PRIMARY KEY CHECK (
+                            char_length(connection_id) BETWEEN 1 AND 128
+                            AND connection_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
+                        ),
+                        instance_id TEXT NOT NULL REFERENCES public.samsarix_instance_cursors(instance_id)
+                            ON DELETE CASCADE,
+                        room_id TEXT NOT NULL REFERENCES public.samsarix_rooms(id) ON DELETE CASCADE,
+                        username TEXT NOT NULL CHECK (char_length(username) BETWEEN 1 AND 64),
+                        subject TEXT CHECK (subject IS NULL OR char_length(subject) BETWEEN 1 AND 64),
+                        lease_expires_at TIMESTAMPTZ NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                        CHECK (lease_expires_at > created_at)
+                    )
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS samsarix_connection_leases_expiry
+                    ON public.samsarix_connection_leases (lease_expires_at, connection_id)
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS samsarix_connection_leases_room
+                    ON public.samsarix_connection_leases (room_id, lease_expires_at, connection_id)
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS samsarix_connection_leases_instance
+                    ON public.samsarix_connection_leases (instance_id, lease_expires_at, connection_id)
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS samsarix_connection_leases_member
+                    ON public.samsarix_connection_leases (room_id, subject, lease_expires_at)
                     """
                 )
                 await connection.execute(

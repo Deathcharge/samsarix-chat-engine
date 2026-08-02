@@ -12,6 +12,7 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 - Internal PostgreSQL schema v3 and a complete `ChatStorage` implementation for rooms, bounded messages, Unicode-normalized search, moderation, audit history, monotonic read state, stable spooled exports, explicit retention, and cross-instance idempotency/capacity enforcement.
 - Transactional PostgreSQL webhook outbox with stable delivery IDs, database-time scheduling, expiring worker-owned claims, `SKIP LOCKED` work selection, crash recovery, bounded terminal-history pruning, and operator replay.
 - Internal per-process PostgreSQL realtime relay with durable cursors, ordered polling/replay, post-dispatch acknowledgement, archive/ban socket teardown, and lease-loss fencing. Polling is the correctness path; a future `LISTEN`/`NOTIFY` listener may only reduce latency.
+- PostgreSQL schema v4 and an internal connection registry with database-time socket leases, atomic deployment-wide and per-room capacity, owner-bound renewal/release, archived-room rejection, and crashed-process reclamation.
 
 ### Security and operations
 
@@ -22,6 +23,7 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 - PostgreSQL event and webhook envelopes remain bounded at 512 KiB so every valid 100,000-character message, including four-byte Unicode, fits without turning a valid domain write into a coordination failure.
 - PostgreSQL webhook claims can be acknowledged only by the live lease owner. Expired claims are safely redelivered with the same ID; receivers must still deduplicate because delivery is at least once.
 - A PostgreSQL relay that loses its database lease closes every local socket before renewing the same durable cursor. Unsupported internal event types are not forwarded onto the public WebSocket protocol.
+- Expired process IDs discard their stale socket rows before re-registration, preventing a restarted replica from reviving phantom occupancy. Archived and expired reservations stop consuming capacity even before physical cleanup.
 
 ## 0.12.0 — 2026-08-02
 

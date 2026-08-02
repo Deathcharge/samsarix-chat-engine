@@ -16,6 +16,8 @@ The initial event-log implementation serializes sequence allocation with a trans
 
 Schema v3 uses PostgreSQL database time for room/message/moderation ordering, read cursors, webhook due times and leases, and retention boundaries. The internal store now implements the full storage protocol, including monotonic subject-scoped read state, transactionally stable bounded-memory exports, explicit retention, and a leased transactional webhook outbox. Transaction-scoped capacity locks currently serialize room creation, message mutation/retention, bounded audit insertion, and webhook capacity changes across replicas. Deletion and retention cancel unsent sensitive webhook payloads and scrub message bodies from older durable event and terminal-webhook envelopes before commit. These conservative global locks make correctness inspectable first; the load gate must measure their throughput before v0.13 receives a scale claim.
 
+Schema v4 adds one database-owned lease per admitted WebSocket. A transaction locks the live owning instance and usable room, serializes the capacity decision, removes stale reservations, and atomically checks deployment-wide and per-room caps before inserting. Renewal and release require the owning instance ID. Counts exclude expired socket leases, expired owners, and archived rooms; cleanup returns those stale rows for future presence convergence. Re-registering an expired stable instance ID deletes its former socket rows before renewing the process lease, so a crash/restart cannot revive phantom occupancy. All replicas must use identical capacity settings; public application admission and presence wiring remain release gates.
+
 No Redis dependency is planned for the first supported topology. Redis Pub/Sub is at-most-once, while Streams introduce a second durable system whose commit cannot be atomic with the authoritative database without an additional outbox relay. PostgreSQL already supplies transactions, row locks, advisory locks, `SKIP LOCKED`, and commit-coupled notifications needed by this product's current scale boundary.
 
 ## Why multi-process SQLite is rejected
@@ -43,7 +45,7 @@ An instance that falls behind the retained event window must close its local soc
 PostgreSQL-backed deployments require all of the following:
 
 - **Migrations:** one transaction-scoped advisory lock serializes schema inspection and migration. A newer unsupported schema fails closed.
-- **Connection capacity:** expiring per-socket leases enforce deployment-wide and per-room caps. Heartbeats renew leases; crashed-instance leases expire.
+- **Connection capacity:** implemented schema-v4 per-socket leases enforce deployment-wide and per-room caps with database-time expiry and owner-bound renewal/release. Heartbeats will renew leases when application wiring lands; crashed-instance and archived-room rows are already excluded and reclaimable.
 - **Presence:** join/leave transitions derive from connection leases. A leader-elected sweeper emits bounded expiry transitions for crashed instances. Presence remains best effort and carries no authorization meaning.
 - **Rate limits:** atomic time-bucket counters enforce deployment-wide subject/client limits. Database time defines bucket boundaries so host clock skew cannot multiply quotas.
 - **Typing:** transition events use the durable event path but expire automatically and are not retained as chat history or audit content.
@@ -71,7 +73,7 @@ v0.13 cannot claim multi-instance support until CI proves:
 - two or more real app processes share one PostgreSQL database and deliver create/update/delete events exactly once to each connected test socket under normal operation;
 - a listener disconnect/reconnect replays committed event rows without relying on `NOTIFY` delivery (the internal polling relay and cursor replay case are implemented; the real-process listener gate remains);
 - concurrent idempotent message creation returns one authoritative message;
-- global and per-room connection caps plus rate limits hold across processes;
+- global and per-room connection caps plus rate limits hold across processes (the storage-level concurrent connection-cap case is implemented; real-process admission and rate-limit gates remain);
 - archive and ban actions close matching sockets on every process;
 - two webhook workers never hold the same live claim, and a killed worker's claim is recovered (the storage-level lease/recovery case is implemented; the killed-process gate remains);
 - migration concurrency is serialized and newer schemas fail closed;

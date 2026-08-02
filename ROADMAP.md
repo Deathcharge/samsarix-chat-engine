@@ -85,8 +85,9 @@ This makes the supported topology repeatable without implying that a container m
 - [x] define a storage-neutral application boundary without changing the single-instance default;
 - [x] implement the internal PostgreSQL authoritative store, ordered event log, read state, stable exports, retention, and leased webhook outbox;
 - [x] implement a cursor-backed per-process realtime relay with ordered replay and lease-loss socket fencing;
+- [x] implement PostgreSQL-owned expiring connection leases with atomic global/per-room caps and crash reclamation;
 - [ ] expose guarded PostgreSQL configuration only after the remaining topology gates are proven;
-- [ ] implement and test cross-worker fan-out, presence, distributed rate limits, and reconnect recovery;
+- [ ] implement and test presence, distributed rate limits, and reconnect recovery, then wire the proven cross-worker fan-out path into the application;
 - [ ] run sustained load/soak and reconnect-storm tests and publish measured limits;
 - [ ] add OpenTelemetry hooks only when an operator needs them, with telemetry disabled by default.
 
