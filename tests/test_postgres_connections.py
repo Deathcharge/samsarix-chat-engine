@@ -172,7 +172,8 @@ async def test_expired_socket_and_crashed_instance_occupancy_are_reclaimed(
             await connection.execute(
                 """
                 UPDATE public.samsarix_connection_leases
-                SET lease_expires_at = clock_timestamp() - interval '1 second'
+                SET created_at = clock_timestamp() - interval '2 seconds',
+                    lease_expires_at = clock_timestamp() - interval '1 second'
                 WHERE connection_id = 'socket-old'
                 """
             )
