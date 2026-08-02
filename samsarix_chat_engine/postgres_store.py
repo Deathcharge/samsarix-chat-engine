@@ -921,32 +921,38 @@ class PostgresChatStore:
 
         if delivered and failed:
             raise ValueError("a webhook attempt cannot be delivered and failed")
+        retry_delay_seconds = (
+            max(0.0, (next_attempt_at - attempted_at).total_seconds()) if next_attempt_at is not None else None
+        )
         async with self.foundation.transaction() as connection:
             cursor = await connection.execute(
                 """
-                UPDATE public.samsarix_webhook_deliveries
+                WITH timing AS MATERIALIZED (SELECT clock_timestamp() AS attempted_at)
+                UPDATE public.samsarix_webhook_deliveries AS delivery
                 SET attempt_count = attempt_count + 1,
-                    next_attempt_at = %s,
-                    last_attempt_at = %s,
-                    delivered_at = CASE WHEN %s THEN %s END,
-                    failed_at = CASE WHEN %s THEN %s END,
+                    next_attempt_at = CASE
+                        WHEN %s::double precision IS NULL THEN NULL
+                        ELSE timing.attempted_at + make_interval(secs => %s)
+                    END,
+                    last_attempt_at = timing.attempted_at,
+                    delivered_at = CASE WHEN %s THEN timing.attempted_at END,
+                    failed_at = CASE WHEN %s THEN timing.attempted_at END,
                     last_status_code = %s,
                     last_error = %s,
                     lease_owner = NULL,
                     lease_expires_at = NULL
+                FROM timing
                 WHERE id = %s
-                  AND delivered_at IS NULL
-                  AND failed_at IS NULL
-                  AND lease_owner = %s
-                  AND lease_expires_at > clock_timestamp()
+                  AND delivery.delivered_at IS NULL
+                  AND delivery.failed_at IS NULL
+                  AND delivery.lease_owner = %s
+                  AND delivery.lease_expires_at > timing.attempted_at
                 """,
                 (
-                    next_attempt_at,
-                    attempted_at,
+                    retry_delay_seconds,
+                    retry_delay_seconds,
                     delivered,
-                    attempted_at,
                     failed,
-                    attempted_at,
                     status_code,
                     error[:1000] if error is not None else None,
                     delivery_id,

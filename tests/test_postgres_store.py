@@ -533,7 +533,7 @@ async def test_webhook_lease_recovery_stable_id_and_payload_scrubbing(clean_post
                 delivered=True,
                 failed=False,
             )
-        attempted_at = datetime.now(timezone.utc)
+        attempted_at = datetime(2000, 1, 1, tzinfo=timezone.utc)
         await loser.record_webhook_attempt(
             delivery_id,
             attempted_at=attempted_at,
@@ -545,6 +545,33 @@ async def test_webhook_lease_recovery_stable_id_and_payload_scrubbing(clean_post
         )
         delivered, _ = await first.list_webhook_deliveries(status="delivered")
         assert [item.id for item in delivered] == [delivery_id]
+        assert delivered[0].last_attempt_at is not None and delivered[0].last_attempt_at.year >= 2026
+        assert delivered[0].delivered_at is not None and delivered[0].delivered_at.year >= 2026
+
+        await first.create_message(
+            room_id="general",
+            sender="bob",
+            content="retry later",
+            client_message_id=None,
+            allow_frozen=False,
+            author_subject="bob",
+        )
+        retry_claim = await first.next_webhook_delivery(datetime.now(timezone.utc))
+        assert retry_claim is not None
+        skewed_attempt = datetime(2000, 1, 1, tzinfo=timezone.utc)
+        await first.record_webhook_attempt(
+            retry_claim.delivery.id,
+            attempted_at=skewed_attempt,
+            status_code=503,
+            error="temporary",
+            next_attempt_at=skewed_attempt + timedelta(seconds=45),
+            delivered=False,
+            failed=False,
+        )
+        pending, _ = await first.list_webhook_deliveries(status="pending")
+        scheduled = next(item for item in pending if item.id == retry_claim.delivery.id)
+        assert scheduled.last_attempt_at is not None and scheduled.next_attempt_at is not None
+        assert 44.9 <= (scheduled.next_attempt_at - scheduled.last_attempt_at).total_seconds() <= 45.1
 
         await first.delete_message(
             room_id="general",
