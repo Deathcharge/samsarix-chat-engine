@@ -27,7 +27,7 @@ from .models import (
     WebhookDelivery,
     WebhookDeliveryPage,
 )
-from .store import ChatStore
+from .store import ChatStorage, ChatStore
 from .websocket_manager import ConnectionManager
 
 __version__ = "0.12.0"
@@ -39,6 +39,7 @@ __all__ = [
     "AuditEvent",
     "AuditEventPage",
     "ChatStore",
+    "ChatStorage",
     "ConfigurationError",
     "ConnectionManager",
     "Message",

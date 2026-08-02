@@ -59,6 +59,7 @@ from .models import (
     WebSocketTyping,
 )
 from .store import (
+    ChatStorage,
     ChatStore,
     DatabaseLifecycleLock,
     InvalidAuditCursorError,
@@ -260,7 +261,7 @@ def _stable_subject(principal: Principal) -> str:
 
 
 async def _enforce_member_access(
-    store: ChatStore,
+    store: ChatStorage,
     principal: Principal,
     room_id: str,
     *,

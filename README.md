@@ -228,7 +228,7 @@ CI runs the tests on CPython 3.10–3.14 on Linux and CPython 3.12 on Windows, v
 
 ## Limitations and project status
 
-This is a coherent single-instance MVP, not a hosted chat platform. The container and Compose profile support exactly one process and replica. The highest-value future work is a shared-database-plus-broker multi-instance design, load/soak testing, and attachments with explicit storage policy. Those are intentionally not presented as current capabilities.
+This is a coherent single-instance MVP, not a hosted chat platform. The container and Compose profile support exactly one process and replica. The accepted [multi-instance architecture](docs/MULTI_INSTANCE_ARCHITECTURE.md) selects PostgreSQL plus a transactional event log for v0.13, but remains explicitly unreleased until its cross-process failure gates pass. Load/soak testing and attachments with explicit storage policy follow. Those are intentionally not presented as current capabilities.
 
 ## License
 
