@@ -30,6 +30,8 @@ const EVENT_TYPES = new Set([
   "room.archived",
   "room.frozen",
   "room.unfrozen",
+  "typing.started",
+  "typing.stopped",
 ]);
 
 type EventListener = (event: RoomEvent) => void;
@@ -134,6 +136,10 @@ export class RoomSession {
 
   ping(): void {
     this.send({ type: "ping" });
+  }
+
+  setTyping(active: boolean): void {
+    this.send({ type: "typing", active });
   }
 
   onEvent(listener: EventListener): () => void {
@@ -351,6 +357,16 @@ function isRoomEvent(value: unknown): value is RoomEvent {
     case "room.frozen":
     case "room.unfrozen":
       return "room" in value && isRoom(value.room);
+    case "typing.started":
+      return (
+        isStringField(value, "username") &&
+        "expires_in" in value &&
+        typeof value.expires_in === "number" &&
+        Number.isFinite(value.expires_in) &&
+        value.expires_in > 0
+      );
+    case "typing.stopped":
+      return isStringField(value, "username");
   }
   return false;
 }

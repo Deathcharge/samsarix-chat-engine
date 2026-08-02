@@ -94,6 +94,35 @@ test("operator operations set confirmation headers and accept empty responses", 
   assert.equal(headers.get("X-Confirm-Room-Delete"), "general");
 });
 
+test("read-state methods preserve the signed-subject workflow", async () => {
+  const requests = [];
+  const readState = {
+    room_id: "support",
+    subject: "customer",
+    last_read_message_id: "message-1",
+    last_read_at: "2026-08-01T00:00:00Z",
+    unread_count: 0,
+  };
+  const client = new SamsarixChatClient({
+    baseUrl: "https://chat.example",
+    credential: { token: "customer-token" },
+    fetch: async (url, init) => {
+      requests.push({ url: String(url), init });
+      return init?.method === "DELETE" ? new Response(null, { status: 204 }) : jsonResponse(readState);
+    },
+  });
+
+  assert.deepEqual(await client.getReadState("support"), readState);
+  assert.deepEqual(await client.markRead("support", "message-1"), readState);
+  assert.deepEqual(await client.markRead("support"), readState);
+  await client.clearReadState("support");
+
+  assert.equal(requests[1].init.method, "PUT");
+  assert.deepEqual(JSON.parse(requests[1].init.body), { message_id: "message-1" });
+  assert.deepEqual(JSON.parse(requests[2].init.body), {});
+  assert.equal(requests[3].init.method, "DELETE");
+});
+
 test("room exports preserve the streaming response for operator-controlled consumption", async () => {
   const requests = [];
   const client = new SamsarixChatClient({

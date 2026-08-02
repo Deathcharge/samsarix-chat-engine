@@ -1,6 +1,6 @@
 # API reference
 
-The canonical machine-readable contract is generated at `/openapi.json`; interactive documentation is at `/docs`. This document explains the stable v0.7 behavior that OpenAPI does not fully describe, especially streaming export and WebSockets.
+The canonical machine-readable contract is generated at `/openapi.json`; interactive documentation is at `/docs`. This document explains the stable v0.8 behavior that OpenAPI does not fully describe, especially read state, streaming export, and WebSockets.
 
 ## Authentication
 
@@ -96,6 +96,36 @@ Returns messages in chronological order:
 
 Pages contain the newest matching messages. Message objects include nullable `edited_at` and `deleted_at`; a deleted message has empty `content`. When `next_before` is non-null, pass it as `before` to fetch the next older page. An unknown or cross-room cursor returns `400 invalid_cursor`.
 
+### `GET /v1/rooms/{room_id}/read-state`
+
+Signed application users with `room:read` receive their current room cursor and a count derived from committed messages:
+
+```json
+{
+  "room_id": "general",
+  "subject": "user-123",
+  "last_read_message_id": null,
+  "last_read_at": null,
+  "unread_count": 2
+}
+```
+
+No row is created by a read. With no stored cursor, all non-deleted messages from other subjects count as unread. Shared operator-key and unauthenticated local callers receive `403 stable_subject_required` because they do not identify one durable user.
+
+### `PUT /v1/rooms/{room_id}/read-state`
+
+Advances the signed subject's cursor through one room message:
+
+```json
+{"message_id":"message-id"}
+```
+
+Send `{}` to advance through the room's latest current position. The operation is monotonic and idempotent: submitting an older message never regresses the cursor. An unknown or cross-room ID returns `404 message_not_found`; a new cursor beyond `SAMSARIX_CHAT_MAX_READ_STATES_PER_ROOM` returns `507 read_state_capacity_reached`. The response is the current read state and unread count.
+
+### `DELETE /v1/rooms/{room_id}/read-state`
+
+Deletes the signed caller's stored cursor and returns 204. Repeating the request is idempotent. It never affects another subject.
+
 ### `PATCH /v1/rooms/{room_id}/members/{subject}/moderation`
 
 Admin-only. Applies relative durations of up to one year to a stable signed-token subject. Omit one field to preserve it; use zero to clear it.
@@ -183,6 +213,8 @@ Live events are:
 - `message.updated`: contains the committed current `message`.
 - `message.deleted`: contains the committed message tombstone.
 - `presence.joined` / `presence.left`: contains `username` and the current room connection count; best effort only.
+- `typing.started`: contains `username` and `expires_in`; sent to other connections only when a user transitions to typing.
+- `typing.stopped`: contains `username`; sent after an explicit stop, successful publish, disconnect, or server timeout.
 - `pong`: response to an application-level ping command.
 - `error`: contains a stable `code` and human-readable `message`.
 - `room.archived`: final room metadata before the server closes the connection with 4409.
@@ -199,8 +231,12 @@ Live events are:
 {"type":"ping"}
 ```
 
-Every WebSocket publish checks `room:write` and the current room/member state. Read-only, muted, and frozen-member sessions receive a structured error and remain connected. A banned session closes with 4403. After three invalid commands the server closes with 1008. Binary frames close after repeated rejection with 1003. Oversized frames close with 1009. Capacity rejection uses 1013; a missing room uses 4404.
+```json
+{"type":"typing","active":true}
+```
+
+Every WebSocket publish and typing command checks `room:write` and the current room/member state. Read-only, muted, and frozen-member sessions receive a structured error and remain connected. Typing commands have a separate `SAMSARIX_CHAT_TYPING_EVENTS_PER_MINUTE` allowance and return `typing_rate_limit_exceeded` without consuming the message allowance. Active typing expires after `SAMSARIX_CHAT_TYPING_TIMEOUT`. A banned session closes with 4403. After three invalid commands the server closes with 1008. Binary frames close after repeated rejection with 1003. Oversized frames close with 1009. Capacity rejection uses 1013; a missing room uses 4404.
 
 ## Delivery semantics
 
-Message create/update/delete events are emitted only after SQLite commits the corresponding state. Broadcast is in-process and at-most-once; slow or failed clients are removed after the configured send timeout. Reconnecting clients recover current edits and tombstones from history rather than relying on missed events. Clients should reconnect with backoff, consume the initial history event, and use the HTTP cursor endpoint for older messages. Multi-worker or multi-host fan-out is not implemented in v0.7; lifecycle and ban teardown are deterministic only within the supported single process. The checked-in [TypeScript client](../clients/typescript/README.md) implements this recovery sequence for browser and Node integrations.
+Message create/update/delete events are emitted only after SQLite commits the corresponding state. Broadcast, presence, and typing are in-process and at-most-once; slow or failed clients are removed after the configured send timeout. Typing is never persisted, and clients must honor `expires_in` even if a stop event is missed. Reconnecting clients recover current edits and tombstones from history and current unread state over HTTP rather than relying on missed events. Clients should reconnect with backoff, consume the initial history event, and use the HTTP message cursor endpoint for older messages. Multi-worker or multi-host fan-out is not implemented in v0.8; lifecycle and ban teardown are deterministic only within the supported single process. The checked-in [TypeScript client](../clients/typescript/README.md) implements this recovery sequence for browser and Node integrations.

@@ -18,10 +18,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import IO, Any, TypeVar
 
-from .models import AuditEvent, MemberModeration, MemberModerationUpdate, Message, Room, RoomCreate
+from .models import AuditEvent, MemberModeration, MemberModerationUpdate, Message, ReadState, Room, RoomCreate
 
 T = TypeVar("T")
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 logger = logging.getLogger(__name__)
 
 
@@ -123,6 +123,10 @@ class MemberMutedError(StoreError):
 
 class MemberBannedError(StoreError):
     """Raised when an active room ban blocks a member operation."""
+
+
+class ReadStateCapacityError(StoreError):
+    """Raised when a room has reached its configured persisted read-state cap."""
 
 
 class RetentionNotConfiguredError(StoreError):
@@ -240,6 +244,7 @@ class ChatStore:
         max_rooms: int,
         max_stored_messages: int,
         max_stored_messages_per_room: int,
+        max_read_states_per_room: int = 10_000,
         message_retention_days: int | None = None,
         max_audit_events: int = 100_000,
     ) -> None:
@@ -247,6 +252,7 @@ class ChatStore:
         self.max_rooms = max_rooms
         self.max_stored_messages = max_stored_messages
         self.max_stored_messages_per_room = max_stored_messages_per_room
+        self.max_read_states_per_room = max_read_states_per_room
         self.message_retention_days = message_retention_days
         self.max_audit_events = max_audit_events
         self._write_lock = asyncio.Lock()
@@ -414,6 +420,23 @@ class ChatStore:
     ) -> tuple[list[Message], str | None]:
         return await asyncio.to_thread(self._list_messages_sync, room_id, limit, before)
 
+    async def get_read_state(self, room_id: str, subject: str) -> ReadState:
+        """Return a signed subject's cursor and a current derived unread count."""
+
+        return await asyncio.to_thread(self._get_read_state_sync, room_id, subject)
+
+    async def mark_read(self, room_id: str, subject: str, message_id: str | None) -> ReadState:
+        """Advance a signed subject's room cursor without allowing regression."""
+
+        async with self._write_lock:
+            return await asyncio.to_thread(self._mark_read_sync, room_id, subject, message_id)
+
+    async def clear_read_state(self, room_id: str, subject: str) -> None:
+        """Remove a signed subject's persisted cursor for one room."""
+
+        async with self._write_lock:
+            await asyncio.to_thread(self._clear_read_state_sync, room_id, subject)
+
     def iter_messages(self, room_id: str, *, batch_size: int = 500) -> MessageSnapshot:
         """Stream a consistent room-history snapshot without retaining it all in memory."""
 
@@ -534,6 +557,17 @@ class ChatStore:
                 );
                 CREATE INDEX IF NOT EXISTS room_member_controls_subject
                     ON room_member_controls(subject, room_id);
+
+                CREATE TABLE IF NOT EXISTS room_read_states (
+                    room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+                    subject TEXT NOT NULL,
+                    message_id TEXT,
+                    message_created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (room_id, subject)
+                );
+                CREATE INDEX IF NOT EXISTS room_read_states_subject
+                    ON room_read_states(subject, room_id);
                 """
             )
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")  # noqa: S608 - constant PRAGMA literal
@@ -963,6 +997,111 @@ class ChatStore:
         messages = [self._message_from_row(row) for row in reversed(page_rows)]
         next_before = page_rows[-1]["id"] if has_more and page_rows else None
         return messages, next_before
+
+    def _get_read_state_sync(self, room_id: str, subject: str) -> ReadState:
+        with closing(self._connect()) as connection, connection:
+            if connection.execute("SELECT 1 FROM rooms WHERE id = ?", (room_id,)).fetchone() is None:
+                raise RoomNotFoundError(room_id)
+            return self._read_state_from_connection(connection, room_id, subject)
+
+    def _mark_read_sync(self, room_id: str, subject: str, message_id: str | None) -> ReadState:
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute("SELECT 1 FROM rooms WHERE id = ?", (room_id,)).fetchone() is None:
+                raise RoomNotFoundError(room_id)
+            if message_id is None:
+                message_row = connection.execute(
+                    "SELECT id, created_at FROM messages WHERE room_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+                    (room_id,),
+                ).fetchone()
+            else:
+                message_row = connection.execute(
+                    "SELECT id, created_at FROM messages WHERE room_id = ? AND id = ?",
+                    (room_id, message_id),
+                ).fetchone()
+                if message_row is None:
+                    raise MessageNotFoundError(message_id)
+
+            now = datetime.now(timezone.utc)
+            candidate_created_at = message_row["created_at"] if message_row is not None else now.isoformat()
+            candidate_message_id = message_row["id"] if message_row is not None else None
+            existing = connection.execute(
+                """
+                SELECT message_id, message_created_at, updated_at
+                FROM room_read_states WHERE room_id = ? AND subject = ?
+                """,
+                (room_id, subject),
+            ).fetchone()
+            existing_key = (
+                (existing["message_created_at"], existing["message_id"] or "") if existing is not None else None
+            )
+            candidate_key = (candidate_created_at, candidate_message_id or "")
+            if existing_key is None:
+                count = connection.execute(
+                    "SELECT COUNT(*) FROM room_read_states WHERE room_id = ?", (room_id,)
+                ).fetchone()[0]
+                if count >= self.max_read_states_per_room:
+                    raise ReadStateCapacityError(room_id)
+            if existing_key is None or candidate_key > existing_key:
+                connection.execute(
+                    """
+                    INSERT INTO room_read_states (room_id, subject, message_id, message_created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(room_id, subject) DO UPDATE SET
+                        message_id = excluded.message_id,
+                        message_created_at = excluded.message_created_at,
+                        updated_at = excluded.updated_at
+                    """,
+                    (room_id, subject, candidate_message_id, candidate_created_at, now.isoformat()),
+                )
+            return self._read_state_from_connection(connection, room_id, subject)
+
+    def _clear_read_state_sync(self, room_id: str, subject: str) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute("SELECT 1 FROM rooms WHERE id = ?", (room_id,)).fetchone() is None:
+                raise RoomNotFoundError(room_id)
+            connection.execute("DELETE FROM room_read_states WHERE room_id = ? AND subject = ?", (room_id, subject))
+
+    @staticmethod
+    def _read_state_from_connection(connection: sqlite3.Connection, room_id: str, subject: str) -> ReadState:
+        row = connection.execute(
+            """
+            SELECT message_id, message_created_at, updated_at
+            FROM room_read_states WHERE room_id = ? AND subject = ?
+            """,
+            (room_id, subject),
+        ).fetchone()
+        if row is None:
+            unread_count = connection.execute(
+                """
+                SELECT COUNT(*) FROM messages
+                WHERE room_id = ? AND deleted_at IS NULL AND sender <> ?
+                """,
+                (room_id, subject),
+            ).fetchone()[0]
+            return ReadState(
+                room_id=room_id,
+                subject=subject,
+                last_read_message_id=None,
+                last_read_at=None,
+                unread_count=unread_count,
+            )
+        unread_count = connection.execute(
+            """
+            SELECT COUNT(*) FROM messages
+            WHERE room_id = ? AND deleted_at IS NULL AND sender <> ?
+              AND (created_at > ? OR (created_at = ? AND id > ?))
+            """,
+            (room_id, subject, row["message_created_at"], row["message_created_at"], row["message_id"] or ""),
+        ).fetchone()[0]
+        return ReadState(
+            room_id=room_id,
+            subject=subject,
+            last_read_message_id=row["message_id"],
+            last_read_at=datetime.fromisoformat(row["updated_at"]),
+            unread_count=unread_count,
+        )
 
     def _list_audit_events_sync(self, limit: int, before: str | None) -> tuple[list[AuditEvent], str | None]:
         with closing(self._connect()) as connection, connection:

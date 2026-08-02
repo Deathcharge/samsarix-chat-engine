@@ -52,7 +52,10 @@ def _request(
 
 async def _websocket_round_trip(base_url: str, token: str) -> str:
     websocket_url = base_url.replace("http://", "ws://") + "/v1/rooms/wheel-room/ws"
-    async with connect(websocket_url, max_size=16_384) as websocket:
+    async with (
+        connect(websocket_url, max_size=16_384) as websocket,
+        connect(websocket_url, max_size=16_384) as observer,
+    ):
         required = json.loads(await websocket.recv())
         if required["type"] != "auth.required":
             raise RuntimeError("WebSocket did not request authentication")
@@ -61,10 +64,35 @@ async def _websocket_round_trip(base_url: str, token: str) -> str:
         history = json.loads(await websocket.recv())
         if ready["username"] != "wheel-user" or history["items"][0]["sender"] != "wheel-user":
             raise RuntimeError("WebSocket identity or recovery mismatch")
+
+        observer_required = json.loads(await observer.recv())
+        if observer_required["type"] != "auth.required":
+            raise RuntimeError("WebSocket observer did not request authentication")
+        await observer.send(json.dumps({"type": "auth", "token": token}))
+        observer_ready = json.loads(await observer.recv())
+        observer_history = json.loads(await observer.recv())
+        joined = json.loads(await websocket.recv())
+        if (
+            observer_ready["username"] != "wheel-user"
+            or observer_history["type"] != "history"
+            or joined["type"] != "presence.joined"
+        ):
+            raise RuntimeError("WebSocket observer setup mismatch")
+
+        await websocket.send(json.dumps({"type": "typing", "active": True}))
+        typing_started = json.loads(await observer.recv())
+        if typing_started["type"] != "typing.started" or typing_started["username"] != "wheel-user":
+            raise RuntimeError("WebSocket typing transition mismatch")
         await websocket.send(json.dumps({"type": "message", "content": "installed wheel WebSocket"}))
+        typing_stopped = json.loads(await observer.recv())
+        observer_created = json.loads(await observer.recv())
         created = json.loads(await websocket.recv())
-        if created["message"]["sender"] != "wheel-user":
-            raise RuntimeError("WebSocket sender was not derived from the token")
+        if (
+            typing_stopped["type"] != "typing.stopped"
+            or observer_created["type"] != "message.created"
+            or created["message"]["sender"] != "wheel-user"
+        ):
+            raise RuntimeError("WebSocket typing stop or sender identity mismatch")
         return created["message"]["sender"]
 
 
@@ -154,12 +182,41 @@ def main() -> int:
                 credential=("Authorization", f"Bearer {token}"),
                 body={"content": "installed wheel HTTP"},
             )
+            _request(
+                base_url + "/v1/rooms/wheel-room/messages",
+                method="POST",
+                credential=("X-API-Key", operator_key),
+                body={"sender": "Support agent", "content": "installed wheel unread"},
+            )
             history = _request(
                 base_url + "/v1/rooms/wheel-room/messages",
                 credential=("Authorization", f"Bearer {token}"),
             )
+            read_before = _request(
+                base_url + "/v1/rooms/wheel-room/read-state",
+                credential=("Authorization", f"Bearer {token}"),
+            )
+            read_after = _request(
+                base_url + "/v1/rooms/wheel-room/read-state",
+                method="PUT",
+                credential=("Authorization", f"Bearer {token}"),
+                body={},
+            )
+            cleared_read = _request(
+                base_url + "/v1/rooms/wheel-room/read-state",
+                method="DELETE",
+                credential=("Authorization", f"Bearer {token}"),
+            )
+            if read_before["unread_count"] != 1 or read_after["unread_count"] != 0 or cleared_read is not None:
+                raise RuntimeError("installed-wheel read-state journey mismatch")
+            _request(
+                base_url + "/v1/rooms/wheel-room/read-state",
+                method="PUT",
+                credential=("Authorization", f"Bearer {token}"),
+                body={},
+            )
             websocket_sender = asyncio.run(_websocket_round_trip(base_url, token))
-            if room["id"] != "wheel-room" or message["sender"] != "wheel-user" or len(history["items"]) != 1:
+            if room["id"] != "wheel-room" or message["sender"] != "wheel-user" or len(history["items"]) != 2:
                 raise RuntimeError("installed-wheel HTTP journey mismatch")
             edited = _request(
                 base_url + f"/v1/rooms/wheel-room/messages/{message['id']}",
@@ -244,7 +301,7 @@ def main() -> int:
             if not database.is_file() or database.stat().st_size == 0:
                 raise RuntimeError("installed-wheel database was not persisted")
             print(
-                f"http=ok websocket=ok controls=ok export=ok lifecycle=ok backup=ok "
+                f"http=ok websocket=ok read_state=ok typing=ok controls=ok export=ok lifecycle=ok backup=ok "
                 f"sender={websocket_sender} history={len(history['items'])}"
             )
         finally:

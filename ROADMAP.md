@@ -53,11 +53,16 @@ Attachments, search, reactions, threads, and mentions should be added only again
 
 ## v0.8 — application workflows
 
-- add opt-in read cursors/unread counts and ephemeral typing indicators with explicit privacy/cost limits;
-- add signed webhooks for committed message and moderation events with timeouts, retry caps, and idempotency;
-- publish a complete reference integration against a named support or community journey.
+- [x] add opt-in read cursors/unread counts and ephemeral typing indicators with explicit privacy/cost limits;
+- [x] publish a complete reference integration against an authenticated support-room journey.
 
-## v0.9 — measured multi-instance operation
+## v0.9 — reliable application delivery
+
+- add signed webhooks for committed message and moderation events with timeouts, bounded retries, replay protection, and idempotency;
+- expose delivery health and dead-letter recovery without weakening local message commits;
+- document receiver verification, secret rotation, and failure-mode runbooks.
+
+## v0.10 — measured multi-instance operation
 
 - define a broker/history adapter boundary without changing the single-instance default;
 - implement and test cross-worker fan-out, presence, distributed rate limits, and reconnect recovery;

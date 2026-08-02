@@ -48,6 +48,14 @@ export interface MessagePage {
   next_before: string | null;
 }
 
+export interface ReadState {
+  room_id: string;
+  subject: string;
+  last_read_message_id: string | null;
+  last_read_at: string | null;
+  unread_count: number;
+}
+
 export interface MemberModerationUpdate {
   muted_for_seconds?: number;
   banned_for_seconds?: number;
@@ -112,6 +120,17 @@ export interface PongEvent {
   type: "pong";
 }
 
+export interface TypingStartedEvent {
+  type: "typing.started";
+  username: string;
+  expires_in: number;
+}
+
+export interface TypingStoppedEvent {
+  type: "typing.stopped";
+  username: string;
+}
+
 export interface ErrorEvent {
   type: "error";
   code: string;
@@ -134,6 +153,8 @@ export type RoomEvent =
   | RoomStateEvent
   | MemberBannedEvent
   | PongEvent
+  | TypingStartedEvent
+  | TypingStoppedEvent
   | ErrorEvent
   | AuthRequiredEvent;
 

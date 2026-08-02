@@ -14,12 +14,20 @@ const client = new SamsarixChatClient({ baseUrl, credential: { token } });
 const room = await client.getRoom("sdk-room");
 assert.equal(room.name, "SDK Room");
 
+const initialReadState = await client.getReadState("sdk-room");
+assert.equal(initialReadState.unread_count, 1);
+
 const created = await client.createMessage(
   "sdk-room",
   { content: "TypeScript HTTP", client_message_id: "sdk-http-1" },
   "sdk-http-1",
 );
 assert.equal(created.sender, "sdk-user");
+const markedRead = await client.markRead("sdk-room", created.id);
+assert.equal(markedRead.unread_count, 0);
+await client.clearReadState("sdk-room");
+assert.equal((await client.getReadState("sdk-room")).unread_count, 1);
+await client.markRead("sdk-room");
 
 const session = client.roomSession("sdk-room", {
   reconnect: { initialDelayMs: 10, maxDelayMs: 50, maxAttempts: 2, jitter: 0 },

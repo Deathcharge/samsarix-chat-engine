@@ -17,7 +17,7 @@ from samsarix_chat_engine.config import ConfigurationError, Settings
 
 
 def test_public_api_and_parser_help() -> None:
-    assert samsarix_chat_engine.__version__ == "0.7.0"
+    assert samsarix_chat_engine.__version__ == "0.8.0"
     assert callable(samsarix_chat_engine.create_app)
     help_text = build_parser().format_help()
     assert "serve" in help_text
@@ -30,6 +30,9 @@ def test_settings_from_env_and_validation(monkeypatch: pytest.MonkeyPatch, tmp_p
     monkeypatch.setenv("SAMSARIX_CHAT_MAX_MESSAGE_CHARS", "123")
     monkeypatch.setenv("SAMSARIX_CHAT_MESSAGE_RETENTION_DAYS", "30")
     monkeypatch.setenv("SAMSARIX_CHAT_MAX_AUDIT_EVENTS", "500")
+    monkeypatch.setenv("SAMSARIX_CHAT_MAX_READ_STATES_PER_ROOM", "250")
+    monkeypatch.setenv("SAMSARIX_CHAT_TYPING_EVENTS_PER_MINUTE", "45")
+    monkeypatch.setenv("SAMSARIX_CHAT_TYPING_TIMEOUT", "6.5")
     settings = Settings.from_env()
 
     assert settings.database_path == tmp_path / "configured.db"
@@ -37,6 +40,9 @@ def test_settings_from_env_and_validation(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert settings.max_message_chars == 123
     assert settings.message_retention_days == 30
     assert settings.max_audit_events == 500
+    assert settings.max_read_states_per_room == 250
+    assert settings.typing_events_per_minute == 45
+    assert settings.typing_timeout_seconds == 6.5
 
     monkeypatch.setenv("SAMSARIX_CHAT_MAX_CONNECTIONS", "not-a-number")
     with pytest.raises(ConfigurationError, match="must be an integer"):
@@ -49,6 +55,10 @@ def test_settings_from_env_and_validation(monkeypatch: pytest.MonkeyPatch, tmp_p
         Settings(allowed_origins=("https://chat.example/path",))
     with pytest.raises(ConfigurationError, match="between 1 and 3650"):
         Settings(message_retention_days=0)
+    with pytest.raises(ConfigurationError, match="max_read_states_per_room"):
+        Settings(max_read_states_per_room=0)
+    with pytest.raises(ConfigurationError, match="typing_timeout_seconds"):
+        Settings(typing_timeout_seconds=31)
     monkeypatch.setenv("SAMSARIX_CHAT_MESSAGE_RETENTION_DAYS", "not-a-number")
     with pytest.raises(ConfigurationError, match="must be an integer"):
         Settings.from_env()
@@ -146,7 +156,7 @@ def test_legacy_import_and_environment_aliases(monkeypatch: pytest.MonkeyPatch, 
     with pytest.warns(DeprecationWarning, match="import samsarix_chat_engine"):
         legacy_package = importlib.import_module("helix_chat_engine")
     assert legacy_package.Settings is Settings
-    assert legacy_package.__version__ == "0.7.0"
+    assert legacy_package.__version__ == "0.8.0"
     assert importlib.import_module("helix_chat_engine.app").create_app is samsarix_chat_engine.create_app
     assert importlib.import_module("helix_chat_engine.cli").main is main
     assert importlib.import_module("helix_chat_engine.config").Settings is Settings

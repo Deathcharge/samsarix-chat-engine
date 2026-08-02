@@ -94,6 +94,11 @@ def main() -> int:
                 api_key=api_key,
                 body={"id": "sdk-room", "name": "SDK Room"},
             )
+            _request(
+                base_url + "/v1/rooms/sdk-room/messages",
+                api_key=api_key,
+                body={"sender": "Operator", "content": "Unread SDK seed"},
+            )
             token = subprocess.run(  # noqa: S603 - fixed interpreter/module and controlled arguments
                 [
                     sys.executable,

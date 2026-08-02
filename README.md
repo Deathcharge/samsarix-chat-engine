@@ -2,7 +2,7 @@
 
 Samsarix Chat Engine is a small, local-first room chat service from Samsarix LLC for developers who need persisted messages and live WebSocket delivery without adopting a full collaboration platform. It runs as a standalone FastAPI service or as an embeddable ASGI application, stores data in SQLite, and has no dependency on Redis, an LLM provider, or any private package.
 
-Version 0.7.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, accountable data lifecycle, practical conversation controls, and typed TypeScript integration client are implemented and tested. The project is licensed under the standard Mozilla Public License 2.0.
+Version 0.8.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, accountable data lifecycle, practical conversation controls, typed TypeScript client, and support-workflow primitives are implemented and tested. The project is licensed under the standard Mozilla Public License 2.0.
 
 ## What works
 
@@ -13,6 +13,8 @@ Version 0.7.0 is an alpha release candidate. Its core single-instance journey, t
 - Retry message submission safely with `Idempotency-Key` or `client_message_id`.
 - Protect operator actions with an optional shared API key.
 - Give application users signed, expiring, per-room read/write access tokens.
+- Track signed users' monotonic room read cursors and current unread counts without counting their own messages.
+- Exchange separately rate-limited, auto-expiring typing signals without persisting activity history.
 - Let authors edit or delete their own messages while administrators can moderate any message.
 - Freeze rooms for administrator-only announcements, mute disruptive members, and ban room access by token subject.
 - Integrate from browser or Node applications with a typed, zero-runtime-dependency TypeScript client.
@@ -67,6 +69,8 @@ python examples/02_websocket_chat.py
 
 See [Getting started](docs/GETTING_STARTED.md) for authentication and browser examples, [Conversation controls](docs/CONVERSATION_CONTROLS.md) for moderation workflows, and [Data lifecycle operations](docs/OPERATIONS.md) for export, deletion, retention, backup, and restore.
 
+The [application-workflow guide](docs/APPLICATION_WORKFLOWS.md) and runnable `examples/03_support_workflow.py` show a two-party support case with separate customer and agent identities.
+
 ## TypeScript client
 
 The framework-neutral [`@samsarix/chat-client`](clients/typescript/README.md) source ships in `clients/typescript`. It wraps authenticated HTTP operations and browser-safe first-message WebSocket authentication, emits generated declarations, refreshes credentials on reconnect, and applies bounded exponential backoff without runtime dependencies. The package is verified and packable but is not yet published to npm.
@@ -89,9 +93,13 @@ The server sends `ready` and `history`, then accepts these JSON commands:
 {"type":"ping"}
 ```
 
-Clients receive `message.created`, `message.updated`, `message.deleted`, room-state, moderation, presence, `pong`, and structured `error` events. Browser clients first receive `auth.required` and reply with `{"type":"auth","token":"..."}`. Token identity supplies the username; legacy local/operator connections still use `?username=`. API keys and tokens are never accepted in query strings.
+```json
+{"type":"typing","active":true}
+```
 
-The exact HTTP and event contracts are in [API reference](docs/API_REFERENCE.md). See [Identity and room authorization](docs/AUTHORIZATION.md) for issuance and permission examples.
+Clients receive `message.created`, `message.updated`, `message.deleted`, `typing.started`, `typing.stopped`, room-state, moderation, presence, `pong`, and structured `error` events. Browser clients first receive `auth.required` and reply with `{"type":"auth","token":"..."}`. Token identity supplies the username; legacy local/operator connections still use `?username=`. API keys and tokens are never accepted in query strings.
+
+The exact HTTP and event contracts are in [API reference](docs/API_REFERENCE.md). See [Identity and room authorization](docs/AUTHORIZATION.md) for issuance and permission examples, and [Application workflows](docs/APPLICATION_WORKFLOWS.md) for the end-to-end support-room integration.
 
 ## Configuration
 
@@ -114,6 +122,9 @@ All settings are optional for loopback development. Copy [.env.example](.env.exa
 | `SAMSARIX_CHAT_MAX_ROOMS` | `1000` | Persisted room cap |
 | `SAMSARIX_CHAT_MAX_STORED_MESSAGES` | `100000` | Global retained-message cap |
 | `SAMSARIX_CHAT_MAX_STORED_MESSAGES_PER_ROOM` | `10000` | Per-room retained-message cap |
+| `SAMSARIX_CHAT_MAX_READ_STATES_PER_ROOM` | `10000` | Persisted signed-user read cursors per room |
+| `SAMSARIX_CHAT_TYPING_EVENTS_PER_MINUTE` | `60` | Typing commands allowed per signed subject or unauthenticated/operator client address |
+| `SAMSARIX_CHAT_TYPING_TIMEOUT` | `8` | Seconds before an active typing signal automatically expires |
 | `SAMSARIX_CHAT_MESSAGE_RETENTION_DAYS` | unset | Optional maximum message age, 1–3650 days |
 | `SAMSARIX_CHAT_MAX_AUDIT_EVENTS` | `100000` | Retained administrative audit-event cap |
 | `SAMSARIX_CHAT_WS_AUTH_TIMEOUT` | `5` | Browser authentication deadline in seconds |
@@ -148,6 +159,8 @@ HTTP / WebSocket clients
 
 - SQLite writes are serialized within one process and use `BEGIN IMMEDIATE`; foreign keys, WAL mode, and a five-second busy timeout are enabled.
 - A message is persisted before `message.created` is broadcast. An HTTP success therefore means the local database committed it.
+- Signed users can persist a monotonic per-room read cursor and retrieve a current unread count that excludes their own and deleted messages.
+- Typing signals are transition-only, separately rate-limited, automatically expired, and never persisted or audited.
 - WebSocket delivery and presence events are best-effort/at-most-once. Reconnecting clients recover the last 50 messages and can page older history over HTTP.
 - Running multiple worker processes is not supported: each process would have an independent connection registry and rate limiter. Use one process or add a real broker in a future release.
 - Retention always applies configured count caps and can additionally apply an operator-selected maximum age.
@@ -177,12 +190,12 @@ CI runs the tests on CPython 3.10–3.14 on Linux and CPython 3.12 on Windows. S
 
 ## Limitations and project status
 
-This is a coherent single-instance MVP, not a hosted chat platform. The highest-value future work is a reference application, read/unread state, signed webhooks, a multi-instance broker adapter, attachments with explicit storage policy, and load/soak testing. Those are intentionally not presented as current capabilities.
+This is a coherent single-instance MVP, not a hosted chat platform. The highest-value future work is signed webhook delivery, a multi-instance broker adapter, attachments with explicit storage policy, and load/soak testing. Those are intentionally not presented as current capabilities.
 
 ## License
 
 Copyright (c) 2026 Samsarix LLC. The source is licensed under the [Mozilla Public License 2.0](LICENSE). MPL-2.0 keeps distributed modifications to covered source files open and preserves license notices, while allowing those files to be combined with separate proprietary files in a larger work.
 
-The canonical Python package, command, and environment prefix are `samsarix_chat_engine`, `samsarix-chat`, and `SAMSARIX_CHAT_*`. Version 0.7 keeps `helix_chat_engine`, `helix-chat`, and `HELIX_CHAT_*` as deprecated compatibility aliases. If only `data/helix-chat.db` exists, the CLI reuses it so the rename does not hide existing data.
+The canonical Python package, command, and environment prefix are `samsarix_chat_engine`, `samsarix-chat`, and `SAMSARIX_CHAT_*`. Version 0.8 keeps `helix_chat_engine`, `helix-chat`, and `HELIX_CHAT_*` as deprecated compatibility aliases. If only `data/helix-chat.db` exists, the CLI reuses it so the rename does not hide existing data.
 
 For general inquiries, email contact@samsarix.com. For product support and private security reports, email support@samsarix.com or read [SECURITY.md](SECURITY.md).

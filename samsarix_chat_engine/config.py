@@ -120,8 +120,11 @@ class Settings:
     max_rooms: int = 1_000
     max_stored_messages: int = 100_000
     max_stored_messages_per_room: int = 10_000
+    max_read_states_per_room: int = 10_000
     message_retention_days: int | None = None
     max_audit_events: int = 100_000
+    typing_events_per_minute: int = 60
+    typing_timeout_seconds: float = 8.0
     websocket_auth_timeout_seconds: float = 5.0
     websocket_send_timeout_seconds: float = 2.0
     websocket_max_bytes: int = 16_384
@@ -147,7 +150,9 @@ class Settings:
             "max_rooms": (self.max_rooms, 1, 1_000_000),
             "max_stored_messages": (self.max_stored_messages, 1, 10_000_000),
             "max_stored_messages_per_room": (self.max_stored_messages_per_room, 1, 1_000_000),
+            "max_read_states_per_room": (self.max_read_states_per_room, 1, 1_000_000),
             "max_audit_events": (self.max_audit_events, 100, 10_000_000),
+            "typing_events_per_minute": (self.typing_events_per_minute, 1, 100_000),
             "websocket_max_bytes": (self.websocket_max_bytes, 256, 16_777_216),
             "token_max_lifetime_seconds": (self.token_max_lifetime_seconds, 60, 604_800),
             "token_clock_skew_seconds": (self.token_clock_skew_seconds, 0, 300),
@@ -165,6 +170,8 @@ class Settings:
             raise ConfigurationError("websocket_auth_timeout_seconds must be between 0.1 and 60")
         if not 0.1 <= self.websocket_send_timeout_seconds <= 60:
             raise ConfigurationError("websocket_send_timeout_seconds must be between 0.1 and 60")
+        if not 1 <= self.typing_timeout_seconds <= 30:
+            raise ConfigurationError("typing_timeout_seconds must be between 1 and 30")
         for origin in self.allowed_origins:
             parsed = urlparse(origin)
             if (
@@ -208,8 +215,11 @@ class Settings:
             max_stored_messages_per_room=_read_int(
                 "MAX_STORED_MESSAGES_PER_ROOM", 10_000, minimum=1, maximum=1_000_000
             ),
+            max_read_states_per_room=_read_int("MAX_READ_STATES_PER_ROOM", 10_000, minimum=1, maximum=1_000_000),
             message_retention_days=_read_optional_int("MESSAGE_RETENTION_DAYS", minimum=1, maximum=3_650),
             max_audit_events=_read_int("MAX_AUDIT_EVENTS", 100_000, minimum=100, maximum=10_000_000),
+            typing_events_per_minute=_read_int("TYPING_EVENTS_PER_MINUTE", 60, minimum=1, maximum=100_000),
+            typing_timeout_seconds=_read_float("TYPING_TIMEOUT", 8.0, minimum=1, maximum=30),
             websocket_auth_timeout_seconds=_read_float("WS_AUTH_TIMEOUT", 5.0, minimum=0.1, maximum=60),
             websocket_send_timeout_seconds=_read_float("WS_SEND_TIMEOUT", 2.0, minimum=0.1, maximum=60),
             websocket_max_bytes=_read_int("WS_MAX_BYTES", 16_384, minimum=256, maximum=16_777_216),

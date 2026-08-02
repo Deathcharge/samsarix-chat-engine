@@ -302,14 +302,18 @@ def test_v1_database_migrates_in_place(tmp_path, caplog: pytest.LogCaptureFixtur
         version = connection.execute("PRAGMA user_version").fetchone()[0]
         columns = {row[1] for row in connection.execute("PRAGMA table_info(rooms)")}
         message_columns = {row[1] for row in connection.execute("PRAGMA table_info(messages)")}
+        read_state_table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'room_read_states'"
+        ).fetchone()
 
     assert room.status_code == 200
     assert room.json()["archived_at"] is None
     assert history.json()["items"][0]["content"] == "preserved"
-    assert version == 3
+    assert version == 4
     assert {"archived_at", "frozen_at"} <= columns
     assert {"edited_at", "deleted_at"} <= message_columns
-    assert "Migrating database schema from version 1 to 3" in caplog.text
+    assert read_state_table is not None
+    assert "Migrating database schema from version 1 to 4" in caplog.text
 
 
 def test_v2_database_migrates_conversation_controls_in_place(tmp_path) -> None:
@@ -368,9 +372,13 @@ def test_v2_database_migrates_conversation_controls_in_place(tmp_path) -> None:
         controls_table = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'room_member_controls'"
         ).fetchone()
+        read_state_table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'room_read_states'"
+        ).fetchone()
 
-    assert version == 3
+    assert version == 4
     assert controls_table is not None
+    assert read_state_table is not None
     assert room["frozen_at"] is None
     assert message["content"] == "preserved"
     assert message["edited_at"] is None
@@ -384,11 +392,11 @@ def test_v2_database_migrates_conversation_controls_in_place(tmp_path) -> None:
 def test_newer_database_schema_is_refused_without_mutation(tmp_path) -> None:
     database = tmp_path / "future.db"
     with closing(sqlite3.connect(database)) as connection, connection:
-        connection.execute("PRAGMA user_version = 4")
+        connection.execute("PRAGMA user_version = 5")
 
     with pytest.raises(UnsupportedSchemaVersionError, match="newer than supported"):
         with TestClient(create_app(Settings(database_path=database))):
             pass
 
     with closing(sqlite3.connect(database)) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
