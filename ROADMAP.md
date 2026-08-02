@@ -87,8 +87,9 @@ This makes the supported topology repeatable without implying that a container m
 - [x] implement a cursor-backed per-process realtime relay with ordered replay and lease-loss socket fencing;
 - [x] implement PostgreSQL-owned expiring connection leases with atomic global/per-room caps and crash reclamation;
 - [x] implement bounded PostgreSQL-owned message, search, and typing rate buckets with database-time windows;
+- [x] implement connection-bound PostgreSQL typing transitions, refresh, and bounded expiry sweeping;
 - [ ] expose guarded PostgreSQL configuration only after the remaining topology gates are proven;
-- [ ] implement and test presence/typing expiry and reconnect recovery, then wire the proven cross-worker fan-out and rate-control paths into the application;
+- [ ] implement and test lease-derived presence and reconnect recovery, then wire the proven cross-worker fan-out, typing, and rate-control paths into the application;
 - [ ] run sustained load/soak and reconnect-storm tests and publish measured limits;
 - [ ] add OpenTelemetry hooks only when an operator needs them, with telemetry disabled by default.
 

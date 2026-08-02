@@ -23,7 +23,7 @@ from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
-POSTGRES_SCHEMA_VERSION = 5
+POSTGRES_SCHEMA_VERSION = 6
 POSTGRES_MIGRATION_LOCK_ID = 7_495_346_927_831_819_041
 POSTGRES_EVENT_SEQUENCE_LOCK_ID = 7_495_346_927_831_819_042
 REALTIME_CHANNEL = "samsarix_realtime_v1"
@@ -470,6 +470,32 @@ class PostgresFoundation:
                     """
                     CREATE INDEX IF NOT EXISTS samsarix_connection_leases_member
                     ON public.samsarix_connection_leases (room_id, subject, lease_expires_at)
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS public.samsarix_typing_states (
+                        connection_id TEXT PRIMARY KEY REFERENCES public.samsarix_connection_leases(connection_id)
+                            ON DELETE CASCADE,
+                        room_id TEXT NOT NULL REFERENCES public.samsarix_rooms(id) ON DELETE CASCADE,
+                        username TEXT NOT NULL CHECK (char_length(username) BETWEEN 1 AND 64),
+                        expires_at TIMESTAMPTZ NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                        CHECK (expires_at > created_at)
+                    )
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS samsarix_typing_states_expiry
+                    ON public.samsarix_typing_states (expires_at, connection_id)
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS samsarix_typing_states_room
+                    ON public.samsarix_typing_states (room_id, expires_at, connection_id)
                     """
                 )
                 await connection.execute(

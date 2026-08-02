@@ -14,6 +14,7 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 - Internal per-process PostgreSQL realtime relay with durable cursors, ordered polling/replay, post-dispatch acknowledgement, archive/ban socket teardown, and lease-loss fencing. Polling is the correctness path; a future `LISTEN`/`NOTIFY` listener may only reduce latency.
 - PostgreSQL schema v4 and an internal connection registry with database-time socket leases, atomic deployment-wide and per-room capacity, owner-bound renewal/release, archived-room rejection, and crashed-process reclamation.
 - PostgreSQL schema v5 and internal deployment-wide message, search, and typing rate buckets with atomic per-identity consumption, database-time boundaries, bounded active cardinality, and raw-key minimization.
+- PostgreSQL schema v6 and internal connection-bound typing state with transition-only starts, refresh without event storms, explicit stops, database-time expiry, and bounded concurrent sweeping into durable coordination events.
 
 ### Security and operations
 
@@ -26,6 +27,7 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 - A PostgreSQL relay that loses its database lease closes every local socket before renewing the same durable cursor. Unsupported internal event types are not forwarded onto the public WebSocket protocol.
 - Expired process IDs discard their stale socket rows before re-registration, preventing a restarted replica from reviving phantom occupancy. Archived and expired reservations stop consuming capacity even before physical cleanup.
 - Distributed rate buckets persist only a scope-separated SHA-256 digest of the caller key. The digest reduces routine identity exposure but is not anonymization; database access and retention still require normal privacy controls.
+- Internal typing coordination events retain an opaque origin connection ID so future application wiring can exclude the sender. The public realtime relay does not forward these events until that exclusion contract is implemented; clients must continue treating advertised expiry as the stop-event backstop.
 
 ## 0.12.0 — 2026-08-02
 

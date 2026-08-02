@@ -96,7 +96,7 @@ async def test_schema_v2_migrates_transactionally_and_widens_event_payloads(
     service = _store(clean_postgres_database)
     await service.initialize()
     try:
-        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 5
+        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 6
         assert await service.check_ready()
         assert await service.list_rooms() == []
         async with service.foundation.transaction() as connection:
