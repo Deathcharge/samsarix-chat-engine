@@ -83,6 +83,9 @@ minversion = "8.0"
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 asyncio_mode = "auto"
+markers = [
+    "postgres: requires the dedicated live PostgreSQL test database",
+]
 
 [tool.coverage.run]
 branch = true
