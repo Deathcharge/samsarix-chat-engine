@@ -134,6 +134,23 @@ Version 0.5 closes the primary operational privacy gap for controlled single-ins
 
 Version 0.6 supplies the conversation-control layer needed by embedded support, education, private-community, and live-event products. Signed authors can edit or tombstone their own messages; administrators can moderate any message. Room freeze preserves connected readers while reserving writes for administrators. Relative mute and ban controls bind to stable token subjects, with mute preserving reads and ban immediately evicting matching live sockets. Current message state survives reconnect, and audit records only message IDs and moderation metadata. Schema versions 1 and 2 migrate in place to version 3. The design is grounded in the analogous primitives documented by [Sendbird](https://docs.sendbird.com/docs/chat/platform-api/v3/moderation/moderation-overview), [Discord](https://docs.discord.com/developers/resources/message), and [Ably](https://ably.com/docs/chat/rooms/messages).
 
+Version 0.7 reduces adoption friction with a checked-in, framework-neutral TypeScript client. It uses zero runtime dependencies, generated declarations, explicit ESM exports, injected web-standard transports, stable API errors, typed protocol events, first-message authentication, async credential refresh, and bounded reconnect state. The package shape follows [TypeScript's bundled-declaration guidance](https://www.typescriptlang.org/docs/handbook/declaration-files/publishing.html) and [Node's explicit-exports guidance](https://nodejs.org/api/packages.html); the reconnect observer surface reflects the connection states exposed by mature chat SDKs such as [Sendbird](https://sendbird.com/docs/chat/sdk/v4/javascript/event-handler/managing-connection-event-handlers/add-or-remove-a-connection-event-handler). The npm artifact is buildable and verified but remains unpublished until the owner chooses a package namespace/release gate.
+
+Final v0.7 local verification on 2026-08-01 used Node 24.12.0 and CPython 3.14.6, including clean installs of both built artifacts:
+
+| Check | Actual result |
+| --- | --- |
+| `ruff check .` / `ruff format --check .` | Passed; 30 Python files formatted |
+| `mypy samsarix_chat_engine` / `compileall` | Passed; no issues in 9 source files |
+| `pytest --cov=samsarix_chat_engine --cov-report=term-missing` | 82 passed in 27.17s; 91.20% total branch coverage |
+| TypeScript `check` / Node test runner | Passed; strict declaration build and 15/15 fake-transport/API tests |
+| TypeScript production audit / package inspection | Zero runtime dependencies, no known vulnerabilities, and 23 intended artifact files |
+| real TypeScript integration smoke | Authenticated HTTP, first-message WebSocket auth, history, publish, edit, delete, and tombstone recovery passed |
+| Python sdist / wheel / `twine check` | Wheel built from the 78-entry sdist; client source included, generated/dependency trees excluded, and both metadata checks passed |
+| clean npm and wheel installs | ESM/type package import and expanded installed-wheel HTTP/WebSocket/lifecycle/backup smoke passed |
+
+Exact Python sdist, Python wheel, and npm tarball digests are recorded in the pull request because embedding them in packaged source would change the source archive digest.
+
 Final v0.6 local verification on 2026-08-01 used CPython 3.11.9 for the source suite and a clean CPython 3.14.6 environment for the installed artifact:
 
 | Check | Actual result |
@@ -222,7 +239,7 @@ This v0.3 verification was local on Windows with CPython 3.11.9. The configured 
 
 ## Deferred and blocked work
 
-A stable client SDK, multi-instance fan-out, attachment storage policy, and load testing are genuine next-stage local engineering, ordered in the roadmap. A typed client SDK is the highest-value next gate because it makes the now-stable authorization, lifecycle, and moderation contracts easier to embed safely.
+A complete reference application, read/unread state, signed webhook delivery, multi-instance fan-out, attachment storage policy, and load testing are genuine next-stage local engineering, ordered in the roadmap. The reference workflow and reliable committed-event integration are the highest-value next gates because they turn the stable service and SDK contracts into an immediately evaluable product journey.
 
 Public package publication, hosted deployment, domains, credentials, signing, and pricing remain owner-controlled. No external accounts, infrastructure, releases, or spending were created as part of the local productization work.
 

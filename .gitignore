@@ -32,6 +32,8 @@ env.bak/
 venv.bak/
 .idea/
 .vscode/
+clients/typescript/dist/
+clients/typescript/node_modules/
 *.swp
 *.swo
 *~

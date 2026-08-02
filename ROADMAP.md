@@ -48,12 +48,16 @@ Attachments, search, reactions, threads, and mentions should be added only again
 
 ## v0.7 — integration ergonomics
 
-- ship a small framework-neutral TypeScript protocol client with reconnect and event-state helpers;
+- [x] ship a small framework-neutral TypeScript protocol client with reconnect and event-state helpers;
+- [x] bundle declarations, explicit ESM exports, fake-transport tests, package verification, and a dedicated Node CI gate;
+
+## v0.8 — application workflows
+
 - add opt-in read cursors/unread counts and ephemeral typing indicators with explicit privacy/cost limits;
 - add signed webhooks for committed message and moderation events with timeouts, retry caps, and idempotency;
 - publish a complete reference integration against a named support or community journey.
 
-## v0.8 — measured multi-instance operation
+## v0.9 — measured multi-instance operation
 
 - define a broker/history adapter boundary without changing the single-instance default;
 - implement and test cross-worker fan-out, presence, distributed rate limits, and reconnect recovery;

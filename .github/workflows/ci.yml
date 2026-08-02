@@ -61,3 +61,33 @@ jobs:
       - run: python -m venv .wheel-smoke
       - run: .wheel-smoke/bin/python -m pip install dist/*.whl
       - run: .wheel-smoke/bin/python scripts/smoke_installed_wheel.py
+
+  typescript-client:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/typescript
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: clients/typescript/package-lock.json
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip setuptools wheel
+        working-directory: .
+      - run: python -m pip install .
+        working-directory: .
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run pack:check
+      - run: npm audit --omit=dev
+      - run: python scripts/smoke_typescript_client.py
+        working-directory: .

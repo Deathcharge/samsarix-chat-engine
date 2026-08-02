@@ -1,6 +1,6 @@
 # API reference
 
-The canonical machine-readable contract is generated at `/openapi.json`; interactive documentation is at `/docs`. This document explains the stable v0.6 behavior that OpenAPI does not fully describe, especially streaming export and WebSockets.
+The canonical machine-readable contract is generated at `/openapi.json`; interactive documentation is at `/docs`. This document explains the stable v0.7 behavior that OpenAPI does not fully describe, especially streaming export and WebSockets.
 
 ## Authentication
 
@@ -203,4 +203,4 @@ Every WebSocket publish checks `room:write` and the current room/member state. R
 
 ## Delivery semantics
 
-Message create/update/delete events are emitted only after SQLite commits the corresponding state. Broadcast is in-process and at-most-once; slow or failed clients are removed after the configured send timeout. Reconnecting clients recover current edits and tombstones from history rather than relying on missed events. Clients should reconnect with backoff, consume the initial history event, and use the HTTP cursor endpoint for older messages. Multi-worker or multi-host fan-out is not implemented in v0.6; lifecycle and ban teardown are deterministic only within the supported single process.
+Message create/update/delete events are emitted only after SQLite commits the corresponding state. Broadcast is in-process and at-most-once; slow or failed clients are removed after the configured send timeout. Reconnecting clients recover current edits and tombstones from history rather than relying on missed events. Clients should reconnect with backoff, consume the initial history event, and use the HTTP cursor endpoint for older messages. Multi-worker or multi-host fan-out is not implemented in v0.7; lifecycle and ban teardown are deterministic only within the supported single process. The checked-in [TypeScript client](../clients/typescript/README.md) implements this recovery sequence for browser and Node integrations.
