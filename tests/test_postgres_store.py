@@ -59,7 +59,9 @@ async def store(clean_postgres_database: str) -> AsyncIterator[PostgresChatStore
 
 
 @pytest.mark.asyncio
-async def test_schema_v1_migrates_transactionally(clean_postgres_database: str) -> None:
+async def test_schema_v2_migrates_transactionally_and_widens_event_payloads(
+    clean_postgres_database: str,
+) -> None:
     async with await psycopg.AsyncConnection.connect(clean_postgres_database, autocommit=True) as connection:
         await connection.execute(
             """
@@ -70,7 +72,24 @@ async def test_schema_v1_migrates_transactionally(clean_postgres_database: str) 
             )
             """
         )
-        await connection.execute("INSERT INTO public.samsarix_schema_metadata (singleton, version) VALUES (TRUE, 1)")
+        await connection.execute("INSERT INTO public.samsarix_schema_metadata (singleton, version) VALUES (TRUE, 2)")
+        await connection.execute(
+            """
+            CREATE TABLE public.samsarix_realtime_events (
+                sequence BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                room_id TEXT NOT NULL CHECK (
+                    char_length(room_id) BETWEEN 1 AND 64
+                    AND room_id ~ '^[a-z0-9][a-z0-9_-]*$'
+                ),
+                event_type TEXT NOT NULL CHECK (
+                    char_length(event_type) BETWEEN 1 AND 80
+                    AND event_type ~ '^[a-z][a-z0-9_.-]*$'
+                ),
+                payload JSONB NOT NULL CHECK (octet_length(payload::text) <= 262144),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+            )
+            """
+        )
 
     service = _store(clean_postgres_database)
     await service.initialize()
@@ -78,6 +97,13 @@ async def test_schema_v1_migrates_transactionally(clean_postgres_database: str) 
         assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 3
         assert await service.check_ready()
         assert await service.list_rooms() == []
+        async with service.foundation.transaction() as connection:
+            await service.foundation.append_event(
+                connection,
+                room_id="migration",
+                event_type="message.created",
+                payload={"content": "x" * (300 * 1024)},
+            )
     finally:
         await service.close()
 
