@@ -14,6 +14,8 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -32,9 +34,23 @@ class _WebhookReceiver(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler contract
         body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-        delivery_id = self.headers["webhook-id"]
-        timestamp = self.headers["webhook-timestamp"]
-        signature = self.headers["webhook-signature"]
+        delivery_id = self.headers.get("webhook-id")
+        timestamp = self.headers.get("webhook-timestamp")
+        signature = self.headers.get("webhook-signature")
+        try:
+            timestamp_value = int(timestamp or "")
+        except ValueError:
+            timestamp_value = 0
+        if (
+            not delivery_id
+            or not timestamp
+            or not signature
+            or abs(int(time.time()) - timestamp_value) > 300
+            or self.headers.get_content_type() != "application/json"
+        ):
+            self.send_response(400)
+            self.end_headers()
+            return
         signed = delivery_id.encode("ascii") + b"." + timestamp.encode("ascii") + b"." + body
         expected = base64.b64encode(hmac.new(self.secret, signed, hashlib.sha256).digest()).decode("ascii")
         candidates = [part.removeprefix("v1,") for part in signature.split() if part.startswith("v1,")]
@@ -54,6 +70,26 @@ def _available_port() -> int:
     with socket.socket() as candidate:
         candidate.bind(("127.0.0.1", 0))
         return int(candidate.getsockname()[1])
+
+
+@contextmanager
+def _running_webhook_receiver() -> Iterator[ThreadingHTTPServer]:
+    receiver = ThreadingHTTPServer(("127.0.0.1", 0), _WebhookReceiver)
+    thread = threading.Thread(target=receiver.serve_forever, name="wheel-webhook", daemon=True)
+    started = False
+    try:
+        _WebhookReceiver.deliveries = []
+        thread.start()
+        started = True
+        yield receiver
+    finally:
+        if started:
+            receiver.shutdown()
+        receiver.server_close()
+        if started:
+            thread.join(timeout=5)
+            if thread.is_alive():
+                raise RuntimeError("installed-wheel webhook receiver did not stop within 5 seconds")
 
 
 def _request(
@@ -153,11 +189,10 @@ def main() -> int:
     operator_key = "installed-wheel-operator-key"
     signing_secret = "installed-wheel-signing-secret-32-bytes"  # noqa: S105 - isolated smoke fixture
     webhook_secret = "whsec_" + base64.b64encode(_WebhookReceiver.secret).decode("ascii")
-    webhook_receiver = ThreadingHTTPServer(("127.0.0.1", 0), _WebhookReceiver)
-    webhook_thread = threading.Thread(target=webhook_receiver.serve_forever, name="wheel-webhook", daemon=True)
-    _WebhookReceiver.deliveries = []
-    webhook_thread.start()
-    with tempfile.TemporaryDirectory(prefix="samsarix-wheel-smoke-") as temporary:
+    with (
+        _running_webhook_receiver() as webhook_receiver,
+        tempfile.TemporaryDirectory(prefix="samsarix-wheel-smoke-") as temporary,
+    ):
         database = Path(temporary) / "smoke.db"
         environment = os.environ.copy()
         environment.update(
@@ -389,11 +424,6 @@ def main() -> int:
             server_thread.join(timeout=10)
             if server_thread.is_alive():
                 raise RuntimeError("installed-wheel server did not stop within 10 seconds")
-            webhook_receiver.shutdown()
-            webhook_receiver.server_close()
-            webhook_thread.join(timeout=5)
-            if webhook_thread.is_alive():
-                raise RuntimeError("installed-wheel webhook receiver did not stop within 5 seconds")
     return 0
 
 

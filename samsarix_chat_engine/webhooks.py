@@ -8,6 +8,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import http.client
 import ipaddress
 import logging
 import math
@@ -16,9 +17,7 @@ import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.parse import quote, urlparse
 
 from .store import ChatStore, PendingWebhook, WebhookDeliveryNotFoundError
 
@@ -30,17 +29,29 @@ class WebhookTargetError(ValueError):
     """Raised when a configured destination resolves outside the allowed network policy."""
 
 
-class _NoRedirects(HTTPRedirectHandler):
-    def redirect_request(
-        self,
-        req: Request,
-        fp: object,
-        code: int,
-        msg: str,
-        headers: object,
-        newurl: str,
-    ) -> None:
-        return None
+@dataclass(frozen=True, slots=True)
+class _ResolvedWebhookTarget:
+    scheme: str
+    hostname: str
+    address: str
+    port: int
+    path: str
+    host_header: str
+
+
+class _PinnedHTTPSConnection(http.client.HTTPConnection):
+    """Connect to one validated address while retaining the hostname for TLS verification."""
+
+    def __init__(self, hostname: str, address: str, port: int, timeout: float) -> None:
+        super().__init__(address, port, timeout=timeout)
+        self._server_hostname = hostname
+        self._ssl_context = ssl.create_default_context()
+
+    def connect(self) -> None:
+        super().connect()
+        if self.sock is None:
+            raise ConnectionError("HTTPS connection did not create a socket")
+        self.sock = self._ssl_context.wrap_socket(self.sock, server_hostname=self._server_hostname)
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +77,7 @@ def sign_webhook(delivery_id: str, timestamp: int, payload: bytes, secrets: tupl
     )
 
 
-def _validate_target(url: str, *, allow_private_targets: bool) -> None:
+def _resolve_target(url: str, *, allow_private_targets: bool) -> _ResolvedWebhookTarget:
     parsed = urlparse(url)
     try:
         hostname = parsed.hostname
@@ -85,23 +96,40 @@ def _validate_target(url: str, *, allow_private_targets: bool) -> None:
         or (parsed.scheme == "http" and not loopback)
     ):
         raise WebhookTargetError("invalid_target")
-    if loopback:
-        return
     try:
-        addresses = socket.getaddrinfo(hostname, port or 443, type=socket.SOCK_STREAM)
+        ascii_hostname = hostname.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise WebhookTargetError("invalid_target") from exc
+    resolved_port = port or (443 if parsed.scheme == "https" else 80)
+    try:
+        addresses = socket.getaddrinfo(ascii_hostname, resolved_port, type=socket.SOCK_STREAM)
     except OSError as exc:
         raise WebhookTargetError("dns_error") from exc
     if not addresses:
         raise WebhookTargetError("dns_error")
-    if allow_private_targets:
-        return
+    resolved_addresses: list[str] = []
     for address in addresses:
         try:
             resolved = ipaddress.ip_address(address[4][0])
         except ValueError as exc:
             raise WebhookTargetError("dns_error") from exc
-        if not resolved.is_global:
+        if not loopback and not allow_private_targets and not resolved.is_global:
             raise WebhookTargetError("private_target_blocked")
+        normalized = str(resolved)
+        if normalized not in resolved_addresses:
+            resolved_addresses.append(normalized)
+    host_header = f"[{ascii_hostname}]" if ":" in ascii_hostname else ascii_hostname
+    default_port = 443 if parsed.scheme == "https" else 80
+    if resolved_port != default_port:
+        host_header = f"{host_header}:{resolved_port}"
+    return _ResolvedWebhookTarget(
+        scheme=parsed.scheme,
+        hostname=ascii_hostname,
+        address=resolved_addresses[0],
+        port=resolved_port,
+        path=quote(parsed.path or "/", safe="/%:@!$&'()*+,;=-._~"),
+        host_header=host_header,
+    )
 
 
 def _retry_after_seconds(value: str | None, now: datetime) -> float | None:
@@ -136,44 +164,47 @@ def _send_request(
     """Send one non-redirecting request using the platform TLS trust store."""
 
     try:
-        _validate_target(url, allow_private_targets=allow_private_targets)
+        target = _resolve_target(url, allow_private_targets=allow_private_targets)
     except WebhookTargetError as exc:
         return WebhookAttemptResult(status_code=None, error=str(exc))
     timestamp = int(attempted_at.timestamp())
-    request = Request(  # noqa: S310 - target is validated and redirects are disabled
-        url,
-        data=delivery.payload,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "User-Agent": "Samsarix-Chat-Webhook/0.9",
-            "webhook-id": delivery.delivery.id,
-            "webhook-timestamp": str(timestamp),
-            "webhook-signature": sign_webhook(delivery.delivery.id, timestamp, delivery.payload, secrets),
-        },
-    )
-    opener = build_opener(_NoRedirects)
+    headers = {
+        "Content-Type": "application/json",
+        "Host": target.host_header,
+        "User-Agent": "Samsarix-Chat-Webhook/0.9",
+        "webhook-id": delivery.delivery.id,
+        "webhook-timestamp": str(timestamp),
+        "webhook-signature": sign_webhook(delivery.delivery.id, timestamp, delivery.payload, secrets),
+    }
+    connection: http.client.HTTPConnection
+    if target.scheme == "https":
+        connection = _PinnedHTTPSConnection(target.hostname, target.address, target.port, timeout)
+    else:
+        connection = http.client.HTTPConnection(target.address, target.port, timeout=timeout)
     try:
-        with opener.open(request, timeout=timeout) as response:  # noqa: S310 - validated above
+        connection.request("POST", target.path, body=delivery.payload, headers=headers)
+        response = connection.getresponse()
+        try:
             status = response.status
+            retry_after = response.getheader("Retry-After")
+        finally:
+            response.close()
         if 200 <= status < 300:
             return WebhookAttemptResult(status_code=status, error=None)
-        return WebhookAttemptResult(status_code=status, error=f"http_status_{status}")
-    except HTTPError as exc:
         now = datetime.now(timezone.utc)
-        result = WebhookAttemptResult(
-            status_code=exc.code,
-            error=f"http_status_{exc.code}",
-            retry_after_seconds=_retry_after_seconds(exc.headers.get("Retry-After"), now),
+        return WebhookAttemptResult(
+            status_code=status,
+            error=f"http_status_{status}",
+            retry_after_seconds=_retry_after_seconds(retry_after, now),
         )
-        exc.close()
-        return result
     except TimeoutError:
         return WebhookAttemptResult(status_code=None, error="timeout")
     except ssl.SSLError:
         return WebhookAttemptResult(status_code=None, error="tls_error")
-    except (ConnectionError, URLError, OSError):
+    except (ConnectionError, http.client.HTTPException, OSError):
         return WebhookAttemptResult(status_code=None, error="connection_error")
+    finally:
+        connection.close()
 
 
 class WebhookDispatcher:
@@ -225,7 +256,7 @@ class WebhookDispatcher:
             self._wake.clear()
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=self.poll_interval)
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 pass
 
     async def process_due_once(self, *, now: datetime | None = None) -> bool:

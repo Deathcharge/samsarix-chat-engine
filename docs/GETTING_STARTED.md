@@ -110,7 +110,7 @@ When using a token, connect without `?username=` because the server derives iden
 - WebSocket close `4409`: an operator archived the room; reconnect only after it is reopened.
 - WebSocket close `1013`: the configured connection cap is full; retry with backoff.
 - `503 storage_unavailable` or `/readyz` returning 503: check the database directory permissions and available disk.
-- `507 webhook_capacity_reached`: the optional delivery outbox contains only pending rows at its cap; restore the receiver, replay/clear the operational failure, or raise the cap with matching disk capacity.
+- `507 webhook_capacity_reached`: the optional delivery outbox contains only pending rows at its cap; restore the receiver so automatic attempts drain those rows, or raise the cap with matching disk capacity. After correcting a terminal failure, retry that specific row through `/v1/admin/webhook-deliveries/{delivery_id}/retry`.
 - CLI refuses a public bind: configure an API key or token signing secret, or bind to loopback. The insecure override is only for isolated development networks.
 
 ## Upgrading to 0.9

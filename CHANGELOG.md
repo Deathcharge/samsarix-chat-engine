@@ -20,10 +20,10 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 
 ### Security, privacy, and reliability
 
-- Remote destinations require HTTPS, redirects and URL credentials/query secrets are rejected, platform TLS verification remains enabled, and non-public address resolution is denied unless a trusted operator explicitly opts in.
+- Remote destinations require HTTPS, redirects and URL credentials/query secrets are rejected, platform TLS verification remains enabled, and non-public address resolution is denied unless a trusted operator explicitly opts in; the validated address is pinned for the actual connection while TLS verifies the original hostname.
 - Every network attempt has a bounded timeout; secrets and receiver response bodies are never logged or exposed through the operations API.
 - Delivery is honestly documented as at-least-once and potentially reordered; receivers verify the signed raw body/timestamp and durably deduplicate the stable ID.
-- Message/room deletion cancels related pending payloads and scrubs completed/terminal outbox bodies while retaining non-replayable operational metadata.
+- Message/room deletion and age/count retention cancel related pending payloads and scrub completed/terminal outbox bodies while retaining non-replayable operational metadata.
 
 ## 0.8.0 — 2026-08-01
 

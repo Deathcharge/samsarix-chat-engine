@@ -355,7 +355,7 @@ async def _authenticate_websocket(
             timeout=settings.websocket_auth_timeout_seconds,
         )
         command = _WS_AUTH.validate_json(raw)
-    except (TimeoutError, ValidationError, ValueError, WebSocketDisconnect):
+    except (asyncio.TimeoutError, ValidationError, ValueError, WebSocketDisconnect):
         await websocket.send_json(_event("error", code="authentication_failed", message="Authentication failed"))
         await websocket.close(code=4401, reason="Authentication required")
         return None

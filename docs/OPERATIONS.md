@@ -74,6 +74,8 @@ When an application webhook is configured, message and moderation transactions c
 
 An outbox containing only pending rows at `SAMSARIX_CHAT_MAX_WEBHOOK_DELIVERIES` rejects the originating chat/moderation transaction with 507 instead of silently losing the promised event. Message/room deletion and age/count retention cancel related pending bodies and scrub completed/terminal payload copies; metadata remains visible with `replayable: false`. They cannot recall an accepted delivery, and a worker-claimed delivery may finish concurrently, so downstream erasure remains the receiver operator's responsibility. Treat sustained pending growth, repeated `last_error` codes, terminal failures, and capacity rejection as operational alerts. The engine does not send email or telemetry on failure; the deployment must scrape/poll this operator endpoint or inspect structured service logs.
 
+Graceful shutdown waits for an in-flight webhook attempt, bounded by `SAMSARIX_CHAT_WEBHOOK_TIMEOUT` (10 seconds by default, 30 maximum). Configure the process supervisor's termination grace period longer than that timeout plus ordinary application cleanup; embedded Uvicorn deployments should likewise set `timeout_graceful_shutdown` above the webhook timeout.
+
 See [Reliable application webhooks](WEBHOOKS.md) for endpoint validation, receiver signature verification, secret rotation, retry timing, privacy, SSRF/egress boundaries, and exact recovery commands.
 
 ## Back up and restore

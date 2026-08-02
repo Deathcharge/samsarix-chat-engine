@@ -244,6 +244,17 @@ def test_standard_signature_covers_stable_id_timestamp_and_exact_payload() -> No
     assert signature == f"v1,{expected}"
 
 
+def test_signature_lists_current_and_previous_secrets_in_order() -> None:
+    previous = b"samsarix-webhook-previous-32-byte"
+    payload = b'{"type":"message.created"}'
+    signature = sign_webhook("wh_delivery", 1_700_000_000, payload, (SECRET_BYTES, previous))
+    parts = signature.split(" ")
+    assert parts == [
+        sign_webhook("wh_delivery", 1_700_000_000, payload, (SECRET_BYTES,)),
+        sign_webhook("wh_delivery", 1_700_000_000, payload, (previous,)),
+    ]
+
+
 def test_retry_after_rejects_non_finite_receiver_values() -> None:
     now = datetime.now(timezone.utc)
     assert _retry_after_seconds("NaN", now) is None
@@ -405,6 +416,69 @@ async def test_remote_private_resolution_is_blocked_before_connect(
     )
     assert result.status_code is None
     assert result.error == "private_target_blocked"
+
+
+@pytest.mark.asyncio
+async def test_https_transport_connects_to_the_validated_address_with_original_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path / "pinned-target.db")
+    await store.initialize()
+    await store.create_room(RoomCreate(id="room", name="Room"))
+    await store.create_message(
+        room_id="room",
+        sender="alice",
+        content="pin destination",
+        client_message_id=None,
+        allow_frozen=False,
+    )
+    pending = await store.next_webhook_delivery(datetime.now(timezone.utc) + timedelta(seconds=1))
+    assert pending is not None
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        status = 204
+
+        def getheader(self, name: str) -> None:
+            return None
+
+        def close(self) -> None:
+            pass
+
+    class FakePinnedConnection:
+        def __init__(self, hostname: str, address: str, port: int, timeout: float) -> None:
+            captured.update(hostname=hostname, address=address, port=port, timeout=timeout)
+
+        def request(self, method: str, path: str, *, body: bytes, headers: dict[str, str]) -> None:
+            captured.update(method=method, path=path, body=body, headers=headers)
+
+        def getresponse(self) -> FakeResponse:
+            return FakeResponse()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "samsarix_chat_engine.webhooks.socket.getaddrinfo",
+        lambda *args, **kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))],
+    )
+    monkeypatch.setattr("samsarix_chat_engine.webhooks._PinnedHTTPSConnection", FakePinnedConnection)
+    result = _send_request(
+        url="https://hooks.example.com/events",
+        delivery=pending,
+        secrets=(SECRET_BYTES,),
+        timeout=4,
+        attempted_at=datetime.now(timezone.utc),
+        allow_private_targets=False,
+    )
+    assert result.delivered is True
+    assert captured["hostname"] == "hooks.example.com"
+    assert captured["address"] == "93.184.216.34"
+    assert captured["port"] == 443
+    assert captured["path"] == "/events"
+    assert captured["headers"]["Host"] == "hooks.example.com"
+    assert captured["body"] == pending.payload
 
 
 def test_webhook_configuration_rejects_unsafe_or_incomplete_values() -> None:
