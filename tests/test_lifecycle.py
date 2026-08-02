@@ -311,7 +311,7 @@ def test_v1_database_migrates_in_place(tmp_path, caplog: pytest.LogCaptureFixtur
     assert history.json()["items"][0]["content"] == "preserved"
     assert version == 4
     assert {"archived_at", "frozen_at"} <= columns
-    assert {"edited_at", "deleted_at"} <= message_columns
+    assert {"edited_at", "deleted_at", "author_subject"} <= message_columns
     assert read_state_table is not None
     assert "Migrating database schema from version 1 to 4" in caplog.text
 
@@ -375,10 +375,12 @@ def test_v2_database_migrates_conversation_controls_in_place(tmp_path) -> None:
         read_state_table = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'room_read_states'"
         ).fetchone()
+        message_columns = {row[1] for row in connection.execute("PRAGMA table_info(messages)")}
 
     assert version == 4
     assert controls_table is not None
     assert read_state_table is not None
+    assert "author_subject" in message_columns
     assert room["frozen_at"] is None
     assert message["content"] == "preserved"
     assert message["edited_at"] is None

@@ -2,9 +2,13 @@
 
 from collections.abc import Iterator
 from pathlib import Path
+from queue import Empty, Queue
+from threading import Thread
+from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.testclient import WebSocketTestSession
 
 from samsarix_chat_engine import AccessTokenService, Settings, create_app
 
@@ -50,6 +54,29 @@ def _token(service: AccessTokenService, subject: str, *, write: bool = True) -> 
 
 def _bearer(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def _receive_json(websocket: WebSocketTestSession, *, timeout: float = 3.0) -> dict[str, Any]:
+    """Bound a synchronous TestClient receive so a missing event cannot hang CI."""
+
+    result: Queue[tuple[bool, object]] = Queue(maxsize=1)
+
+    def receive() -> None:
+        try:
+            result.put((True, websocket.receive_json()))
+        except BaseException as exc:  # noqa: BLE001 - re-raise the transport failure on the test thread
+            result.put((False, exc))
+
+    Thread(target=receive, name="bounded-websocket-receive", daemon=True).start()
+    try:
+        succeeded, value = result.get(timeout=timeout)
+    except Empty as exc:
+        raise AssertionError(f"WebSocket event was not received within {timeout} seconds") from exc
+    if not succeeded:
+        if isinstance(value, BaseException):
+            raise value
+        raise AssertionError("WebSocket receive failed without an exception")
+    return cast(dict[str, Any], value)
 
 
 def test_read_state_is_subject_scoped_monotonic_and_self_clearable(
@@ -140,6 +167,32 @@ def test_read_cursor_rejects_a_message_from_another_room(
     assert response.json()["error"]["code"] == "message_not_found"
 
 
+def test_unread_uses_authenticated_author_not_operator_display_sender(
+    workflow_client: tuple[TestClient, AccessTokenService],
+) -> None:
+    client, service = workflow_client
+    alice = _token(service, "alice")
+    assert (
+        client.post(
+            "/v1/rooms/support/messages",
+            headers={"X-API-Key": OPERATOR_KEY},
+            json={"sender": "alice", "content": "Operator-authored message"},
+        ).status_code
+        == 201
+    )
+    assert client.get("/v1/rooms/support/read-state", headers=_bearer(alice)).json()["unread_count"] == 1
+
+    assert (
+        client.post(
+            "/v1/rooms/support/messages",
+            headers=_bearer(alice),
+            json={"content": "Signed user message"},
+        ).status_code
+        == 201
+    )
+    assert client.get("/v1/rooms/support/read-state", headers=_bearer(alice)).json()["unread_count"] == 1
+
+
 def test_read_state_requires_stable_identity_and_enforces_capacity(tmp_path: Path) -> None:
     settings = Settings(
         database_path=tmp_path / "read-cap.db",
@@ -185,20 +238,20 @@ def test_typing_is_transition_only_auto_expires_and_stops_on_publish(
             bob_socket.send_json({"type": "auth", "token": bob})
             bob_socket.receive_json()
             bob_socket.receive_json()
-            assert alice_socket.receive_json()["type"] == "presence.joined"
+            assert _receive_json(alice_socket)["type"] == "presence.joined"
 
             alice_socket.send_json({"type": "typing", "active": True})
-            started = bob_socket.receive_json()
+            started = _receive_json(bob_socket)
             assert started == {"type": "typing.started", "username": "alice", "expires_in": 1.0}
-            stopped = bob_socket.receive_json()
+            stopped = _receive_json(bob_socket)
             assert stopped == {"type": "typing.stopped", "username": "alice"}
 
             alice_socket.send_json({"type": "typing", "active": True})
-            assert bob_socket.receive_json()["type"] == "typing.started"
+            assert _receive_json(bob_socket)["type"] == "typing.started"
             alice_socket.send_json({"type": "message", "content": "Here are the details"})
-            assert bob_socket.receive_json() == {"type": "typing.stopped", "username": "alice"}
-            assert bob_socket.receive_json()["type"] == "message.created"
-            assert alice_socket.receive_json()["type"] == "message.created"
+            assert _receive_json(bob_socket) == {"type": "typing.stopped", "username": "alice"}
+            assert _receive_json(bob_socket)["type"] == "message.created"
+            assert _receive_json(alice_socket)["type"] == "message.created"
 
 
 def test_read_only_tokens_cannot_emit_typing(workflow_client: tuple[TestClient, AccessTokenService]) -> None:

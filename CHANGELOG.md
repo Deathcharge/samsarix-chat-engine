@@ -10,7 +10,7 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 - Ephemeral WebSocket typing commands and transition events with independent rate limits and automatic expiry.
 - TypeScript client methods and strict event types for read state and typing.
 - A complete two-party support-room example and application-workflow integration guide.
-- SQLite schema v4 with bounded read-state storage and in-place migration.
+- SQLite schema v4 with bounded read-state storage, authenticated message-author metadata, and in-place migration.
 
 ### Changed
 

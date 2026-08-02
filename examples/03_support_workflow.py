@@ -14,8 +14,11 @@ CUSTOMER_TOKEN = os.getenv("SAMSARIX_CHAT_CUSTOMER_TOKEN")
 AGENT_TOKEN = os.getenv("SAMSARIX_CHAT_AGENT_TOKEN")
 ROOM_ID = os.getenv("SAMSARIX_CHAT_ROOM", "support-demo")
 
-if urlparse(BASE_URL).scheme not in {"http", "https"}:
+parsed_url = urlparse(BASE_URL)
+if parsed_url.scheme not in {"http", "https"} or parsed_url.hostname is None:
     raise ValueError("SAMSARIX_CHAT_URL must use http or https")
+if parsed_url.scheme == "http" and parsed_url.hostname not in {"localhost", "127.0.0.1", "::1"}:
+    raise ValueError("SAMSARIX_CHAT_URL must use https for non-loopback targets")
 if not API_KEY or not CUSTOMER_TOKEN or not AGENT_TOKEN:
     raise RuntimeError(
         "SAMSARIX_CHAT_API_KEY, SAMSARIX_CHAT_CUSTOMER_TOKEN, and SAMSARIX_CHAT_AGENT_TOKEN are required"
@@ -40,6 +43,12 @@ def request(method: str, path: str, *, credential: str, payload: object | None =
         return exc.code, json.load(exc)
 
 
+def require_state(status: int, payload: object | None, *, action: str) -> dict[str, object]:
+    if status != 200 or not isinstance(payload, dict):
+        raise SystemExit(f"Could not {action}: {status} {payload}")
+    return payload
+
+
 status, result = request(
     "POST",
     "/v1/rooms",
@@ -58,13 +67,15 @@ status, customer_message = request(
 if status != 201 or not isinstance(customer_message, dict):
     raise SystemExit(f"Could not create customer message: {status} {customer_message}")
 
-_, agent_unread = request("GET", f"/v1/rooms/{ROOM_ID}/read-state", credential=AGENT_TOKEN)
-_, agent_read = request(
+status, result = request("GET", f"/v1/rooms/{ROOM_ID}/read-state", credential=AGENT_TOKEN)
+agent_unread = require_state(status, result, action="read agent state")
+status, result = request(
     "PUT",
     f"/v1/rooms/{ROOM_ID}/read-state",
     credential=AGENT_TOKEN,
     payload={"message_id": customer_message["id"]},
 )
+agent_read = require_state(status, result, action="mark agent state read")
 status, agent_message = request(
     "POST",
     f"/v1/rooms/{ROOM_ID}/messages",
@@ -74,13 +85,15 @@ status, agent_message = request(
 if status != 201 or not isinstance(agent_message, dict):
     raise SystemExit(f"Could not create agent reply: {status} {agent_message}")
 
-_, customer_unread = request("GET", f"/v1/rooms/{ROOM_ID}/read-state", credential=CUSTOMER_TOKEN)
-_, customer_read = request(
+status, result = request("GET", f"/v1/rooms/{ROOM_ID}/read-state", credential=CUSTOMER_TOKEN)
+customer_unread = require_state(status, result, action="read customer state")
+status, result = request(
     "PUT",
     f"/v1/rooms/{ROOM_ID}/read-state",
     credential=CUSTOMER_TOKEN,
     payload={"message_id": agent_message["id"]},
 )
+customer_read = require_state(status, result, action="mark customer state read")
 print(
     json.dumps(
         {

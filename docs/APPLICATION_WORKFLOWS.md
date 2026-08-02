@@ -19,9 +19,25 @@ const messages = await chat.listMessages("support-case-42");
 await chat.markRead("support-case-42", messages.items.at(-1)?.id);
 
 const session = chat.roomSession("support-case-42");
+const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
 session.onEvent((event) => {
-  if (event.type === "typing.started") showTyping(event.username);
-  if (event.type === "typing.stopped") hideTyping(event.username);
+  if (event.type === "typing.started") {
+    clearTimeout(typingTimers.get(event.username));
+    showTyping(event.username);
+    typingTimers.set(
+      event.username,
+      setTimeout(() => {
+        typingTimers.delete(event.username);
+        hideTyping(event.username);
+      }, event.expires_in * 1000),
+    );
+  }
+  if (event.type === "typing.stopped") {
+    clearTimeout(typingTimers.get(event.username));
+    typingTimers.delete(event.username);
+    hideTyping(event.username);
+  }
 });
 await session.connect();
 session.setTyping(true);
@@ -44,7 +60,7 @@ On PowerShell, assign the two command results to `$env:SAMSARIX_CHAT_CUSTOMER_TO
 - Read state requires a signed application-user token with `room:read`; the shared operator key and unauthenticated local identity are rejected because they do not identify a stable end user.
 - A read cursor is persisted only after an explicit `PUT`. Before then, the response has null cursor fields and counts all non-deleted messages from other senders.
 - Cursors are monotonic. A late device cannot move a user backward by submitting an older message.
-- Messages authored by the same signed subject and deleted-message tombstones do not count as unread.
+- Messages whose authenticated author is the same signed subject and deleted-message tombstones do not count as unread. Operator/local display names never impersonate that identity for unread accounting.
 - The cursor keeps its chronological position if count- or age-based retention later removes the referenced message.
 - Each room is capped by `SAMSARIX_CHAT_MAX_READ_STATES_PER_ROOM`. Users can erase their own row, and deleting a room cascades its read-state rows.
 - Read-state changes are intentionally excluded from the administrative audit stream and room-message export: they are high-volume, user-specific interaction metadata rather than administrative actions.

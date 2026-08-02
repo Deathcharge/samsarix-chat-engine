@@ -146,7 +146,7 @@ Final v0.8 local verification on 2026-08-01 used Node 24.12.0, CPython 3.11.9 fo
 | --- | --- |
 | `ruff check .` / `ruff format --check .` | Passed; 46 Python files formatted |
 | `mypy samsarix_chat_engine` / `compileall` / `git diff --check` | Passed; no type issues in 9 source files |
-| `pytest --cov=samsarix_chat_engine --cov-report=term-missing` | 88 passed in 69.87s; 90.92% total branch coverage; no warnings |
+| `pytest --cov=samsarix_chat_engine --cov-report=term-missing` | 89 passed in 93.99s; 90.94% total branch coverage; no warnings |
 | TypeScript `check` / Node test runner | Passed; strict declaration build and 17/17 fake-transport/API tests |
 | TypeScript production audit / package inspection | Zero runtime dependencies, no known vulnerabilities, and 23 intended artifact files |
 | real TypeScript integration smoke | Authenticated HTTP, read state, first-message WebSocket auth, history, publish, reconnect, edit, delete, and tombstone recovery passed |

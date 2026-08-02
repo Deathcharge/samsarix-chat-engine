@@ -335,6 +335,7 @@ class ChatStore:
         client_message_id: str | None,
         allow_frozen: bool,
         member_subject: str | None = None,
+        author_subject: str | None = None,
     ) -> tuple[Message, bool]:
         async with self._write_lock:
             return await asyncio.to_thread(
@@ -345,6 +346,7 @@ class ChatStore:
                 client_message_id,
                 allow_frozen,
                 member_subject,
+                author_subject,
             )
 
     async def update_message(
@@ -512,6 +514,7 @@ class ChatStore:
                     id TEXT PRIMARY KEY,
                     room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
                     sender TEXT NOT NULL,
+                    author_subject TEXT,
                     content TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     client_message_id TEXT,
@@ -534,6 +537,8 @@ class ChatStore:
                 connection.execute("ALTER TABLE messages ADD COLUMN edited_at TEXT")
             if "deleted_at" not in message_columns:
                 connection.execute("ALTER TABLE messages ADD COLUMN deleted_at TEXT")
+            if "author_subject" not in message_columns:
+                connection.execute("ALTER TABLE messages ADD COLUMN author_subject TEXT")
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS audit_events (
@@ -667,6 +672,7 @@ class ChatStore:
         client_message_id: str | None,
         allow_frozen: bool,
         member_subject: str | None,
+        author_subject: str | None,
     ) -> tuple[Message, bool]:
         with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -700,13 +706,14 @@ class ChatStore:
             )
             connection.execute(
                 """
-                INSERT INTO messages (id, room_id, sender, content, created_at, client_message_id)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO messages (id, room_id, sender, author_subject, content, created_at, client_message_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message.id,
                     message.room_id,
                     message.sender,
+                    author_subject,
                     message.content,
                     message.created_at.isoformat(),
                     message.client_message_id,
@@ -1076,7 +1083,8 @@ class ChatStore:
             unread_count = connection.execute(
                 """
                 SELECT COUNT(*) FROM messages
-                WHERE room_id = ? AND deleted_at IS NULL AND sender <> ?
+                WHERE room_id = ? AND deleted_at IS NULL
+                  AND (author_subject IS NULL OR author_subject <> ?)
                 """,
                 (room_id, subject),
             ).fetchone()[0]
@@ -1090,7 +1098,8 @@ class ChatStore:
         unread_count = connection.execute(
             """
             SELECT COUNT(*) FROM messages
-            WHERE room_id = ? AND deleted_at IS NULL AND sender <> ?
+            WHERE room_id = ? AND deleted_at IS NULL
+              AND (author_subject IS NULL OR author_subject <> ?)
               AND (created_at > ? OR (created_at = ? AND id > ?))
             """,
             (room_id, subject, row["message_created_at"], row["message_created_at"], row["message_id"] or ""),

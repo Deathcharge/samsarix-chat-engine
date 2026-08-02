@@ -130,6 +130,15 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 server.kill()
                 server.wait(timeout=5)
+            lock_path = database.with_name(f"{database.name}.lock")
+            for _ in range(50):
+                try:
+                    lock_path.unlink(missing_ok=True)
+                    break
+                except PermissionError:
+                    time.sleep(0.1)
+            else:
+                raise RuntimeError("Samsarix server did not release its database lifecycle lock")
     return 0
 
 

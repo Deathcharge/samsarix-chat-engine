@@ -96,7 +96,7 @@ Restoring replaces the live database state with the snapshot state. Messages and
 
 ## Upgrade and rollback
 
-Opening an older supported database with v0.8 migrates it to schema version 4. The migration preserves existing rooms/messages, lifecycle metadata, moderation controls, and audit records, then creates an empty `room_read_states` table. The engine refuses a schema version newer than it understands.
+Opening an older supported database with v0.8 migrates it to schema version 4. The migration preserves existing rooms/messages, lifecycle metadata, moderation controls, and audit records, adds nullable authenticated-author metadata to messages, then creates an empty `room_read_states` table. Legacy and operator/local messages have no authenticated author and therefore count as other-authored for signed-user unread state. The engine refuses a schema version newer than it understands.
 
 Take a verified backup before upgrade. Earlier releases do not understand schema 4. For a conservative rollback, stop v0.8 and restore the pre-v0.8 backup before starting the older version.
 

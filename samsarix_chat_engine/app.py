@@ -710,6 +710,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 client_message_id=idempotency_key or payload.client_message_id,
                 allow_frozen=principal.is_admin,
                 member_subject=None if principal.is_admin else principal.subject,
+                author_subject=principal.subject,
             )
         except RoomNotFoundError as exc:
             raise APIError(404, "room_not_found", "Room not found") from exc
@@ -1158,6 +1159,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         client_message_id=command.client_message_id,
                         allow_frozen=principal.is_admin,
                         member_subject=None if principal.is_admin else principal.subject,
+                        author_subject=principal.subject,
                     )
                 except (
                     MemberBannedError,

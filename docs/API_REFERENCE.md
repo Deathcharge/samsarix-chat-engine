@@ -110,7 +110,7 @@ Signed application users with `room:read` receive their current room cursor and 
 }
 ```
 
-No row is created by a read. With no stored cursor, all non-deleted messages from other subjects count as unread. Shared operator-key and unauthenticated local callers receive `403 stable_subject_required` because they do not identify one durable user.
+No row is created by a read. With no stored cursor, all non-deleted messages from other authenticated subjects count as unread. The exclusion uses signed-token author metadata rather than the public display sender; operator/local messages and legacy rows therefore count as other-authored. Shared operator-key and unauthenticated local callers receive `403 stable_subject_required` because they do not identify one durable user.
 
 ### `PUT /v1/rooms/{room_id}/read-state`
 

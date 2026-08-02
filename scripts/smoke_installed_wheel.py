@@ -51,27 +51,30 @@ def _request(
 
 
 async def _websocket_round_trip(base_url: str, token: str) -> str:
+    async def receive_json(websocket: Any) -> Any:
+        return json.loads(await asyncio.wait_for(websocket.recv(), timeout=5))
+
     websocket_url = base_url.replace("http://", "ws://") + "/v1/rooms/wheel-room/ws"
     async with (
         connect(websocket_url, max_size=16_384) as websocket,
         connect(websocket_url, max_size=16_384) as observer,
     ):
-        required = json.loads(await websocket.recv())
+        required = await receive_json(websocket)
         if required["type"] != "auth.required":
             raise RuntimeError("WebSocket did not request authentication")
         await websocket.send(json.dumps({"type": "auth", "token": token}))
-        ready = json.loads(await websocket.recv())
-        history = json.loads(await websocket.recv())
+        ready = await receive_json(websocket)
+        history = await receive_json(websocket)
         if ready["username"] != "wheel-user" or history["items"][0]["sender"] != "wheel-user":
             raise RuntimeError("WebSocket identity or recovery mismatch")
 
-        observer_required = json.loads(await observer.recv())
+        observer_required = await receive_json(observer)
         if observer_required["type"] != "auth.required":
             raise RuntimeError("WebSocket observer did not request authentication")
         await observer.send(json.dumps({"type": "auth", "token": token}))
-        observer_ready = json.loads(await observer.recv())
-        observer_history = json.loads(await observer.recv())
-        joined = json.loads(await websocket.recv())
+        observer_ready = await receive_json(observer)
+        observer_history = await receive_json(observer)
+        joined = await receive_json(websocket)
         if (
             observer_ready["username"] != "wheel-user"
             or observer_history["type"] != "history"
@@ -80,13 +83,13 @@ async def _websocket_round_trip(base_url: str, token: str) -> str:
             raise RuntimeError("WebSocket observer setup mismatch")
 
         await websocket.send(json.dumps({"type": "typing", "active": True}))
-        typing_started = json.loads(await observer.recv())
+        typing_started = await receive_json(observer)
         if typing_started["type"] != "typing.started" or typing_started["username"] != "wheel-user":
             raise RuntimeError("WebSocket typing transition mismatch")
         await websocket.send(json.dumps({"type": "message", "content": "installed wheel WebSocket"}))
-        typing_stopped = json.loads(await observer.recv())
-        observer_created = json.loads(await observer.recv())
-        created = json.loads(await websocket.recv())
+        typing_stopped = await receive_json(observer)
+        observer_created = await receive_json(observer)
+        created = await receive_json(websocket)
         if (
             typing_stopped["type"] != "typing.stopped"
             or observer_created["type"] != "message.created"
