@@ -32,7 +32,6 @@ async def test_typing_refresh_is_transition_only_and_stop_is_owner_bound(clean_p
     try:
         await store.create_room(RoomCreate(id="general", name="General"))
         await store.foundation.register_instance("node-a", lease_seconds=30)
-        await store.foundation.register_instance("observer", lease_seconds=30)
         connections = PostgresConnectionRegistry(
             store.foundation,
             max_connections=5,
@@ -45,6 +44,7 @@ async def test_typing_refresh_is_transition_only_and_stop_is_owner_bound(clean_p
             username="alice",
             subject="alice-subject",
         )
+        await store.foundation.register_instance("observer", lease_seconds=30)
         typing = PostgresTypingRegistry(store.foundation, timeout_seconds=8)
 
         started = await typing.start(connection_id="socket-one", instance_id="node-a")
@@ -74,7 +74,6 @@ async def test_expiry_sweep_is_bounded_and_emits_stops(clean_postgres_database: 
     try:
         await store.create_room(RoomCreate(id="general", name="General"))
         await store.foundation.register_instance("node-a", lease_seconds=30)
-        await store.foundation.register_instance("observer", lease_seconds=30)
         connections = PostgresConnectionRegistry(
             store.foundation,
             max_connections=5,
@@ -89,6 +88,8 @@ async def test_expiry_sweep_is_bounded_and_emits_stops(clean_postgres_database: 
                 username=f"user-{index}",
                 subject=None,
             )
+        await store.foundation.register_instance("observer", lease_seconds=30)
+        for index in range(2):
             assert await typing.start(connection_id=f"socket-{index}", instance_id="node-a")
         async with store.foundation.transaction() as connection:
             await connection.execute(

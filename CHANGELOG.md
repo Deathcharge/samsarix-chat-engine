@@ -15,6 +15,7 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 - PostgreSQL schema v4 and an internal connection registry with database-time socket leases, atomic deployment-wide and per-room capacity, owner-bound renewal/release, archived-room rejection, and crashed-process reclamation.
 - PostgreSQL schema v5 and internal deployment-wide message, search, and typing rate buckets with atomic per-identity consumption, database-time boundaries, bounded active cardinality, and raw-key minimization.
 - PostgreSQL schema v6 and internal connection-bound typing state with transition-only starts, refresh without event storms, explicit stops, database-time expiry, and bounded concurrent sweeping into durable coordination events.
+- PostgreSQL schema v7 and lease-derived presence transitions with exact join/explicit-leave counts, bounded crashed-process sweeping, typing-before-leave ordering, and process-generation fencing for safe stable-ID restarts.
 
 ### Security and operations
 
@@ -25,9 +26,10 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 - PostgreSQL event and webhook envelopes remain bounded at 512 KiB so every valid 100,000-character message, including four-byte Unicode, fits without turning a valid domain write into a coordination failure.
 - PostgreSQL webhook claims can be acknowledged only by the live lease owner. Expired claims are safely redelivered with the same ID; receivers must still deduplicate because delivery is at least once.
 - A PostgreSQL relay that loses its database lease closes every local socket before renewing the same durable cursor. Unsupported internal event types are not forwarded onto the public WebSocket protocol.
-- Expired process IDs discard their stale socket rows before re-registration, preventing a restarted replica from reviving phantom occupancy. Archived and expired reservations stop consuming capacity even before physical cleanup.
+- Expired process IDs rotate their generation token on re-registration, preventing a restarted replica from reviving phantom occupancy while leaving stale socket rows available for bounded presence convergence. Archived, expired, and generation-mismatched reservations stop consuming capacity even before physical cleanup.
 - Distributed rate buckets persist only a scope-separated SHA-256 digest of the caller key. The digest reduces routine identity exposure but is not anonymization; database access and retention still require normal privacy controls.
 - Internal typing coordination events retain an opaque origin connection ID so future application wiring can exclude the sender. The public realtime relay does not forward these events until that exclusion contract is implemented; clients must continue treating advertised expiry as the stop-event backstop.
+- A restarted process rotates its database generation token after lease expiry. Connection, typing, count, renewal, and cleanup queries require the matching generation so stale sockets cannot regain capacity, activity, or presence merely because an operator reused a stable instance name.
 
 ## 0.12.0 — 2026-08-02
 

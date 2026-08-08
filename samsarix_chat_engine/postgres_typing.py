@@ -49,6 +49,7 @@ class PostgresTypingRegistry:
                 FROM public.samsarix_connection_leases AS lease
                 JOIN public.samsarix_instance_cursors AS owner
                   ON owner.instance_id = lease.instance_id
+                 AND owner.generation = lease.instance_generation
                 JOIN public.samsarix_rooms AS room
                   ON room.id = lease.room_id
                 WHERE lease.connection_id = %s

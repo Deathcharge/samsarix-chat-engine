@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, cast
+from uuid import UUID
 
 from psycopg import AsyncConnection
 from psycopg.errors import UniqueViolation
@@ -38,6 +39,7 @@ class ConnectionLease:
 
     connection_id: str
     instance_id: str
+    instance_generation: UUID
     room_id: str
     username: str
     subject: str | None
@@ -51,6 +53,18 @@ class ConnectionCounts:
 
     total: int
     room: int
+
+
+@dataclass(frozen=True, slots=True)
+class PresenceTransition:
+    """One committed join/leave transition derived from a connection lease."""
+
+    active: bool
+    connection_id: str
+    room_id: str
+    username: str
+    active_connections: int
+    sequence: int
 
 
 class PostgresConnectionRegistry:
@@ -92,15 +106,17 @@ class PostgresConnectionRegistry:
         async with self.foundation.transaction() as connection:
             cursor = await connection.execute(
                 """
-                SELECT 1
+                SELECT generation
                 FROM public.samsarix_instance_cursors
                 WHERE instance_id = %s AND lease_expires_at > clock_timestamp()
                 FOR SHARE
                 """,
                 (instance_id,),
             )
-            if await cursor.fetchone() is None:
+            owner = await cursor.fetchone()
+            if owner is None:
                 raise InstanceLeaseError("instance lease is missing or expired")
+            instance_generation = cast(UUID, owner[0])
 
             cursor = await connection.execute(
                 """
@@ -116,7 +132,8 @@ class PostgresConnectionRegistry:
                 raise ConnectionRoomUnavailableError("connection room is missing or archived")
 
             await connection.execute("SELECT pg_advisory_xact_lock(%s)", (POSTGRES_CONNECTION_CAP_LOCK_ID,))
-            await _delete_expired(connection)
+            stale = await _delete_expired(connection, limit=1_000, prioritize_connection_id=connection_id)
+            await self._append_departures(connection, stale)
 
             cursor = await connection.execute(
                 """
@@ -126,6 +143,7 @@ class PostgresConnectionRegistry:
                 FROM public.samsarix_connection_leases AS lease
                 JOIN public.samsarix_instance_cursors AS owner
                   ON owner.instance_id = lease.instance_id
+                 AND owner.generation = lease.instance_generation
                 JOIN public.samsarix_rooms AS room
                   ON room.id = lease.room_id
                 WHERE lease.lease_expires_at > clock_timestamp()
@@ -144,34 +162,48 @@ class PostgresConnectionRegistry:
                 cursor = await connection.execute(
                     """
                     INSERT INTO public.samsarix_connection_leases (
-                        connection_id, instance_id, room_id, username, subject, lease_expires_at
+                        connection_id, instance_id, instance_generation, room_id,
+                        username, subject, lease_expires_at
                     )
                     SELECT
-                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s,
                         clock_timestamp() + make_interval(secs => %s)
                     WHERE EXISTS (
                         SELECT 1
                         FROM public.samsarix_instance_cursors
                         WHERE instance_id = %s
+                          AND generation = %s
                           AND lease_expires_at > clock_timestamp()
                     )
                     RETURNING
-                        connection_id, instance_id, room_id, username, subject,
+                        connection_id, instance_id, instance_generation, room_id, username, subject,
                         lease_expires_at, created_at
                     """,
                     (
                         connection_id,
                         instance_id,
+                        instance_generation,
                         room_id,
                         username,
                         subject,
                         self.lease_seconds,
                         instance_id,
+                        instance_generation,
                     ),
                 )
             except UniqueViolation:
                 raise ConnectionLeaseError("connection ID is already leased") from None
             row = await cursor.fetchone()
+            if row is not None:
+                active_connections = await _room_active_count(connection, room_id)
+                await self._append_presence(
+                    connection,
+                    active=True,
+                    connection_id=connection_id,
+                    room_id=room_id,
+                    username=username,
+                    active_connections=active_connections,
+                )
         if row is None:
             raise InstanceLeaseError("instance lease expired before connection reservation")
         return _lease_from_row(row)
@@ -193,6 +225,7 @@ class PostgresConnectionRegistry:
                   AND lease.instance_id = %s
                   AND lease.lease_expires_at > clock_timestamp()
                   AND owner.instance_id = lease.instance_id
+                  AND owner.generation = lease.instance_generation
                   AND owner.lease_expires_at > clock_timestamp()
                   AND room.id = lease.room_id
                   AND room.archived_at IS NULL
@@ -211,14 +244,40 @@ class PostgresConnectionRegistry:
         _validate_connection_id(connection_id)
         _validate_instance_id(instance_id)
         async with self.foundation.transaction() as connection:
+            await connection.execute("SELECT pg_advisory_xact_lock(%s)", (POSTGRES_CONNECTION_CAP_LOCK_ID,))
             cursor = await connection.execute(
                 """
-                DELETE FROM public.samsarix_connection_leases
-                WHERE connection_id = %s AND instance_id = %s
+                SELECT lease.room_id, lease.username,
+                       EXISTS (
+                           SELECT 1 FROM public.samsarix_typing_states AS typing
+                           WHERE typing.connection_id = lease.connection_id
+                       )
+                FROM public.samsarix_connection_leases AS lease
+                WHERE lease.connection_id = %s AND lease.instance_id = %s
+                FOR UPDATE
                 """,
                 (connection_id, instance_id),
             )
-        return cursor.rowcount == 1
+            row = await cursor.fetchone()
+            if row is None:
+                return False
+            room_id, username, was_typing = str(row[0]), str(row[1]), bool(row[2])
+            await connection.execute(
+                "DELETE FROM public.samsarix_connection_leases WHERE connection_id = %s",
+                (connection_id,),
+            )
+            if was_typing:
+                await self._append_typing_stopped(connection, connection_id, room_id, username)
+            active_connections = await _room_active_count(connection, room_id)
+            await self._append_presence(
+                connection,
+                active=False,
+                connection_id=connection_id,
+                room_id=room_id,
+                username=username,
+                active_connections=active_connections,
+            )
+        return True
 
     async def counts(self, *, room_id: str) -> ConnectionCounts:
         """Return live occupancy without allowing stale rows to inflate it."""
@@ -234,6 +293,7 @@ class PostgresConnectionRegistry:
                 FROM public.samsarix_connection_leases AS lease
                 JOIN public.samsarix_instance_cursors AS owner
                   ON owner.instance_id = lease.instance_id
+                 AND owner.generation = lease.instance_generation
                 JOIN public.samsarix_rooms AS room
                   ON room.id = lease.room_id
                 WHERE lease.lease_expires_at > clock_timestamp()
@@ -245,49 +305,168 @@ class PostgresConnectionRegistry:
             row = await cursor.fetchone()
         return ConnectionCounts(total=int(row[0]), room=int(row[1])) if row is not None else ConnectionCounts(0, 0)
 
-    async def reap_expired(self) -> list[ConnectionLease]:
-        """Delete and return rows whose socket/owner expired or whose room was archived."""
+    async def reap_expired(self, *, limit: int = 100) -> list[PresenceTransition]:
+        """Delete a bounded stale batch and emit best-effort leave transitions."""
 
+        if not 1 <= limit <= 1_000:
+            raise ValueError("connection expiry batch must be between 1 and 1000")
         async with self.foundation.transaction() as connection:
             await connection.execute("SELECT pg_advisory_xact_lock(%s)", (POSTGRES_CONNECTION_CAP_LOCK_ID,))
-            rows = await _delete_expired(connection)
-        return [_lease_from_row(row) for row in rows]
+            rows = await _delete_expired(connection, limit=limit)
+            transitions = await self._append_departures(connection, rows)
+        return transitions
+
+    async def _append_departures(
+        self,
+        connection: AsyncConnection[tuple[Any, ...]],
+        rows: list[tuple[Any, ...]],
+    ) -> list[PresenceTransition]:
+        transitions: list[PresenceTransition] = []
+        for row in sorted(rows, key=lambda item: str(item[0])):
+            connection_id, room_id, username = str(row[0]), str(row[3]), str(row[4])
+            if bool(row[8]):
+                await self._append_typing_stopped(connection, connection_id, room_id, username)
+            active_connections = await _room_active_count(connection, room_id)
+            sequence = await self._append_presence(
+                connection,
+                active=False,
+                connection_id=connection_id,
+                room_id=room_id,
+                username=username,
+                active_connections=active_connections,
+            )
+            transitions.append(
+                PresenceTransition(False, connection_id, room_id, username, active_connections, sequence)
+            )
+        return transitions
+
+    async def _append_presence(
+        self,
+        connection: AsyncConnection[tuple[Any, ...]],
+        *,
+        active: bool,
+        connection_id: str,
+        room_id: str,
+        username: str,
+        active_connections: int,
+    ) -> int:
+        event_type = "presence.joined" if active else "presence.left"
+        return await self.foundation.append_event(
+            connection,
+            room_id=room_id,
+            event_type=event_type,
+            payload={
+                "type": event_type,
+                "username": username,
+                "active_connections": active_connections,
+                "origin_connection_id": connection_id,
+            },
+        )
+
+    async def _append_typing_stopped(
+        self,
+        connection: AsyncConnection[tuple[Any, ...]],
+        connection_id: str,
+        room_id: str,
+        username: str,
+    ) -> int:
+        return await self.foundation.append_event(
+            connection,
+            room_id=room_id,
+            event_type="typing.stopped",
+            payload={
+                "type": "typing.stopped",
+                "username": username,
+                "origin_connection_id": connection_id,
+            },
+        )
 
 
-async def _delete_expired(connection: AsyncConnection[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
+async def _delete_expired(
+    connection: AsyncConnection[tuple[Any, ...]],
+    *,
+    limit: int,
+    prioritize_connection_id: str | None = None,
+) -> list[tuple[Any, ...]]:
     cursor = await connection.execute(
         """
-        DELETE FROM public.samsarix_connection_leases AS lease
-        WHERE lease.lease_expires_at <= clock_timestamp()
-           OR EXISTS (
-                SELECT 1
-                FROM public.samsarix_instance_cursors AS owner
-                WHERE owner.instance_id = lease.instance_id
-                  AND owner.lease_expires_at <= clock_timestamp()
-           )
-           OR EXISTS (
-                SELECT 1
-                FROM public.samsarix_rooms AS room
-                WHERE room.id = lease.room_id
-                  AND room.archived_at IS NOT NULL
-           )
-        RETURNING
-            lease.connection_id, lease.instance_id, lease.room_id, lease.username,
-            lease.subject, lease.lease_expires_at, lease.created_at
-        """
+        WITH stale AS MATERIALIZED (
+            SELECT
+                lease.connection_id, lease.instance_id, lease.instance_generation,
+                lease.room_id, lease.username, lease.subject,
+                lease.lease_expires_at, lease.created_at,
+                EXISTS (
+                    SELECT 1 FROM public.samsarix_typing_states AS typing
+                    WHERE typing.connection_id = lease.connection_id
+                ) AS was_typing
+            FROM public.samsarix_connection_leases AS lease
+            WHERE lease.lease_expires_at <= clock_timestamp()
+               OR EXISTS (
+                    SELECT 1
+                    FROM public.samsarix_instance_cursors AS owner
+                    WHERE owner.instance_id = lease.instance_id
+                      AND (
+                          owner.lease_expires_at <= clock_timestamp()
+                          OR owner.generation <> lease.instance_generation
+                      )
+               )
+               OR EXISTS (
+                    SELECT 1
+                    FROM public.samsarix_rooms AS room
+                    WHERE room.id = lease.room_id
+                      AND room.archived_at IS NOT NULL
+               )
+            ORDER BY (lease.connection_id = %s) DESC, lease.lease_expires_at, lease.connection_id
+            LIMIT %s
+            FOR UPDATE OF lease SKIP LOCKED
+        ), deleted AS (
+            DELETE FROM public.samsarix_connection_leases AS lease
+            USING stale
+            WHERE lease.connection_id = stale.connection_id
+            RETURNING lease.connection_id
+        )
+        SELECT
+            stale.connection_id, stale.instance_id, stale.instance_generation,
+            stale.room_id, stale.username, stale.subject,
+            stale.lease_expires_at, stale.created_at, stale.was_typing
+        FROM stale
+        JOIN deleted USING (connection_id)
+        """,
+        (prioritize_connection_id, limit),
     )
     return list(await cursor.fetchall())
+
+
+async def _room_active_count(connection: AsyncConnection[tuple[Any, ...]], room_id: str) -> int:
+    cursor = await connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM public.samsarix_connection_leases AS lease
+        JOIN public.samsarix_instance_cursors AS owner
+          ON owner.instance_id = lease.instance_id
+         AND owner.generation = lease.instance_generation
+        JOIN public.samsarix_rooms AS room ON room.id = lease.room_id
+        WHERE lease.room_id = %s
+          AND lease.lease_expires_at > clock_timestamp()
+          AND owner.lease_expires_at > clock_timestamp()
+          AND room.archived_at IS NULL
+        """,
+        (room_id,),
+    )
+    row = await cursor.fetchone()
+    return int(row[0]) if row is not None else 0
 
 
 def _lease_from_row(row: tuple[Any, ...]) -> ConnectionLease:
     return ConnectionLease(
         connection_id=str(row[0]),
         instance_id=str(row[1]),
-        room_id=str(row[2]),
-        username=str(row[3]),
-        subject=None if row[4] is None else str(row[4]),
-        lease_expires_at=cast(datetime, row[5]),
-        created_at=cast(datetime, row[6]),
+        instance_generation=cast(UUID, row[2]),
+        room_id=str(row[3]),
+        username=str(row[4]),
+        subject=None if row[5] is None else str(row[5]),
+        lease_expires_at=cast(datetime, row[6]),
+        created_at=cast(datetime, row[7]),
     )
 
 
