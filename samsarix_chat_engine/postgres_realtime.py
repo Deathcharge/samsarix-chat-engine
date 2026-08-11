@@ -31,6 +31,10 @@ _BROADCAST_EVENT_TYPES = frozenset(
         "message.deleted",
         "room.frozen",
         "room.unfrozen",
+        "presence.joined",
+        "presence.left",
+        "typing.started",
+        "typing.stopped",
     }
 )
 
@@ -38,7 +42,13 @@ _BROADCAST_EVENT_TYPES = frozenset(
 class RealtimeTarget(Protocol):
     """Local socket operations needed by the durable relay."""
 
-    async def broadcast(self, room_id: str, event: dict[str, Any]) -> None: ...
+    async def broadcast(
+        self,
+        room_id: str,
+        event: dict[str, Any],
+        *,
+        exclude_connection_id: str | None = None,
+    ) -> None: ...
 
     async def close_room(
         self,
@@ -99,6 +109,7 @@ class PostgresRealtimeRelay:
     async def initialize(self) -> int:
         """Register or renew this process cursor and return its acknowledged sequence."""
 
+        self._stop.clear()
         self._cursor = await self.foundation.register_instance(
             self.instance_id,
             lease_seconds=self.lease_seconds,
@@ -199,7 +210,15 @@ class PostgresRealtimeRelay:
 
     async def _dispatch(self, event: RealtimeEvent) -> None:
         if event.event_type in _BROADCAST_EVENT_TYPES:
-            await self.target.broadcast(event.room_id, event.payload)
+            payload = dict(event.payload)
+            origin_connection_id = payload.pop("origin_connection_id", None)
+            if event.event_type == "message.created":
+                payload.setdefault("idempotent_replay", False)
+            await self.target.broadcast(
+                event.room_id,
+                payload,
+                exclude_connection_id=(str(origin_connection_id) if origin_connection_id is not None else None),
+            )
             return
         if event.event_type == "room.archived":
             await self.target.close_room(event.room_id, event.payload)

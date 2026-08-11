@@ -59,6 +59,20 @@ async def test_failed_send_evicts_connection_and_unregister_is_idempotent() -> N
 
 
 @pytest.mark.asyncio
+async def test_broadcast_can_exclude_an_origin_connection_id() -> None:
+    manager = ConnectionManager(max_connections=2, max_per_room=2, send_timeout=0.1)
+    origin = FakeWebSocket()
+    peer = FakeWebSocket()
+    await manager.register(as_websocket(origin), "room", "A", connection_id="socket-a")
+    await manager.register(as_websocket(peer), "room", "B", connection_id="socket-b")
+
+    await manager.broadcast("room", {"type": "typing.started"}, exclude_connection_id="socket-a")
+
+    assert origin.sent == []
+    assert peer.sent == [{"type": "typing.started"}]
+
+
+@pytest.mark.asyncio
 async def test_close_room_notifies_and_removes_only_target_room() -> None:
     manager = ConnectionManager(max_connections=3, max_per_room=3, send_timeout=0.1)
     target = FakeWebSocket()

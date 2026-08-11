@@ -22,10 +22,18 @@ class ConnectionManager:
         self.max_per_room = max_per_room
         self.send_timeout = send_timeout
         self._rooms: dict[str, set[WebSocket]] = defaultdict(set)
-        self._metadata: dict[WebSocket, tuple[str, str, str | None]] = {}
+        self._metadata: dict[WebSocket, tuple[str, str, str | None, str | None]] = {}
         self._lock = asyncio.Lock()
 
-    async def register(self, websocket: WebSocket, room_id: str, username: str, subject: str | None = None) -> bool:
+    async def register(
+        self,
+        websocket: WebSocket,
+        room_id: str,
+        username: str,
+        subject: str | None = None,
+        *,
+        connection_id: str | None = None,
+    ) -> bool:
         """Register an already-accepted socket, returning false at capacity."""
 
         async with self._lock:
@@ -34,7 +42,7 @@ class ConnectionManager:
                     self._rooms.pop(room_id, None)
                 return False
             self._rooms[room_id].add(websocket)
-            self._metadata[websocket] = (room_id, username, subject)
+            self._metadata[websocket] = (room_id, username, subject, connection_id)
             return True
 
     async def unregister(self, websocket: WebSocket) -> tuple[str, str] | None:
@@ -44,7 +52,7 @@ class ConnectionManager:
             metadata = self._metadata.pop(websocket, None)
             if metadata is None:
                 return None
-            room_id, _, _ = metadata
+            room_id, _, _, _ = metadata
             room_connections = self._rooms.get(room_id)
             if room_connections is not None:
                 room_connections.discard(websocket)
@@ -69,11 +77,17 @@ class ConnectionManager:
         event: dict[str, Any],
         *,
         exclude: WebSocket | None = None,
+        exclude_connection_id: str | None = None,
     ) -> None:
         """Broadcast to a bounded snapshot of one room's connections."""
 
         async with self._lock:
-            recipients = tuple(connection for connection in self._rooms.get(room_id, ()) if connection is not exclude)
+            recipients = tuple(
+                connection
+                for connection in self._rooms.get(room_id, ())
+                if connection is not exclude
+                and (exclude_connection_id is None or self._metadata[connection][3] != exclude_connection_id)
+            )
         if recipients:
             await asyncio.gather(*(self.send(connection, event) for connection in recipients))
 

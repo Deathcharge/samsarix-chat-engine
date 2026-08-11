@@ -110,6 +110,75 @@ def test_sensitive_settings_support_single_line_secret_files(monkeypatch: pytest
     assert settings.webhook_signing_secret == encoded_webhook
 
 
+def test_postgres_configuration_is_explicit_tls_guarded_and_secret_safe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    postgres_secret = "postgresql://service:private-password@127.0.0.1:5432/samsarix"
+    postgres_file = tmp_path / "postgres-url"
+    postgres_file.write_text(postgres_secret + "\n", encoding="utf-8")
+    monkeypatch.setenv("SAMSARIX_CHAT_STORAGE", "postgres")
+    monkeypatch.setenv("SAMSARIX_CHAT_POSTGRES_URL_FILE", str(postgres_file))
+    monkeypatch.setenv("SAMSARIX_CHAT_POSTGRES_INSTANCE_ID", "chat-a")
+    monkeypatch.setenv("SAMSARIX_CHAT_POSTGRES_MAX_POOL_SIZE", "12")
+
+    settings = Settings.from_env()
+
+    assert settings.storage_backend == "postgres"
+    assert settings.postgres_url == postgres_secret
+    assert settings.postgres_instance_id == "chat-a"
+    assert settings.postgres_max_pool_size == 12
+    assert postgres_secret not in repr(settings)
+    with pytest.raises(ConfigurationError, match="--database"):
+        settings.with_database_path(tmp_path / "not-used.db")
+
+    with pytest.raises(ConfigurationError, match="sslmode=verify-full"):
+        Settings(
+            storage_backend="postgres",
+            postgres_url="postgresql://service:secret@db.example.com/samsarix?sslmode=require",
+            postgres_instance_id="chat-a",
+        )
+    remote = Settings(
+        storage_backend="postgres",
+        postgres_url="postgresql://service:secret@db.example.com/samsarix?sslmode=verify-full",
+        postgres_instance_id="chat-a",
+    )
+    assert remote.storage_backend == "postgres"
+
+
+def test_postgres_configuration_rejects_ambiguous_or_incomplete_storage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ConfigurationError, match="require SAMSARIX_CHAT_STORAGE=postgres"):
+        Settings(postgres_url="postgresql://localhost/samsarix")
+    with pytest.raises(ConfigurationError, match="is required"):
+        Settings(storage_backend="postgres", postgres_instance_id="chat-a")
+    with pytest.raises(ConfigurationError, match="safe identifier"):
+        Settings(
+            storage_backend="postgres",
+            postgres_url="postgresql://localhost/samsarix",
+            postgres_instance_id="not safe",
+        )
+
+    monkeypatch.setenv("SAMSARIX_CHAT_STORAGE", "postgres")
+    monkeypatch.setenv("SAMSARIX_CHAT_POSTGRES_URL", "postgresql://localhost/samsarix")
+    monkeypatch.setenv("SAMSARIX_CHAT_POSTGRES_INSTANCE_ID", "chat-a")
+    monkeypatch.setenv("SAMSARIX_CHAT_DATABASE", str(tmp_path / "ambiguous.db"))
+    with pytest.raises(ConfigurationError, match="cannot be combined"):
+        Settings.from_env()
+
+
+def test_cli_sqlite_backup_refuses_postgres_storage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("SAMSARIX_CHAT_STORAGE", "postgres")
+    monkeypatch.setenv("SAMSARIX_CHAT_POSTGRES_URL", "postgresql://localhost/samsarix")
+    monkeypatch.setenv("SAMSARIX_CHAT_POSTGRES_INSTANCE_ID", "chat-a")
+
+    with pytest.raises(SystemExit) as refused:
+        main(["database", "backup", str(tmp_path / "snapshot.db")])
+    assert refused.value.code == 2
+
+
 def test_secret_file_configuration_fails_closed_without_exposing_contents(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
