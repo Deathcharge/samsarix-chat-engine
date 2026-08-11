@@ -134,6 +134,7 @@ class PostgresApplicationRuntime:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._relay_task = None
         self._maintenance_task = None
+        await self.relay.release()
         await self.store.close()
 
     async def check_ready(self) -> bool:

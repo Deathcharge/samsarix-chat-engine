@@ -8,6 +8,7 @@ import asyncio
 import logging
 import uuid
 from typing import TYPE_CHECKING, Any, Protocol
+from uuid import UUID
 
 from pydantic import ValidationError
 
@@ -100,6 +101,7 @@ class PostgresRealtimeRelay:
         self.poll_interval_seconds = poll_interval_seconds
         self.batch_size = batch_size
         self._cursor: int | None = None
+        self._generation: UUID | None = None
         self._next_heartbeat = 0.0
         self._stop = asyncio.Event()
         self._fenced = False
@@ -110,10 +112,13 @@ class PostgresRealtimeRelay:
         """Register or renew this process cursor and return its acknowledged sequence."""
 
         self._stop.clear()
-        self._cursor = await self.foundation.register_instance(
+        registration = await self.foundation.claim_instance(
             self.instance_id,
             lease_seconds=self.lease_seconds,
+            generation=self._generation,
         )
+        self._generation = registration.generation
+        self._cursor = registration.last_sequence
         self._next_heartbeat = asyncio.get_running_loop().time() + self.lease_seconds / 3
         self._fenced = False
         self._fence_required = False
@@ -124,7 +129,13 @@ class PostgresRealtimeRelay:
 
         if self._cursor is None:
             raise RuntimeError("realtime relay is not initialized")
-        events = await self.foundation.read_events(self.instance_id, limit=self.batch_size)
+        if self._generation is None:
+            raise RuntimeError("realtime relay generation is not initialized")
+        events = await self.foundation.read_events(
+            self.instance_id,
+            limit=self.batch_size,
+            generation=self._generation,
+        )
         dispatched_sequence: int | None = None
         try:
             for event in events:
@@ -135,6 +146,7 @@ class PostgresRealtimeRelay:
                 self._cursor = await self.foundation.acknowledge_events(
                     self.instance_id,
                     through_sequence=dispatched_sequence,
+                    generation=self._generation,
                 )
         return len(events)
 
@@ -143,7 +155,13 @@ class PostgresRealtimeRelay:
 
         if self._cursor is None:
             raise RuntimeError("realtime relay is not initialized")
-        await self.foundation.heartbeat_instance(self.instance_id, lease_seconds=self.lease_seconds)
+        if self._generation is None:
+            raise RuntimeError("realtime relay generation is not initialized")
+        await self.foundation.heartbeat_claimed_instance(
+            self.instance_id,
+            generation=self._generation,
+            lease_seconds=self.lease_seconds,
+        )
         self._next_heartbeat = asyncio.get_running_loop().time() + self.lease_seconds / 3
 
     async def run(self) -> None:
@@ -155,10 +173,15 @@ class PostgresRealtimeRelay:
                 continue
             try:
                 if self._gap_recovery_required:
-                    self._cursor = await self.foundation.recover_instance_after_gap(
+                    if self._generation is None:
+                        raise RuntimeError("realtime relay generation is not initialized")
+                    registration = await self.foundation.recover_claimed_instance_after_gap(
                         self.instance_id,
+                        generation=self._generation,
                         lease_seconds=self.lease_seconds,
                     )
+                    self._generation = registration.generation
+                    self._cursor = registration.last_sequence
                     self._next_heartbeat = asyncio.get_running_loop().time() + self.lease_seconds / 3
                     self._gap_recovery_required = False
                     self._fenced = False
@@ -188,6 +211,16 @@ class PostgresRealtimeRelay:
         """Request graceful relay shutdown without closing sockets itself."""
 
         self._stop.set()
+
+    async def release(self) -> bool:
+        """Expire this exact process generation after its relay loop stops."""
+
+        if self._generation is None:
+            return False
+        return await self.foundation.release_instance(
+            self.instance_id,
+            generation=self._generation,
+        )
 
     async def _wait_for_work(self) -> None:
         try:

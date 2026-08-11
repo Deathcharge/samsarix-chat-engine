@@ -224,6 +224,37 @@ async def test_registration_starts_at_head_and_heartbeat_requires_live_lease(
 
 
 @pytest.mark.asyncio
+async def test_instance_claims_reject_duplicate_owners_and_fence_old_generations(
+    foundation: PostgresFoundation,
+) -> None:
+    first = await foundation.claim_instance("exclusive-worker", lease_seconds=30)
+    with pytest.raises(InstanceLeaseError, match="already active"):
+        await foundation.claim_instance("exclusive-worker", lease_seconds=30)
+
+    renewed = await foundation.claim_instance(
+        "exclusive-worker",
+        lease_seconds=30,
+        generation=first.generation,
+    )
+    assert renewed == first
+    assert await foundation.release_instance("exclusive-worker", generation=first.generation)
+
+    replacement = await foundation.claim_instance("exclusive-worker", lease_seconds=30)
+    assert replacement.generation != first.generation
+    with pytest.raises(InstanceLeaseError, match="generation"):
+        await foundation.heartbeat_claimed_instance(
+            "exclusive-worker",
+            generation=first.generation,
+            lease_seconds=30,
+        )
+    with pytest.raises(InstanceLeaseError, match="expired"):
+        await foundation.read_events(
+            "exclusive-worker",
+            generation=first.generation,
+        )
+
+
+@pytest.mark.asyncio
 async def test_concurrent_initialization_is_serialized(clean_postgres_database: str) -> None:
     first = PostgresFoundation(clean_postgres_database)
     second = PostgresFoundation(clean_postgres_database)
