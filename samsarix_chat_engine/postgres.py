@@ -23,7 +23,7 @@ from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
-POSTGRES_SCHEMA_VERSION = 6
+POSTGRES_SCHEMA_VERSION = 7
 POSTGRES_MIGRATION_LOCK_ID = 7_495_346_927_831_819_041
 POSTGRES_EVENT_SEQUENCE_LOCK_ID = 7_495_346_927_831_819_042
 REALTIME_CHANNEL = "samsarix_realtime_v1"
@@ -200,34 +200,22 @@ class PostgresFoundation:
         async with self.transaction() as connection:
             cursor = await connection.execute(
                 """
-                SELECT lease_expires_at <= clock_timestamp()
-                FROM public.samsarix_instance_cursors
-                WHERE instance_id = %s
-                FOR UPDATE
-                """,
-                (instance_id,),
-            )
-            existing = await cursor.fetchone()
-            if existing is not None and bool(existing[0]):
-                # A stable instance ID may be reused after a crash. Its old
-                # sockets no longer exist and must not become live again when
-                # the owner lease is renewed.
-                await connection.execute(
-                    "DELETE FROM public.samsarix_connection_leases WHERE instance_id = %s",
-                    (instance_id,),
-                )
-            cursor = await connection.execute(
-                """
                 INSERT INTO public.samsarix_instance_cursors (
-                    instance_id, last_sequence, lease_expires_at, updated_at
+                    instance_id, generation, last_sequence, lease_expires_at, updated_at
                 )
                 VALUES (
                     %s,
+                    gen_random_uuid(),
                     (SELECT COALESCE(MAX(sequence), 0) FROM public.samsarix_realtime_events),
                     clock_timestamp() + make_interval(secs => %s),
                     clock_timestamp()
                 )
                 ON CONFLICT (instance_id) DO UPDATE SET
+                    generation = CASE
+                        WHEN samsarix_instance_cursors.lease_expires_at <= clock_timestamp()
+                        THEN EXCLUDED.generation
+                        ELSE samsarix_instance_cursors.generation
+                    END,
                     lease_expires_at = EXCLUDED.lease_expires_at,
                     updated_at = clock_timestamp()
                 RETURNING last_sequence
@@ -394,6 +382,7 @@ class PostgresFoundation:
                             char_length(instance_id) BETWEEN 1 AND 128
                             AND instance_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
                         ),
+                        generation UUID NOT NULL DEFAULT gen_random_uuid(),
                         last_sequence BIGINT NOT NULL CHECK (last_sequence >= 0),
                         lease_expires_at TIMESTAMPTZ NOT NULL,
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
@@ -438,6 +427,7 @@ class PostgresFoundation:
                         ),
                         instance_id TEXT NOT NULL REFERENCES public.samsarix_instance_cursors(instance_id)
                             ON DELETE CASCADE,
+                        instance_generation UUID NOT NULL,
                         room_id TEXT NOT NULL REFERENCES public.samsarix_rooms(id) ON DELETE CASCADE,
                         username TEXT NOT NULL CHECK (char_length(username) BETWEEN 1 AND 64),
                         subject TEXT CHECK (subject IS NULL OR char_length(subject) BETWEEN 1 AND 64),
@@ -446,6 +436,47 @@ class PostgresFoundation:
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
                         CHECK (lease_expires_at > created_at)
                     )
+                    """
+                )
+                await connection.execute(
+                    """
+                    ALTER TABLE public.samsarix_instance_cursors
+                    ADD COLUMN IF NOT EXISTS generation UUID
+                    """
+                )
+                await connection.execute(
+                    """
+                    UPDATE public.samsarix_instance_cursors
+                    SET generation = gen_random_uuid()
+                    WHERE generation IS NULL
+                    """
+                )
+                await connection.execute(
+                    """
+                    ALTER TABLE public.samsarix_instance_cursors
+                    ALTER COLUMN generation SET DEFAULT gen_random_uuid(),
+                    ALTER COLUMN generation SET NOT NULL
+                    """
+                )
+                await connection.execute(
+                    """
+                    ALTER TABLE public.samsarix_connection_leases
+                    ADD COLUMN IF NOT EXISTS instance_generation UUID
+                    """
+                )
+                await connection.execute(
+                    """
+                    UPDATE public.samsarix_connection_leases AS lease
+                    SET instance_generation = owner.generation
+                    FROM public.samsarix_instance_cursors AS owner
+                    WHERE owner.instance_id = lease.instance_id
+                      AND lease.instance_generation IS NULL
+                    """
+                )
+                await connection.execute(
+                    """
+                    ALTER TABLE public.samsarix_connection_leases
+                    ALTER COLUMN instance_generation SET NOT NULL
                     """
                 )
                 await connection.execute(
@@ -460,10 +491,14 @@ class PostgresFoundation:
                     ON public.samsarix_connection_leases (room_id, lease_expires_at, connection_id)
                     """
                 )
+                if current_version < 7:
+                    await connection.execute("DROP INDEX IF EXISTS public.samsarix_connection_leases_instance")
                 await connection.execute(
                     """
-                    CREATE INDEX IF NOT EXISTS samsarix_connection_leases_instance
-                    ON public.samsarix_connection_leases (instance_id, lease_expires_at, connection_id)
+                    CREATE INDEX IF NOT EXISTS samsarix_connection_leases_instance_generation
+                    ON public.samsarix_connection_leases (
+                        instance_id, instance_generation, lease_expires_at, connection_id
+                    )
                     """
                 )
                 await connection.execute(

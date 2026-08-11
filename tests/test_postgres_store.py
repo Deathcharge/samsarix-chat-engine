@@ -96,7 +96,7 @@ async def test_schema_v2_migrates_transactionally_and_widens_event_payloads(
     service = _store(clean_postgres_database)
     await service.initialize()
     try:
-        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 6
+        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 7
         assert await service.check_ready()
         assert await service.list_rooms() == []
         async with service.foundation.transaction() as connection:
@@ -106,6 +106,119 @@ async def test_schema_v2_migrates_transactionally_and_widens_event_payloads(
                 event_type="message.created",
                 payload={"content": "x" * (300 * 1024)},
             )
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_schema_v6_backfills_matching_instance_generations(
+    clean_postgres_database: str,
+) -> None:
+    async with await psycopg.AsyncConnection.connect(clean_postgres_database, autocommit=True) as connection:
+        await connection.execute(
+            """
+            CREATE TABLE public.samsarix_schema_metadata (
+                singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+                version INTEGER NOT NULL CHECK (version > 0),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+            )
+            """
+        )
+        await connection.execute("INSERT INTO public.samsarix_schema_metadata (singleton, version) VALUES (TRUE, 6)")
+        await connection.execute(
+            """
+            CREATE TABLE public.samsarix_instance_cursors (
+                instance_id TEXT PRIMARY KEY,
+                last_sequence BIGINT NOT NULL CHECK (last_sequence >= 0),
+                lease_expires_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+            )
+            """
+        )
+        await connection.execute(
+            """
+            CREATE TABLE public.samsarix_rooms (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                archived_at TIMESTAMPTZ,
+                frozen_at TIMESTAMPTZ
+            )
+            """
+        )
+        await connection.execute(
+            """
+            CREATE TABLE public.samsarix_connection_leases (
+                connection_id TEXT PRIMARY KEY,
+                instance_id TEXT NOT NULL REFERENCES public.samsarix_instance_cursors(instance_id)
+                    ON DELETE CASCADE,
+                room_id TEXT NOT NULL REFERENCES public.samsarix_rooms(id) ON DELETE CASCADE,
+                username TEXT NOT NULL,
+                subject TEXT,
+                lease_expires_at TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                CHECK (lease_expires_at > created_at)
+            )
+            """
+        )
+        await connection.execute(
+            """
+            CREATE INDEX samsarix_connection_leases_instance
+            ON public.samsarix_connection_leases (instance_id, lease_expires_at, connection_id)
+            """
+        )
+        await connection.execute(
+            """
+            INSERT INTO public.samsarix_instance_cursors (
+                instance_id, last_sequence, lease_expires_at
+            ) VALUES ('legacy-node', 0, clock_timestamp() + interval '30 seconds')
+            """
+        )
+        await connection.execute("INSERT INTO public.samsarix_rooms (id, name) VALUES ('general', 'General')")
+        await connection.execute(
+            """
+            INSERT INTO public.samsarix_connection_leases (
+                connection_id, instance_id, room_id, username, subject, lease_expires_at
+            ) VALUES (
+                'legacy-socket', 'legacy-node', 'general', 'alice', 'alice',
+                clock_timestamp() + interval '30 seconds'
+            )
+            """
+        )
+
+    service = _store(clean_postgres_database)
+    await service.initialize()
+    try:
+        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 7
+        async with service.foundation.transaction() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT owner.generation, lease.instance_generation
+                FROM public.samsarix_connection_leases AS lease
+                JOIN public.samsarix_instance_cursors AS owner
+                  ON owner.instance_id = lease.instance_id
+                WHERE lease.connection_id = 'legacy-socket'
+                """
+            )
+            generations = await cursor.fetchone()
+            cursor = await connection.execute(
+                """
+                SELECT indexname
+                FROM pg_indexes
+                WHERE schemaname = 'public'
+                  AND indexname IN (
+                      'samsarix_connection_leases_instance',
+                      'samsarix_connection_leases_instance_generation'
+                  )
+                ORDER BY indexname
+                """
+            )
+            lease_indexes = [str(row[0]) for row in await cursor.fetchall()]
+        assert generations is not None
+        assert generations[0] is not None and generations[0] == generations[1]
+        assert lease_indexes == ["samsarix_connection_leases_instance_generation"]
     finally:
         await service.close()
 
