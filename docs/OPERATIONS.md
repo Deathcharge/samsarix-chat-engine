@@ -80,6 +80,8 @@ See [Reliable application webhooks](WEBHOOKS.md) for endpoint validation, receiv
 
 ## Back up and restore
 
+These CLI procedures apply to the supported SQLite deployment. The guarded PostgreSQL preview deliberately rejects SQLite backup and restore commands; use PostgreSQL-native, encrypted backups and point-in-time recovery instead, as described in the [PostgreSQL preview runbook](POSTGRES_PREVIEW.md#backup-restore-and-rollback).
+
 The backup command uses SQLite's online backup API, validates the snapshot with `PRAGMA integrity_check`, and atomically places the finished file. It can safely snapshot a running service:
 
 ```bash

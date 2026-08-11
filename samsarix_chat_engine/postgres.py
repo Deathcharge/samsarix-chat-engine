@@ -1,10 +1,9 @@
 # Copyright (c) 2026 Samsarix LLC
 # SPDX-License-Identifier: MPL-2.0
-"""Internal PostgreSQL coordination primitives for the v0.13 backend.
+"""PostgreSQL coordination primitives for the guarded v0.13 preview backend.
 
-This module deliberately is not wired into public configuration yet.  It
-establishes the migration and durable realtime contracts that the complete
-PostgreSQL chat store will build upon.
+The application runtime builds on these migration, lease, and durable realtime
+contracts when PostgreSQL mode is explicitly configured.
 """
 
 from __future__ import annotations

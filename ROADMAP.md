@@ -90,8 +90,9 @@ This makes the supported topology repeatable without implying that a container m
 - [x] implement connection-bound PostgreSQL typing transitions, refresh, and bounded expiry sweeping;
 - [x] derive join/leave presence from connection leases with generation-fenced restart and crash convergence;
 - [x] bound the retained event log behind live cursors and fence/recover stale workers that return after a gap;
-- [ ] expose guarded PostgreSQL configuration only after the remaining topology gates are proven;
-- [ ] wire the proven cross-worker fan-out, presence, typing, and rate-control paths into the application;
+- [x] expose explicitly guarded PostgreSQL preview configuration without changing the SQLite default;
+- [x] wire cross-instance fan-out, presence, typing, rate controls, connection leases, maintenance, and readiness into the application;
+- [ ] prove subprocess kill/restart, listener interruption, archive/ban teardown, and reconnect recovery against real network processes;
 - [ ] run sustained load/soak and reconnect-storm tests and publish measured limits;
 - [ ] add OpenTelemetry hooks only when an operator needs them, with telemetry disabled by default.
 

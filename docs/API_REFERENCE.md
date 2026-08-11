@@ -21,7 +21,7 @@ Returns `200 {"status":"ok"}` when the process can serve requests.
 
 ### `GET /readyz`
 
-Returns `200 {"status":"ready"}` when SQLite answers a query, or `503 {"status":"not_ready"}`.
+Returns `200 {"status":"ready"}` when the configured storage backend answers a query, or `503 {"status":"not_ready"}`. SQLite is the supported v0.12 backend; the guarded v0.13 PostgreSQL preview applies the same public response contract.
 
 ### `POST /v1/rooms`
 
@@ -257,8 +257,8 @@ Every WebSocket publish and typing command checks `room:write` and the current r
 
 ## Delivery semantics
 
-Message create/update/delete events are emitted only after SQLite commits the corresponding state. Broadcast, presence, and typing are in-process and at-most-once; slow or failed clients are removed after the configured send timeout. Typing is never persisted, and clients must honor `expires_in` even if a stop event is missed. Reconnecting clients recover current edits and tombstones from history and current unread state over HTTP rather than relying on missed events. Clients should reconnect with backoff, consume the initial history event, and use the HTTP message cursor endpoint for older messages.
+Message create/update/delete events are emitted only after the configured storage transaction commits. In supported v0.12 SQLite mode, broadcast, presence, and typing are in-process and at-most-once. In the guarded v0.13 PostgreSQL preview, application events commit to an ordered database log and are relayed across instances; connection leases and expiring typing state also live in PostgreSQL. Delivery to each WebSocket remains at-most-once, and slow or failed clients are removed after the configured send timeout. Clients must honor `expires_in` even if a typing stop event is missed. Reconnecting clients recover current edits and tombstones from history and current unread state over HTTP rather than relying on missed events. They should reconnect with backoff, consume the initial history event, and use the HTTP message cursor endpoint for older messages.
 
 When configured, selected application webhook rows commit atomically with message/moderation state and deliver later with at-least-once semantics. Retries and manual replay keep the same `webhook-id`; each attempt gets a new signed timestamp. Delivery can be duplicated or reordered, so receivers validate the Standard Webhooks signature/timestamp and durably deduplicate IDs before side effects. See [Reliable application webhooks](WEBHOOKS.md) for the exact envelope, verification procedure, retry schedule, rotation, network policy, and recovery runbook.
 
-Multi-worker or multi-host fan-out is not implemented in v0.12; lifecycle, webhook worker, and ban teardown are deterministic only within the supported single process. The checked-in [TypeScript client](../clients/typescript/README.md) implements the reconnect recovery sequence for browser and Node integrations. The [container profile](CONTAINER_DEPLOYMENT.md) packages exactly that one-process topology and must not be scaled to multiple replicas.
+Multi-worker or multi-host fan-out is not implemented in supported v0.12 SQLite mode; lifecycle, webhook worker, and ban teardown are deterministic only within that single process. The guarded [PostgreSQL multi-instance preview](POSTGRES_PREVIEW.md) is application-wired but unreleased until its remaining process-failure and measured-load gates pass. The checked-in [TypeScript client](../clients/typescript/README.md) implements the reconnect recovery sequence for browser and Node integrations. The current [container profile](CONTAINER_DEPLOYMENT.md) packages exactly the SQLite one-process topology and must not be scaled to multiple replicas.
