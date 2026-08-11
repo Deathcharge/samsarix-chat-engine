@@ -13,6 +13,7 @@ psycopg = pytest.importorskip("psycopg")
 
 from samsarix_chat_engine.postgres import (  # noqa: E402
     POSTGRES_SCHEMA_VERSION,
+    EventLogGapError,
     InstanceLeaseError,
     InvalidRealtimeEventError,
     PostgresFoundation,
@@ -114,6 +115,84 @@ async def test_event_row_rolls_back_with_caller_transaction(foundation: Postgres
     assert committed_sequence > rolled_back_sequence
     with pytest.raises(InstanceLeaseError, match="not a committed event"):
         await foundation.acknowledge_events("worker-rollback", through_sequence=rolled_back_sequence)
+
+
+@pytest.mark.asyncio
+async def test_event_pruning_respects_live_cursors_and_stale_instances_recover(
+    foundation: PostgresFoundation,
+) -> None:
+    assert await foundation.register_instance("worker-current", lease_seconds=30) == 0
+    assert await foundation.register_instance("worker-stale", lease_seconds=30) == 0
+    async with foundation.transaction() as connection:
+        sequences = [
+            await foundation.append_event(
+                connection,
+                room_id="room-a",
+                event_type="message.created",
+                payload={"message_id": str(index)},
+            )
+            for index in range(3)
+        ]
+
+    blocked = await foundation.prune_events(max_events=1, max_age_seconds=31_536_000)
+    assert blocked.pruned_events == 0
+    assert blocked.pruned_through_sequence == 0
+
+    await foundation.acknowledge_events("worker-current", through_sequence=sequences[-1])
+    async with foundation.transaction() as connection:
+        cursor = await connection.execute(
+            """
+            UPDATE public.samsarix_instance_cursors
+            SET lease_expires_at = clock_timestamp() - interval '1 second'
+            WHERE instance_id = 'worker-stale'
+            """
+        )
+        assert cursor.rowcount == 1
+
+    pruned = await foundation.prune_events(max_events=1, max_age_seconds=31_536_000)
+    assert pruned.pruned_events == 2
+    assert pruned.pruned_through_sequence == sequences[1]
+    assert await foundation.event_retention_floor() == sequences[1]
+
+    assert await foundation.register_instance("worker-stale", lease_seconds=30) == 0
+    with pytest.raises(EventLogGapError, match="predates"):
+        await foundation.read_events("worker-stale")
+    assert await foundation.recover_instance_after_gap("worker-stale", lease_seconds=30) == sequences[-1]
+    assert await foundation.read_events("worker-stale") == []
+    with pytest.raises(InstanceLeaseError, match="no retained event gap"):
+        await foundation.recover_instance_after_gap("worker-stale", lease_seconds=30)
+
+    async with foundation.transaction() as connection:
+        await connection.execute(
+            """
+            UPDATE public.samsarix_realtime_events
+            SET created_at = clock_timestamp() - interval '61 seconds'
+            """
+        )
+    final_prune = await foundation.prune_events(max_events=1, max_age_seconds=60)
+    assert final_prune.pruned_events == 1
+    assert final_prune.pruned_through_sequence == sequences[-1]
+    assert await foundation.current_head() == sequences[-1]
+    assert await foundation.register_instance("worker-new", lease_seconds=30) == sequences[-1]
+    assert await foundation.read_events("worker-new") == []
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"max_events": 0, "max_age_seconds": 60}, "retention count"),
+        ({"max_events": 1, "max_age_seconds": 59}, "retention age"),
+        ({"max_events": 1, "max_age_seconds": 60, "limit": 0}, "prune limit"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_event_pruning_configuration_is_bounded(
+    foundation: PostgresFoundation,
+    kwargs: dict[str, int],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        await foundation.prune_events(**kwargs)
 
 
 @pytest.mark.asyncio

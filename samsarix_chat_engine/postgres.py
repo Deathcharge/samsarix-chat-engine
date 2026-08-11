@@ -23,9 +23,10 @@ from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
-POSTGRES_SCHEMA_VERSION = 7
+POSTGRES_SCHEMA_VERSION = 8
 POSTGRES_MIGRATION_LOCK_ID = 7_495_346_927_831_819_041
 POSTGRES_EVENT_SEQUENCE_LOCK_ID = 7_495_346_927_831_819_042
+POSTGRES_EVENT_RETENTION_LOCK_ID = 7_495_346_927_831_819_043
 REALTIME_CHANNEL = "samsarix_realtime_v1"
 MAX_EVENT_PAYLOAD_BYTES = 512 * 1024
 MAX_INSTANCE_ID_CHARS = 128
@@ -55,6 +56,10 @@ class InstanceLeaseError(PostgresFoundationError):
     """Raised when an instance cursor is missing, expired, or invalid."""
 
 
+class EventLogGapError(InstanceLeaseError):
+    """Raised when an instance cursor predates the retained event window."""
+
+
 @dataclass(frozen=True, slots=True)
 class RealtimeEvent:
     """One committed event-log row in global sequence order."""
@@ -64,6 +69,14 @@ class RealtimeEvent:
     event_type: str
     payload: dict[str, Any]
     created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class EventPruneResult:
+    """Result of one bounded realtime event-log maintenance pass."""
+
+    pruned_events: int
+    pruned_through_sequence: int
 
 
 class PostgresFoundation:
@@ -189,9 +202,128 @@ class PostgresFoundation:
         """Return the greatest committed event sequence, or zero."""
 
         async with self.transaction() as connection:
-            cursor = await connection.execute("SELECT COALESCE(MAX(sequence), 0) FROM public.samsarix_realtime_events")
+            cursor = await connection.execute(
+                """
+                SELECT GREATEST(
+                    (SELECT COALESCE(MAX(sequence), 0) FROM public.samsarix_realtime_events),
+                    retention.pruned_through_sequence
+                )
+                FROM public.samsarix_realtime_retention AS retention
+                WHERE retention.singleton = TRUE
+                """
+            )
             row = await cursor.fetchone()
-        return int(row[0]) if row is not None else 0
+        if row is None:
+            raise PostgresFoundationError("PostgreSQL realtime retention metadata is missing")
+        return int(row[0])
+
+    async def event_retention_floor(self) -> int:
+        """Return the greatest sequence intentionally removed from the event log."""
+
+        async with self.transaction() as connection:
+            cursor = await connection.execute(
+                "SELECT pruned_through_sequence FROM public.samsarix_realtime_retention WHERE singleton = TRUE"
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            raise PostgresFoundationError("PostgreSQL realtime retention metadata is missing")
+        return int(row[0])
+
+    async def prune_events(
+        self,
+        *,
+        max_events: int,
+        max_age_seconds: int,
+        limit: int = 1_000,
+    ) -> EventPruneResult:
+        """Remove a bounded safe batch while recording a durable recovery watermark.
+
+        Active instance cursors are never crossed. Expired instances may fall
+        behind the retained window and will be required to fence their sockets
+        and recover from authoritative HTTP state when they return.
+        """
+
+        if not 1 <= max_events <= 10_000_000:
+            raise ValueError("event retention count must be between 1 and 10000000")
+        if not 60 <= max_age_seconds <= 31_536_000:
+            raise ValueError("event retention age must be between 60 and 31536000 seconds")
+        if not 1 <= limit <= 10_000:
+            raise ValueError("event prune limit must be between 1 and 10000")
+
+        async with self.transaction() as connection:
+            await connection.execute("SELECT pg_advisory_xact_lock(%s)", (POSTGRES_EVENT_RETENTION_LOCK_ID,))
+            cursor = await connection.execute(
+                """
+                SELECT COALESCE(
+                    MIN(last_sequence) FILTER (WHERE lease_expires_at > clock_timestamp()),
+                    (
+                        SELECT GREATEST(
+                            (SELECT COALESCE(MAX(sequence), 0) FROM public.samsarix_realtime_events),
+                            retention.pruned_through_sequence
+                        )
+                        FROM public.samsarix_realtime_retention AS retention
+                        WHERE retention.singleton = TRUE
+                    )
+                )
+                FROM public.samsarix_instance_cursors
+                """
+            )
+            row = await cursor.fetchone()
+            safe_through = int(row[0]) if row is not None else 0
+            cursor = await connection.execute(
+                """
+                SELECT sequence
+                FROM public.samsarix_realtime_events
+                ORDER BY sequence DESC
+                OFFSET %s LIMIT 1
+                """,
+                (max_events,),
+            )
+            row = await cursor.fetchone()
+            count_cutoff = int(row[0]) if row is not None else None
+            cursor = await connection.execute(
+                """
+                SELECT sequence
+                FROM public.samsarix_realtime_events
+                WHERE sequence <= %s
+                  AND (
+                      created_at < clock_timestamp() - make_interval(secs => %s)
+                      OR (%s::BIGINT IS NOT NULL AND sequence <= %s::BIGINT)
+                  )
+                ORDER BY sequence
+                LIMIT %s
+                FOR UPDATE SKIP LOCKED
+                """,
+                (safe_through, max_age_seconds, count_cutoff, count_cutoff, limit),
+            )
+            sequences = [int(item[0]) for item in await cursor.fetchall()]
+            if sequences:
+                await connection.execute(
+                    "DELETE FROM public.samsarix_realtime_events WHERE sequence = ANY(%s)",
+                    (sequences,),
+                )
+                cursor = await connection.execute(
+                    """
+                    UPDATE public.samsarix_realtime_retention
+                    SET pruned_through_sequence = GREATEST(pruned_through_sequence, %s),
+                        updated_at = clock_timestamp()
+                    WHERE singleton = TRUE
+                    RETURNING pruned_through_sequence
+                    """,
+                    (sequences[-1],),
+                )
+            else:
+                cursor = await connection.execute(
+                    """
+                    SELECT pruned_through_sequence
+                    FROM public.samsarix_realtime_retention
+                    WHERE singleton = TRUE
+                    """
+                )
+            row = await cursor.fetchone()
+        if row is None:
+            raise PostgresFoundationError("PostgreSQL realtime retention metadata is missing")
+        return EventPruneResult(len(sequences), int(row[0]))
 
     async def register_instance(self, instance_id: str, *, lease_seconds: int) -> int:
         """Create or renew an instance lease and return its durable cursor."""
@@ -206,7 +338,14 @@ class PostgresFoundation:
                 VALUES (
                     %s,
                     gen_random_uuid(),
-                    (SELECT COALESCE(MAX(sequence), 0) FROM public.samsarix_realtime_events),
+                    (
+                        SELECT GREATEST(
+                            (SELECT COALESCE(MAX(sequence), 0) FROM public.samsarix_realtime_events),
+                            retention.pruned_through_sequence
+                        )
+                        FROM public.samsarix_realtime_retention AS retention
+                        WHERE retention.singleton = TRUE
+                    ),
                     clock_timestamp() + make_interval(secs => %s),
                     clock_timestamp()
                 )
@@ -244,6 +383,50 @@ class PostgresFoundation:
             if cursor.rowcount != 1:
                 raise InstanceLeaseError("instance lease is missing or expired")
 
+    async def recover_instance_after_gap(self, instance_id: str, *, lease_seconds: int) -> int:
+        """Fence one stale generation and advance its cursor to the current head."""
+
+        _validate_instance(instance_id, lease_seconds)
+        async with self.transaction() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT cursor.last_sequence, retention.pruned_through_sequence
+                FROM public.samsarix_instance_cursors AS cursor
+                CROSS JOIN public.samsarix_realtime_retention AS retention
+                WHERE cursor.instance_id = %s AND retention.singleton = TRUE
+                FOR UPDATE OF cursor
+                """,
+                (instance_id,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                raise InstanceLeaseError("instance cursor is missing")
+            if int(row[0]) >= int(row[1]):
+                raise InstanceLeaseError("instance cursor has no retained event gap")
+            cursor = await connection.execute(
+                """
+                UPDATE public.samsarix_instance_cursors
+                SET generation = gen_random_uuid(),
+                    last_sequence = (
+                        SELECT GREATEST(
+                            (SELECT COALESCE(MAX(sequence), 0) FROM public.samsarix_realtime_events),
+                            retention.pruned_through_sequence
+                        )
+                        FROM public.samsarix_realtime_retention AS retention
+                        WHERE retention.singleton = TRUE
+                    ),
+                    lease_expires_at = clock_timestamp() + make_interval(secs => %s),
+                    updated_at = clock_timestamp()
+                WHERE instance_id = %s
+                RETURNING last_sequence
+                """,
+                (lease_seconds, instance_id),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            raise InstanceLeaseError("instance cursor is missing")
+        return int(row[0])
+
     async def read_events(self, instance_id: str, *, limit: int = 100) -> list[RealtimeEvent]:
         """Read committed events after an active instance's durable cursor."""
 
@@ -263,6 +446,18 @@ class PostgresFoundation:
             instance = await cursor.fetchone()
             if instance is None:
                 raise InstanceLeaseError("instance lease is missing or expired")
+            cursor = await connection.execute(
+                """
+                SELECT pruned_through_sequence
+                FROM public.samsarix_realtime_retention
+                WHERE singleton = TRUE
+                """
+            )
+            retention = await cursor.fetchone()
+            if retention is None:
+                raise PostgresFoundationError("PostgreSQL realtime retention metadata is missing")
+            if int(instance[0]) < int(retention[0]):
+                raise EventLogGapError("instance cursor predates the retained realtime event window")
             cursor = await connection.execute(
                 """
                 SELECT sequence, room_id, event_type, payload, created_at
@@ -307,7 +502,16 @@ class PostgresFoundation:
             current = int(instance[0])
             if through_sequence <= current:
                 return current
-            cursor = await connection.execute("SELECT COALESCE(MAX(sequence), 0) FROM public.samsarix_realtime_events")
+            cursor = await connection.execute(
+                """
+                SELECT GREATEST(
+                    (SELECT COALESCE(MAX(sequence), 0) FROM public.samsarix_realtime_events),
+                    retention.pruned_through_sequence
+                )
+                FROM public.samsarix_realtime_retention AS retention
+                WHERE retention.singleton = TRUE
+                """
+            )
             head_row = await cursor.fetchone()
             head = int(head_row[0]) if head_row is not None else 0
             if through_sequence > head:
@@ -387,6 +591,22 @@ class PostgresFoundation:
                         lease_expires_at TIMESTAMPTZ NOT NULL,
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
                     )
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS public.samsarix_realtime_retention (
+                        singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+                        pruned_through_sequence BIGINT NOT NULL DEFAULT 0 CHECK (pruned_through_sequence >= 0),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+                    )
+                    """
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO public.samsarix_realtime_retention (singleton, pruned_through_sequence)
+                    VALUES (TRUE, 0)
+                    ON CONFLICT (singleton) DO NOTHING
                     """
                 )
                 if current_version < 3:

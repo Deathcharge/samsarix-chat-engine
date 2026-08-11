@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from .models import MemberModeration
 from .postgres import (
+    EventLogGapError,
     PostgresFoundation,
     PostgresFoundationError,
     RealtimeEvent,
@@ -93,6 +94,7 @@ class PostgresRealtimeRelay:
         self._stop = asyncio.Event()
         self._fenced = False
         self._fence_required = False
+        self._gap_recovery_required = False
 
     async def initialize(self) -> int:
         """Register or renew this process cursor and return its acknowledged sequence."""
@@ -141,6 +143,14 @@ class PostgresRealtimeRelay:
                 await self._wait_for_work()
                 continue
             try:
+                if self._gap_recovery_required:
+                    self._cursor = await self.foundation.recover_instance_after_gap(
+                        self.instance_id,
+                        lease_seconds=self.lease_seconds,
+                    )
+                    self._next_heartbeat = asyncio.get_running_loop().time() + self.lease_seconds / 3
+                    self._gap_recovery_required = False
+                    self._fenced = False
                 if self._cursor is None:
                     await self.initialize()
                 if asyncio.get_running_loop().time() >= self._next_heartbeat:
@@ -148,6 +158,12 @@ class PostgresRealtimeRelay:
                 processed = await self.process_once()
                 if processed == self.batch_size:
                     continue
+            except EventLogGapError:
+                logger.warning("Fencing local sockets after a retained PostgreSQL event-log gap")
+                self._cursor = None
+                self._gap_recovery_required = True
+                self._fence_required = True
+                await self._fence()
             except PostgresFoundationError as exc:
                 logger.warning("Fencing local sockets after PostgreSQL relay interruption: %s", type(exc).__name__)
                 self._cursor = None
