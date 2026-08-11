@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -28,6 +30,14 @@ def _settings(conninfo: str, instance_id: str) -> Settings:
         max_connections=4,
         max_connections_per_room=4,
     )
+
+
+def _wait_for_connection_count(client: TestClient, headers: dict[str, str], expected: int) -> None:
+    for _attempt in range(200):
+        if client.get("/v1/stats", headers=headers).json() == {"active_connections": expected}:
+            return
+        time.sleep(0.01)
+    pytest.fail(f"global connection count did not converge to {expected}")
 
 
 @pytest.mark.asyncio
@@ -88,4 +98,4 @@ async def test_two_app_instances_share_http_websocket_presence_typing_and_messag
             assert left["username"] == "Bob"
             assert left["active_connections"] == 1
 
-        assert second_client.get("/v1/stats", headers=headers).json() == {"active_connections": 0}
+        _wait_for_connection_count(second_client, headers, 0)
