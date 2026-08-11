@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -21,8 +23,34 @@ from samsarix_chat_engine.postgres import (  # noqa: E402
     UnsupportedPostgresSchemaError,
     _validate_event,
 )
+from samsarix_chat_engine.postgres_runtime import PostgresApplicationRuntime  # noqa: E402
 
 pytestmark = pytest.mark.postgres
+
+
+@pytest.mark.asyncio
+async def test_runtime_maintenance_isolates_failures_and_throttles_event_pruning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    runtime = object.__new__(PostgresApplicationRuntime)
+    runtime.typing = SimpleNamespace(reap_expired=AsyncMock(side_effect=RuntimeError("typing unavailable")))
+    runtime.connections = SimpleNamespace(reap_expired=AsyncMock(return_value=0))
+    runtime.message_limiter = SimpleNamespace(prune_expired=AsyncMock(return_value=0))
+    runtime.search_limiter = SimpleNamespace(prune_expired=AsyncMock(return_value=0))
+    runtime.typing_limiter = SimpleNamespace(prune_expired=AsyncMock(return_value=0))
+    prune_events = AsyncMock(return_value=0)
+    runtime.store = SimpleNamespace(foundation=SimpleNamespace(prune_events=prune_events))
+    runtime.max_realtime_events = 1_000
+    runtime.realtime_event_max_age_seconds = 3_600
+    runtime._next_event_prune_at = 0.0
+
+    await runtime.run_maintenance_once()
+    await runtime.run_maintenance_once()
+
+    assert runtime.connections.reap_expired.await_count == 2
+    assert runtime.message_limiter.prune_expired.await_count == 2
+    assert prune_events.await_count == 1
+    assert "maintenance step typing failed: RuntimeError" in caplog.text
 
 
 def test_event_validation_is_bounded_and_canonical() -> None:
@@ -221,6 +249,37 @@ async def test_registration_starts_at_head_and_heartbeat_requires_live_lease(
         await foundation.heartbeat_instance("worker-late", lease_seconds=30)
     with pytest.raises(InstanceLeaseError, match="expired"):
         await foundation.read_events("worker-late")
+
+
+@pytest.mark.asyncio
+async def test_instance_claims_reject_duplicate_owners_and_fence_old_generations(
+    foundation: PostgresFoundation,
+) -> None:
+    first = await foundation.claim_instance("exclusive-worker", lease_seconds=30)
+    with pytest.raises(InstanceLeaseError, match="already active"):
+        await foundation.claim_instance("exclusive-worker", lease_seconds=30)
+
+    renewed = await foundation.claim_instance(
+        "exclusive-worker",
+        lease_seconds=30,
+        generation=first.generation,
+    )
+    assert renewed == first
+    assert await foundation.release_instance("exclusive-worker", generation=first.generation)
+
+    replacement = await foundation.claim_instance("exclusive-worker", lease_seconds=30)
+    assert replacement.generation != first.generation
+    with pytest.raises(InstanceLeaseError, match="generation"):
+        await foundation.heartbeat_claimed_instance(
+            "exclusive-worker",
+            generation=first.generation,
+            lease_seconds=30,
+        )
+    with pytest.raises(InstanceLeaseError, match="expired"):
+        await foundation.read_events(
+            "exclusive-worker",
+            generation=first.generation,
+        )
 
 
 @pytest.mark.asyncio

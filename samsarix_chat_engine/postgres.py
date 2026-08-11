@@ -1,10 +1,9 @@
 # Copyright (c) 2026 Samsarix LLC
 # SPDX-License-Identifier: MPL-2.0
-"""Internal PostgreSQL coordination primitives for the v0.13 backend.
+"""PostgreSQL coordination primitives for the guarded v0.13 preview backend.
 
-This module deliberately is not wired into public configuration yet.  It
-establishes the migration and durable realtime contracts that the complete
-PostgreSQL chat store will build upon.
+The application runtime builds on these migration, lease, and durable realtime
+contracts when PostgreSQL mode is explicitly configured.
 """
 
 from __future__ import annotations
@@ -17,6 +16,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, cast
+from uuid import UUID
 
 import psycopg
 from psycopg import AsyncConnection
@@ -27,6 +27,7 @@ POSTGRES_SCHEMA_VERSION = 8
 POSTGRES_MIGRATION_LOCK_ID = 7_495_346_927_831_819_041
 POSTGRES_EVENT_SEQUENCE_LOCK_ID = 7_495_346_927_831_819_042
 POSTGRES_EVENT_RETENTION_LOCK_ID = 7_495_346_927_831_819_043
+POSTGRES_INSTANCE_REGISTRATION_LOCK_ID = 7_495_346_927_831_819_044
 REALTIME_CHANNEL = "samsarix_realtime_v1"
 MAX_EVENT_PAYLOAD_BYTES = 512 * 1024
 MAX_INSTANCE_ID_CHARS = 128
@@ -77,6 +78,14 @@ class EventPruneResult:
 
     pruned_events: int
     pruned_through_sequence: int
+
+
+@dataclass(frozen=True, slots=True)
+class InstanceRegistration:
+    """One exclusively claimed process generation and its durable cursor."""
+
+    generation: UUID
+    last_sequence: int
 
 
 class PostgresFoundation:
@@ -366,6 +375,129 @@ class PostgresFoundation:
             raise InstanceLeaseError("instance registration failed")
         return int(row[0])
 
+    async def claim_instance(
+        self,
+        instance_id: str,
+        *,
+        lease_seconds: int,
+        generation: UUID | None = None,
+    ) -> InstanceRegistration:
+        """Exclusively claim or renew one process generation."""
+
+        _validate_instance(instance_id, lease_seconds)
+        async with self.transaction() as connection:
+            await connection.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (POSTGRES_INSTANCE_REGISTRATION_LOCK_ID,),
+            )
+            cursor = await connection.execute(
+                """
+                SELECT generation, last_sequence, lease_expires_at > clock_timestamp()
+                FROM public.samsarix_instance_cursors
+                WHERE instance_id = %s
+                FOR UPDATE
+                """,
+                (instance_id,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                cursor = await connection.execute(
+                    """
+                    INSERT INTO public.samsarix_instance_cursors (
+                        instance_id, generation, last_sequence, lease_expires_at, updated_at
+                    )
+                    VALUES (
+                        %s,
+                        gen_random_uuid(),
+                        (
+                            SELECT GREATEST(
+                                (SELECT COALESCE(MAX(sequence), 0) FROM public.samsarix_realtime_events),
+                                retention.pruned_through_sequence
+                            )
+                            FROM public.samsarix_realtime_retention AS retention
+                            WHERE retention.singleton = TRUE
+                        ),
+                        clock_timestamp() + make_interval(secs => %s),
+                        clock_timestamp()
+                    )
+                    RETURNING generation, last_sequence
+                    """,
+                    (instance_id, lease_seconds),
+                )
+            elif bool(row[2]):
+                if generation is None or cast(UUID, row[0]) != generation:
+                    raise InstanceLeaseError("instance ID is already active")
+                cursor = await connection.execute(
+                    """
+                    UPDATE public.samsarix_instance_cursors
+                    SET lease_expires_at = clock_timestamp() + make_interval(secs => %s),
+                        updated_at = clock_timestamp()
+                    WHERE instance_id = %s AND generation = %s
+                    RETURNING generation, last_sequence
+                    """,
+                    (lease_seconds, instance_id, generation),
+                )
+            else:
+                cursor = await connection.execute(
+                    """
+                    UPDATE public.samsarix_instance_cursors
+                    SET generation = gen_random_uuid(),
+                        lease_expires_at = clock_timestamp() + make_interval(secs => %s),
+                        updated_at = clock_timestamp()
+                    WHERE instance_id = %s
+                    RETURNING generation, last_sequence
+                    """,
+                    (lease_seconds, instance_id),
+                )
+            claimed = await cursor.fetchone()
+        if claimed is None:
+            raise InstanceLeaseError("instance claim failed")
+        return InstanceRegistration(cast(UUID, claimed[0]), int(claimed[1]))
+
+    async def release_instance(self, instance_id: str, *, generation: UUID) -> bool:
+        """Expire one exact process generation during graceful shutdown."""
+
+        _validate_instance_id(instance_id)
+        async with self.transaction() as connection:
+            cursor = await connection.execute(
+                """
+                UPDATE public.samsarix_instance_cursors
+                SET lease_expires_at = clock_timestamp(),
+                    updated_at = clock_timestamp()
+                WHERE instance_id = %s
+                  AND generation = %s
+                  AND lease_expires_at > clock_timestamp()
+                """,
+                (instance_id, generation),
+            )
+            released = cursor.rowcount == 1
+        return released
+
+    async def heartbeat_claimed_instance(
+        self,
+        instance_id: str,
+        *,
+        generation: UUID,
+        lease_seconds: int,
+    ) -> None:
+        """Renew only the exact process generation that owns the cursor."""
+
+        _validate_instance(instance_id, lease_seconds)
+        async with self.transaction() as connection:
+            cursor = await connection.execute(
+                """
+                UPDATE public.samsarix_instance_cursors
+                SET lease_expires_at = clock_timestamp() + make_interval(secs => %s),
+                    updated_at = clock_timestamp()
+                WHERE instance_id = %s
+                  AND generation = %s
+                  AND lease_expires_at > clock_timestamp()
+                """,
+                (lease_seconds, instance_id, generation),
+            )
+            if cursor.rowcount != 1:
+                raise InstanceLeaseError("instance generation is missing or expired")
+
     async def heartbeat_instance(self, instance_id: str, *, lease_seconds: int) -> None:
         """Renew an existing non-expired instance lease."""
 
@@ -427,7 +559,65 @@ class PostgresFoundation:
             raise InstanceLeaseError("instance cursor is missing")
         return int(row[0])
 
-    async def read_events(self, instance_id: str, *, limit: int = 100) -> list[RealtimeEvent]:
+    async def recover_claimed_instance_after_gap(
+        self,
+        instance_id: str,
+        *,
+        generation: UUID,
+        lease_seconds: int,
+    ) -> InstanceRegistration:
+        """Recover a retained gap only for the exact process generation."""
+
+        _validate_instance(instance_id, lease_seconds)
+        async with self.transaction() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT cursor.last_sequence, retention.pruned_through_sequence
+                FROM public.samsarix_instance_cursors AS cursor
+                CROSS JOIN public.samsarix_realtime_retention AS retention
+                WHERE cursor.instance_id = %s
+                  AND cursor.generation = %s
+                  AND retention.singleton = TRUE
+                FOR UPDATE OF cursor
+                """,
+                (instance_id, generation),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                raise InstanceLeaseError("instance generation is missing")
+            if int(row[0]) >= int(row[1]):
+                raise InstanceLeaseError("instance cursor has no retained event gap")
+            cursor = await connection.execute(
+                """
+                UPDATE public.samsarix_instance_cursors
+                SET generation = gen_random_uuid(),
+                    last_sequence = (
+                        SELECT GREATEST(
+                            (SELECT COALESCE(MAX(sequence), 0) FROM public.samsarix_realtime_events),
+                            retention.pruned_through_sequence
+                        )
+                        FROM public.samsarix_realtime_retention AS retention
+                        WHERE retention.singleton = TRUE
+                    ),
+                    lease_expires_at = clock_timestamp() + make_interval(secs => %s),
+                    updated_at = clock_timestamp()
+                WHERE instance_id = %s AND generation = %s
+                RETURNING generation, last_sequence
+                """,
+                (lease_seconds, instance_id, generation),
+            )
+            recovered = await cursor.fetchone()
+        if recovered is None:
+            raise InstanceLeaseError("instance generation is missing")
+        return InstanceRegistration(cast(UUID, recovered[0]), int(recovered[1]))
+
+    async def read_events(
+        self,
+        instance_id: str,
+        *,
+        limit: int = 100,
+        generation: UUID | None = None,
+    ) -> list[RealtimeEvent]:
         """Read committed events after an active instance's durable cursor."""
 
         _validate_instance_id(instance_id)
@@ -438,10 +628,12 @@ class PostgresFoundation:
                 """
                 SELECT last_sequence
                 FROM public.samsarix_instance_cursors
-                WHERE instance_id = %s AND lease_expires_at > clock_timestamp()
+                WHERE instance_id = %s
+                  AND lease_expires_at > clock_timestamp()
+                  AND (%s::UUID IS NULL OR generation = %s::UUID)
                 FOR UPDATE
                 """,
-                (instance_id,),
+                (instance_id, generation, generation),
             )
             instance = await cursor.fetchone()
             if instance is None:
@@ -480,7 +672,13 @@ class PostgresFoundation:
             for row in rows
         ]
 
-    async def acknowledge_events(self, instance_id: str, *, through_sequence: int) -> int:
+    async def acknowledge_events(
+        self,
+        instance_id: str,
+        *,
+        through_sequence: int,
+        generation: UUID | None = None,
+    ) -> int:
         """Advance an active instance cursor monotonically through a real event."""
 
         _validate_instance_id(instance_id)
@@ -491,10 +689,12 @@ class PostgresFoundation:
                 """
                 SELECT last_sequence
                 FROM public.samsarix_instance_cursors
-                WHERE instance_id = %s AND lease_expires_at > clock_timestamp()
+                WHERE instance_id = %s
+                  AND lease_expires_at > clock_timestamp()
+                  AND (%s::UUID IS NULL OR generation = %s::UUID)
                 FOR UPDATE
                 """,
-                (instance_id,),
+                (instance_id, generation, generation),
             )
             instance = await cursor.fetchone()
             if instance is None:
@@ -529,9 +729,10 @@ class PostgresFoundation:
                 SET last_sequence = %s,
                     updated_at = clock_timestamp()
                 WHERE instance_id = %s
+                  AND (%s::UUID IS NULL OR generation = %s::UUID)
                 RETURNING last_sequence
                 """,
-                (through_sequence, instance_id),
+                (through_sequence, instance_id, generation, generation),
             )
             row = await cursor.fetchone()
             if row is None:

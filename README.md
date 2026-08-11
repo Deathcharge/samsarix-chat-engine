@@ -75,6 +75,8 @@ python examples/02_websocket_chat.py
 
 See [Getting started](docs/GETTING_STARTED.md) for authentication and browser examples, [Conversation controls](docs/CONVERSATION_CONTROLS.md) for moderation workflows, and [Data lifecycle operations](docs/OPERATIONS.md) for export, deletion, retention, backup, and restore.
 
+The development branch also contains a guarded, unreleased PostgreSQL multi-instance mode. It is fully wired through the application but remains a preview until its subprocess, interruption, load/soak, backup, and rollback gates pass. See [PostgreSQL multi-instance preview](docs/POSTGRES_PREVIEW.md); SQLite remains the default and the supported v0.12 deployment.
+
 The [application-workflow guide](docs/APPLICATION_WORKFLOWS.md) and runnable `examples/03_support_workflow.py` show a two-party support case with separate customer and agent identities. [Reliable application webhooks](docs/WEBHOOKS.md) covers receiver verification, retries, replay, rotation, and failure recovery.
 
 ## Container quick start
@@ -128,6 +130,9 @@ All settings are optional for loopback development. Copy [.env.example](.env.exa
 | Variable | Default | Purpose |
 | --- | ---: | --- |
 | `SAMSARIX_CHAT_DATABASE` | `data/samsarix-chat.db` | SQLite database path |
+| `SAMSARIX_CHAT_STORAGE` | `sqlite` | Storage backend; `postgres` selects the guarded v0.13 preview |
+| `SAMSARIX_CHAT_POSTGRES_URL_FILE` | unset | Preferred protected PostgreSQL URL file; required with the preview unless direct URL form is used |
+| `SAMSARIX_CHAT_POSTGRES_INSTANCE_ID` | unset | Required unique stable replica identity in PostgreSQL mode |
 | `SAMSARIX_CHAT_API_KEY` | unset | Shared secret protecting all `/v1` data; minimum 16 characters |
 | `SAMSARIX_CHAT_API_KEY_FILE` | unset | File alternative to `API_KEY`; never set both |
 | `SAMSARIX_CHAT_TOKEN_SIGNING_SECRET` | unset | Enables signed application-user tokens; minimum 32 bytes |
@@ -200,7 +205,7 @@ HTTP / WebSocket clients
 - Search is room-authorized, current-state Unicode-normalized substring matching over at most the configured retained messages for that room; it is not global, fuzzy, or externally indexed.
 - Typing signals are transition-only, separately rate-limited, automatically expired, and never persisted or audited.
 - WebSocket delivery and presence events are best-effort/at-most-once. Reconnecting clients recover the last 50 messages and can page older history over HTTP.
-- Running multiple worker processes is not supported: each process would have an independent connection registry and rate limiter. Use one process or add a real broker in a future release.
+- SQLite remains one-process only. The guarded PostgreSQL preview uses database-owned cursors, connection leases, rate buckets, typing state, presence, and an ordered event log across replicas; it is not a supported scale claim until the published acceptance gates pass.
 - Retention always applies configured count caps and can additionally apply an operator-selected maximum age.
 
 ## Security, privacy, and operating cost
@@ -228,7 +233,7 @@ CI runs the tests on CPython 3.10–3.14 on Linux and CPython 3.12 on Windows, v
 
 ## Limitations and project status
 
-This is a coherent single-instance MVP, not a hosted chat platform. The container and Compose profile support exactly one process and replica. The accepted [multi-instance architecture](docs/MULTI_INSTANCE_ARCHITECTURE.md) selects PostgreSQL plus a transactional event log for v0.13, but remains explicitly unreleased until its cross-process failure gates pass. Load/soak testing and attachments with explicit storage policy follow. Those are intentionally not presented as current capabilities.
+This is a coherent single-instance MVP, not a hosted chat platform. The container and Compose profile support exactly one SQLite process and replica. The guarded [PostgreSQL preview](docs/POSTGRES_PREVIEW.md) now wires the accepted [multi-instance architecture](docs/MULTI_INSTANCE_ARCHITECTURE.md) through real application instances, but remains explicitly unreleased until its remaining process-failure and measured-load gates pass. Attachments with explicit storage policy follow. Those are intentionally not presented as current supported capabilities.
 
 ## License
 

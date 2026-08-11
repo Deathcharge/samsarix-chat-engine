@@ -85,7 +85,7 @@ class PostgresMessageSnapshot:
 
 
 class PostgresChatStore:
-    """PostgreSQL core store; public configuration waits for full protocol parity."""
+    """PostgreSQL chat store used by the guarded v0.13 preview runtime."""
 
     def __init__(
         self,

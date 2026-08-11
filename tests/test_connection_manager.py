@@ -1,5 +1,6 @@
 """Focused tests for bounded connection cleanup and failure handling."""
 
+import asyncio
 from typing import cast
 
 import pytest
@@ -21,6 +22,32 @@ class FakeWebSocket:
 
     async def close(self, *, code: int, reason: str) -> None:
         self.closed.append((code, reason))
+
+
+class ContendedFakeWebSocket(FakeWebSocket):
+    def __init__(self) -> None:
+        super().__init__()
+        self.active_operations = 0
+        self.max_active_operations = 0
+
+    async def _enter_operation(self) -> None:
+        self.active_operations += 1
+        self.max_active_operations = max(self.max_active_operations, self.active_operations)
+        await asyncio.sleep(0.01)
+
+    async def send_json(self, event: dict[str, object]) -> None:
+        await self._enter_operation()
+        try:
+            self.sent.append(event)
+        finally:
+            self.active_operations -= 1
+
+    async def close(self, *, code: int, reason: str) -> None:
+        await self._enter_operation()
+        try:
+            self.closed.append((code, reason))
+        finally:
+            self.active_operations -= 1
 
 
 def as_websocket(fake: FakeWebSocket) -> WebSocket:
@@ -56,6 +83,38 @@ async def test_failed_send_evicts_connection_and_unregister_is_idempotent() -> N
     assert await manager.send(websocket, {"type": "test"}) is False
     assert manager.active_connections == 0
     assert await manager.unregister(websocket) is None
+
+
+@pytest.mark.asyncio
+async def test_broadcast_can_exclude_an_origin_connection_id() -> None:
+    manager = ConnectionManager(max_connections=2, max_per_room=2, send_timeout=0.1)
+    origin = FakeWebSocket()
+    peer = FakeWebSocket()
+    await manager.register(as_websocket(origin), "room", "A", connection_id="socket-a")
+    await manager.register(as_websocket(peer), "room", "B", connection_id="socket-b")
+
+    await manager.broadcast("room", {"type": "typing.started"}, exclude_connection_id="socket-a")
+
+    assert origin.sent == []
+    assert peer.sent == [{"type": "typing.started"}]
+
+
+@pytest.mark.asyncio
+async def test_send_and_close_are_serialized_per_connection() -> None:
+    manager = ConnectionManager(max_connections=1, max_per_room=1, send_timeout=0.1)
+    target = ContendedFakeWebSocket()
+    websocket = as_websocket(target)
+    await manager.register(websocket, "room", "A")
+
+    send_task = asyncio.create_task(manager.send(websocket, {"type": "lease.error"}))
+    await asyncio.sleep(0)
+    await manager.close(websocket, code=1012, reason="Storage unavailable")
+    assert await send_task is True
+
+    assert target.max_active_operations == 1
+    assert target.sent == [{"type": "lease.error"}]
+    assert target.closed == [(1012, "Storage unavailable")]
+    assert manager.active_connections == 0
 
 
 @pytest.mark.asyncio

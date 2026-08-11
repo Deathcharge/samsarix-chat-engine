@@ -25,7 +25,7 @@ class RecordingTarget:
         fail_on_broadcast_number: int | None = None,
         fail_close_all_once: bool = False,
     ) -> None:
-        self.broadcasts: list[tuple[str, dict[str, Any]]] = []
+        self.broadcasts: list[tuple[str, dict[str, Any], str | None]] = []
         self.closed_rooms: list[tuple[str, dict[str, Any], int, str]] = []
         self.closed_members: list[tuple[str, str, dict[str, Any], int, str]] = []
         self.close_all_calls = 0
@@ -35,11 +35,17 @@ class RecordingTarget:
         self.broadcasted = asyncio.Event()
         self.fenced = asyncio.Event()
 
-    async def broadcast(self, room_id: str, event: dict[str, Any]) -> None:
+    async def broadcast(
+        self,
+        room_id: str,
+        event: dict[str, Any],
+        *,
+        exclude_connection_id: str | None = None,
+    ) -> None:
         self.broadcast_attempts += 1
         if self.broadcast_attempts == self.fail_on_broadcast_number:
             raise RuntimeError("local dispatch failed")
-        self.broadcasts.append((room_id, event))
+        self.broadcasts.append((room_id, event, exclude_connection_id))
         self.broadcasted.set()
 
     async def close_room(
@@ -341,6 +347,48 @@ def test_relay_configuration_is_bounded() -> None:
         PostgresRealtimeRelay(foundation, target, instance_id="")
     with pytest.raises(ValueError, match="instance ID"):
         PostgresRealtimeRelay(foundation, target, instance_id="x" * 129)
+
+
+@pytest.mark.asyncio
+async def test_presence_and_typing_dispatch_exclude_origin_without_leaking_internal_id() -> None:
+    foundation = PostgresFoundation("postgresql://unused")
+    target = RecordingTarget()
+    relay = PostgresRealtimeRelay(foundation, target)
+    created_at = datetime.now(timezone.utc)
+
+    await relay._dispatch(
+        RealtimeEvent(
+            sequence=1,
+            room_id="general",
+            event_type="typing.started",
+            payload={
+                "type": "typing.started",
+                "username": "alice",
+                "expires_in": 8,
+                "origin_connection_id": "socket-a",
+            },
+            created_at=created_at,
+        )
+    )
+    await relay._dispatch(
+        RealtimeEvent(
+            sequence=2,
+            room_id="general",
+            event_type="presence.left",
+            payload={
+                "type": "presence.left",
+                "username": "alice",
+                "active_connections": 1,
+                "origin_connection_id": "socket-a",
+            },
+            created_at=created_at,
+        )
+    )
+
+    assert target.broadcasts == [
+        ("general", {"type": "typing.started", "username": "alice", "expires_in": 8}, "socket-a"),
+        ("general", {"type": "presence.left", "username": "alice", "active_connections": 1}, "socket-a"),
+    ]
 
 
 @pytest.mark.asyncio

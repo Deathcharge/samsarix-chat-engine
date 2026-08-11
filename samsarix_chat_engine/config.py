@@ -5,12 +5,14 @@
 from __future__ import annotations
 
 import os
+import re
 import warnings
 from base64 import b64decode
 from binascii import Error as Base64Error
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from urllib.parse import urlparse
+from typing import Literal
+from urllib.parse import parse_qs, urlparse
 
 
 class ConfigurationError(ValueError):
@@ -25,6 +27,7 @@ WEBHOOK_EVENT_TYPES = frozenset(
         "message.updated",
     }
 )
+_POSTGRES_INSTANCE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
 def _read_env(suffix: str) -> str | None:
@@ -215,6 +218,18 @@ class Settings:
     """
 
     database_path: Path = Path("data/samsarix-chat.db")
+    storage_backend: Literal["sqlite", "postgres"] = "sqlite"
+    postgres_url: str | None = field(default=None, repr=False)
+    postgres_instance_id: str | None = None
+    postgres_min_pool_size: int = 1
+    postgres_max_pool_size: int = 10
+    postgres_pool_timeout_seconds: float = 10.0
+    postgres_lease_seconds: int = 30
+    postgres_relay_poll_seconds: float = 0.25
+    postgres_maintenance_interval_seconds: float = 1.0
+    postgres_max_rate_buckets: int = 100_000
+    postgres_max_realtime_events: int = 100_000
+    postgres_realtime_event_max_age_seconds: int = 604_800
     api_key: str | None = None
     token_signing_secret: str | None = None
     token_verification_jwks_path: Path | None = None
@@ -249,6 +264,40 @@ class Settings:
     webhook_allow_private_targets: bool = False
 
     def __post_init__(self) -> None:
+        if self.storage_backend not in {"sqlite", "postgres"}:
+            raise ConfigurationError("SAMSARIX_CHAT_STORAGE must be sqlite or postgres")
+        if self.storage_backend == "sqlite":
+            postgres_tuning_is_nondefault = (
+                self.postgres_min_pool_size != 1
+                or self.postgres_max_pool_size != 10
+                or self.postgres_pool_timeout_seconds != 10.0
+                or self.postgres_lease_seconds != 30
+                or self.postgres_relay_poll_seconds != 0.25
+                or self.postgres_maintenance_interval_seconds != 1.0
+                or self.postgres_max_rate_buckets != 100_000
+                or self.postgres_max_realtime_events != 100_000
+                or self.postgres_realtime_event_max_age_seconds != 604_800
+            )
+            if self.postgres_url is not None or self.postgres_instance_id is not None or postgres_tuning_is_nondefault:
+                raise ConfigurationError("PostgreSQL settings require SAMSARIX_CHAT_STORAGE=postgres")
+        else:
+            if self.postgres_url is None:
+                raise ConfigurationError("SAMSARIX_CHAT_POSTGRES_URL or SAMSARIX_CHAT_POSTGRES_URL_FILE is required")
+            if not 1 <= len(self.postgres_url) <= 4_096:
+                raise ConfigurationError("PostgreSQL connection information must be between 1 and 4096 characters")
+            if self.postgres_instance_id is None or not _POSTGRES_INSTANCE_PATTERN.fullmatch(self.postgres_instance_id):
+                raise ConfigurationError(
+                    "SAMSARIX_CHAT_POSTGRES_INSTANCE_ID must be 1 to 128 safe identifier characters"
+                )
+            parsed_postgres = urlparse(self.postgres_url)
+            if parsed_postgres.scheme not in {"postgres", "postgresql"} or parsed_postgres.hostname is None:
+                raise ConfigurationError("PostgreSQL connection information must be a PostgreSQL URL")
+            loopback_postgres = parsed_postgres.hostname.lower() in {"localhost", "127.0.0.1", "::1"}
+            ssl_modes = parse_qs(parsed_postgres.query).get("sslmode", [])
+            if not loopback_postgres and ssl_modes != ["verify-full"]:
+                raise ConfigurationError("remote PostgreSQL URLs must set sslmode=verify-full")
+        if not 0 <= self.postgres_min_pool_size <= self.postgres_max_pool_size:
+            raise ConfigurationError("PostgreSQL minimum pool size cannot exceed its maximum")
         if self.api_key is not None and not 16 <= len(self.api_key) <= 4_096:
             raise ConfigurationError("SAMSARIX_CHAT_API_KEY must be between 16 and 4096 characters")
         if self.token_signing_secret is not None:
@@ -282,6 +331,15 @@ class Settings:
             "token_clock_skew_seconds": (self.token_clock_skew_seconds, 0, 300),
             "webhook_max_attempts": (self.webhook_max_attempts, 1, 20),
             "max_webhook_deliveries": (self.max_webhook_deliveries, 100, 10_000_000),
+            "postgres_max_pool_size": (self.postgres_max_pool_size, 1, 100),
+            "postgres_lease_seconds": (self.postgres_lease_seconds, 3, 300),
+            "postgres_max_rate_buckets": (self.postgres_max_rate_buckets, 1, 10_000_000),
+            "postgres_max_realtime_events": (self.postgres_max_realtime_events, 1, 10_000_000),
+            "postgres_realtime_event_max_age_seconds": (
+                self.postgres_realtime_event_max_age_seconds,
+                60,
+                31_536_000,
+            ),
         }
         for name, (value, minimum, maximum) in checks.items():
             if not minimum <= value <= maximum:
@@ -313,6 +371,12 @@ class Settings:
             raise ConfigurationError("typing_timeout_seconds must be between 1 and 30")
         if not 0.1 <= self.webhook_timeout_seconds <= 30:
             raise ConfigurationError("webhook_timeout_seconds must be between 0.1 and 30")
+        if not 0.1 <= self.postgres_pool_timeout_seconds <= 60:
+            raise ConfigurationError("postgres_pool_timeout_seconds must be between 0.1 and 60")
+        if not 0.01 <= self.postgres_relay_poll_seconds <= 5:
+            raise ConfigurationError("postgres_relay_poll_seconds must be between 0.01 and 5")
+        if not 0.1 <= self.postgres_maintenance_interval_seconds <= 60:
+            raise ConfigurationError("postgres_maintenance_interval_seconds must be between 0.1 and 60")
         for origin in self.allowed_origins:
             parsed = urlparse(origin)
             if (
@@ -379,8 +443,46 @@ class Settings:
         token_verification_jwks_file = _read_env("TOKEN_VERIFICATION_JWKS_FILE")
         webhook_url = _read_env("WEBHOOK_URL") or None
         configured_database = _read_env("DATABASE")
+        storage_backend = _read_env("STORAGE") or "sqlite"
+        postgres_url = _read_secret_env("POSTGRES_URL") or None
+        postgres_operational_settings = (
+            "POSTGRES_INSTANCE_ID",
+            "POSTGRES_MIN_POOL_SIZE",
+            "POSTGRES_MAX_POOL_SIZE",
+            "POSTGRES_POOL_TIMEOUT",
+            "POSTGRES_LEASE_SECONDS",
+            "POSTGRES_RELAY_POLL",
+            "POSTGRES_MAINTENANCE_INTERVAL",
+            "POSTGRES_MAX_RATE_BUCKETS",
+            "POSTGRES_MAX_REALTIME_EVENTS",
+            "POSTGRES_REALTIME_EVENT_MAX_AGE",
+        )
+        if storage_backend != "postgres" and (
+            postgres_url is not None or any(_read_env(name) is not None for name in postgres_operational_settings)
+        ):
+            raise ConfigurationError("PostgreSQL settings require SAMSARIX_CHAT_STORAGE=postgres")
+        if storage_backend == "postgres" and configured_database is not None:
+            raise ConfigurationError("SAMSARIX_CHAT_DATABASE cannot be combined with PostgreSQL storage")
         return cls(
             database_path=Path(configured_database) if configured_database else _default_database_path(),
+            storage_backend=storage_backend,  # type: ignore[arg-type]
+            postgres_url=postgres_url,
+            postgres_instance_id=_read_env("POSTGRES_INSTANCE_ID") or None,
+            postgres_min_pool_size=_read_int("POSTGRES_MIN_POOL_SIZE", 1, minimum=0, maximum=100),
+            postgres_max_pool_size=_read_int("POSTGRES_MAX_POOL_SIZE", 10, minimum=1, maximum=100),
+            postgres_pool_timeout_seconds=_read_float("POSTGRES_POOL_TIMEOUT", 10.0, minimum=0.1, maximum=60),
+            postgres_lease_seconds=_read_int("POSTGRES_LEASE_SECONDS", 30, minimum=3, maximum=300),
+            postgres_relay_poll_seconds=_read_float("POSTGRES_RELAY_POLL", 0.25, minimum=0.01, maximum=5),
+            postgres_maintenance_interval_seconds=_read_float(
+                "POSTGRES_MAINTENANCE_INTERVAL", 1.0, minimum=0.1, maximum=60
+            ),
+            postgres_max_rate_buckets=_read_int("POSTGRES_MAX_RATE_BUCKETS", 100_000, minimum=1, maximum=10_000_000),
+            postgres_max_realtime_events=_read_int(
+                "POSTGRES_MAX_REALTIME_EVENTS", 100_000, minimum=1, maximum=10_000_000
+            ),
+            postgres_realtime_event_max_age_seconds=_read_int(
+                "POSTGRES_REALTIME_EVENT_MAX_AGE", 604_800, minimum=60, maximum=31_536_000
+            ),
             api_key=api_key,
             token_signing_secret=token_signing_secret,
             token_verification_jwks_path=(Path(token_verification_jwks_file) if token_verification_jwks_file else None),
@@ -420,4 +522,6 @@ class Settings:
     def with_database_path(self, database_path: Path) -> Settings:
         """Return a validated copy with a CLI-selected database path."""
 
+        if self.storage_backend != "sqlite":
+            raise ConfigurationError("--database cannot be combined with PostgreSQL storage")
         return replace(self, database_path=database_path)

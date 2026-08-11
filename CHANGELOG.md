@@ -17,6 +17,8 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 - PostgreSQL schema v6 and internal connection-bound typing state with transition-only starts, refresh without event storms, explicit stops, database-time expiry, and bounded concurrent sweeping into durable coordination events.
 - PostgreSQL schema v7 and lease-derived presence transitions with exact join/explicit-leave counts, bounded crashed-process sweeping, typing-before-leave ordering, and process-generation fencing for safe stable-ID restarts.
 - PostgreSQL schema v8 realtime-retention metadata, bounded count/age pruning behind every live cursor, explicit retained-gap detection, and relay recovery that fences sockets, rotates the stale process generation, and resumes from the authoritative event head.
+- Guarded PostgreSQL application configuration and lifecycle orchestration for shared HTTP storage, cross-instance WebSocket messages and room state, global socket capacity/rate controls/stats, leased connection renewal, sender-excluded presence/typing, bounded maintenance, and readiness.
+- A PostgreSQL preview deployment guide covering protected URL files, mandatory remote `verify-full` TLS, unique replica identities, pool/lease/retention bounds, migration, backup/rollback ownership, and remaining release gates.
 
 ### Security and operations
 
@@ -32,6 +34,7 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 - Internal typing coordination events retain an opaque origin connection ID so future application wiring can exclude the sender. The public realtime relay does not forward these events until that exclusion contract is implemented; clients must continue treating advertised expiry as the stop-event backstop.
 - A restarted process rotates its database generation token after lease expiry. Connection, typing, count, renewal, and cleanup queries require the matching generation so stale sockets cannot regain capacity, activity, or presence merely because an operator reused a stable instance name.
 - Event pruning records the greatest intentionally removed sequence even when no event rows remain. A returning stale relay cannot mistake that empty window for a healthy cursor: it closes local sockets before skipping to current authoritative state, and its generation rotation makes old connection leases non-live.
+- PostgreSQL replica IDs are exclusive generation-owned claims: a duplicate active owner fails closed, graceful shutdown releases the exact generation, and a stale process cannot heartbeat, read, or acknowledge after a replacement takes ownership.
 - The asymmetric-authentication, test, and development dependency ranges now require `cryptography>=50,<51`, excluding the `cryptography>=44.0.0,<50.0.0` range affected by `PYSEC-2026-3552`.
 
 ## 0.12.0 — 2026-08-02

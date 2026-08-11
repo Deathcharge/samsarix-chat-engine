@@ -120,6 +120,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "database":
+        if settings.storage_backend != "sqlite":
+            parser.error("SQLite backup and restore commands are unavailable with PostgreSQL storage")
         try:
             if args.database_command == "backup":
                 copy_sqlite_database(settings.database_path, args.output, replace=args.replace)

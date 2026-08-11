@@ -14,7 +14,7 @@ from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, FastAPI, Header, Path, Query, Request, Response, WebSocket, WebSocketDisconnect
@@ -27,6 +27,9 @@ from starlette.background import BackgroundTask
 from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.types import Message as ASGIMessage
 
+if TYPE_CHECKING:
+    from .postgres_runtime import PostgresApplicationRuntime
+
 from .auth import (
     AccessTokenService,
     AccessTokenVerifier,
@@ -36,7 +39,7 @@ from .auth import (
     Principal,
     credentials_match,
 )
-from .config import Settings, decode_webhook_secret
+from .config import ConfigurationError, Settings, decode_webhook_secret
 from .models import (
     AuditEventPage,
     MemberModeration,
@@ -137,6 +140,12 @@ class MessageRateLimiter:
             self._events.pop(key, None)
         while len(self._events) > self.max_keys:
             self._events.pop(next(iter(self._events)))
+
+
+class RateLimiter(Protocol):
+    """Shared request-path contract for local and PostgreSQL limiters."""
+
+    async def allow(self, key: str) -> bool: ...
 
 
 class RequestBodyTooLarge(Exception):
@@ -387,26 +396,75 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     """Create an isolated chat service using explicit or environment settings."""
 
     resolved = settings or Settings.from_env()
-    store = ChatStore(
-        resolved.database_path,
-        max_rooms=resolved.max_rooms,
-        max_stored_messages=resolved.max_stored_messages,
-        max_stored_messages_per_room=resolved.max_stored_messages_per_room,
-        max_read_states_per_room=resolved.max_read_states_per_room,
-        message_retention_days=resolved.message_retention_days,
-        max_audit_events=resolved.max_audit_events,
-        webhook_events=resolved.webhook_events,
-        max_webhook_deliveries=resolved.max_webhook_deliveries,
-    )
-    lifecycle_lock = DatabaseLifecycleLock(resolved.database_path)
     manager = ConnectionManager(
         max_connections=resolved.max_connections,
         max_per_room=resolved.max_connections_per_room,
         send_timeout=resolved.websocket_send_timeout_seconds,
     )
-    limiter = MessageRateLimiter(resolved.messages_per_minute)
-    search_limiter = MessageRateLimiter(resolved.searches_per_minute)
-    typing_limiter = MessageRateLimiter(resolved.typing_events_per_minute)
+    postgres_runtime: PostgresApplicationRuntime | None = None
+    lifecycle_lock: DatabaseLifecycleLock | None = None
+    limiter: RateLimiter
+    search_limiter: RateLimiter
+    typing_limiter: RateLimiter
+    if resolved.storage_backend == "postgres":
+        try:
+            from .postgres_runtime import PostgresApplicationRuntime
+        except ModuleNotFoundError as exc:
+            raise ConfigurationError(
+                "PostgreSQL storage requires the samsarix-chat-engine[postgres] installation extra"
+            ) from exc
+        postgres_url = resolved.postgres_url
+        postgres_instance_id = resolved.postgres_instance_id
+        if postgres_url is None or postgres_instance_id is None:
+            raise ConfigurationError("PostgreSQL storage configuration is incomplete")
+        postgres_runtime = PostgresApplicationRuntime(
+            postgres_url,
+            manager,
+            instance_id=postgres_instance_id,
+            max_rooms=resolved.max_rooms,
+            max_stored_messages=resolved.max_stored_messages,
+            max_stored_messages_per_room=resolved.max_stored_messages_per_room,
+            max_read_states_per_room=resolved.max_read_states_per_room,
+            message_retention_days=resolved.message_retention_days,
+            max_audit_events=resolved.max_audit_events,
+            webhook_events=resolved.webhook_events,
+            max_webhook_deliveries=resolved.max_webhook_deliveries,
+            max_connections=resolved.max_connections,
+            max_connections_per_room=resolved.max_connections_per_room,
+            messages_per_minute=resolved.messages_per_minute,
+            searches_per_minute=resolved.searches_per_minute,
+            typing_events_per_minute=resolved.typing_events_per_minute,
+            typing_timeout_seconds=resolved.typing_timeout_seconds,
+            min_pool_size=resolved.postgres_min_pool_size,
+            max_pool_size=resolved.postgres_max_pool_size,
+            pool_timeout_seconds=resolved.postgres_pool_timeout_seconds,
+            lease_seconds=resolved.postgres_lease_seconds,
+            relay_poll_interval_seconds=resolved.postgres_relay_poll_seconds,
+            maintenance_interval_seconds=resolved.postgres_maintenance_interval_seconds,
+            max_rate_buckets=resolved.postgres_max_rate_buckets,
+            max_realtime_events=resolved.postgres_max_realtime_events,
+            realtime_event_max_age_seconds=resolved.postgres_realtime_event_max_age_seconds,
+        )
+        store: ChatStorage = postgres_runtime.store
+        limiter = postgres_runtime.message_limiter
+        search_limiter = postgres_runtime.search_limiter
+        typing_limiter = postgres_runtime.typing_limiter
+    else:
+        store = ChatStore(
+            resolved.database_path,
+            max_rooms=resolved.max_rooms,
+            max_stored_messages=resolved.max_stored_messages,
+            max_stored_messages_per_room=resolved.max_stored_messages_per_room,
+            max_read_states_per_room=resolved.max_read_states_per_room,
+            message_retention_days=resolved.message_retention_days,
+            max_audit_events=resolved.max_audit_events,
+            webhook_events=resolved.webhook_events,
+            max_webhook_deliveries=resolved.max_webhook_deliveries,
+        )
+        lifecycle_lock = DatabaseLifecycleLock(resolved.database_path)
+        limiter = MessageRateLimiter(resolved.messages_per_minute)
+        search_limiter = MessageRateLimiter(resolved.searches_per_minute)
+        typing_limiter = MessageRateLimiter(resolved.typing_events_per_minute)
     token_service: AccessTokenVerifier | None = (
         AccessTokenService(
             resolved.token_signing_secret,
@@ -442,10 +500,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
-        lifecycle_lock.acquire()
         webhook_task: asyncio.Task[None] | None = None
+        if lifecycle_lock is not None:
+            lifecycle_lock.acquire()
         try:
-            await store.initialize()
+            if postgres_runtime is not None:
+                await postgres_runtime.open()
+            else:
+                await store.initialize()
             application.state.settings = resolved
             application.state.store = store
             application.state.connections = manager
@@ -454,6 +516,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             application.state.typing_limiter = typing_limiter
             application.state.token_service = token_service
             application.state.webhook_dispatcher = webhook_dispatcher
+            application.state.postgres_runtime = postgres_runtime
             if webhook_dispatcher is not None:
                 webhook_task = asyncio.create_task(webhook_dispatcher.run(), name="samsarix-webhook-dispatcher")
             yield
@@ -468,9 +531,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     await manager.close_all()
                 finally:
                     try:
-                        await store.close()
+                        if postgres_runtime is not None:
+                            await postgres_runtime.close()
+                        else:
+                            await store.close()
                     finally:
-                        lifecycle_lock.release()
+                        if lifecycle_lock is not None:
+                            lifecycle_lock.release()
 
     application = FastAPI(
         title="Samsarix Chat Engine",
@@ -486,6 +553,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.typing_limiter = typing_limiter
     application.state.token_service = token_service
     application.state.webhook_dispatcher = webhook_dispatcher
+    application.state.postgres_runtime = postgres_runtime
 
     application.add_middleware(
         RequestBodyLimitMiddleware,
@@ -542,6 +610,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             content=_error_payload("storage_unavailable", "Chat storage is temporarily unavailable"),
         )
 
+    if postgres_runtime is not None:
+        from .postgres import PostgresFoundationError
+
+        @application.exception_handler(PostgresFoundationError)
+        async def handle_postgres_error(_request: Request, exc: PostgresFoundationError) -> JSONResponse:
+            logger.error("PostgreSQL operation failed: %s", type(exc).__name__)
+            return JSONResponse(
+                status_code=503,
+                content=_error_payload("storage_unavailable", "Chat storage is temporarily unavailable"),
+            )
+
     @application.get("/", include_in_schema=False)
     async def index() -> dict[str, Any]:
         return {
@@ -558,7 +637,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @application.get("/readyz", tags=["operations"])
     async def readiness() -> JSONResponse:
-        ready = await store.check_ready()
+        ready = await postgres_runtime.check_ready() if postgres_runtime is not None else await store.check_ready()
         return JSONResponse(status_code=200 if ready else 503, content={"status": "ready" if ready else "not_ready"})
 
     router = APIRouter(prefix="/v1")
@@ -601,12 +680,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         except RoomNotFoundError as exc:
             raise APIError(404, "room_not_found", "Room not found") from exc
-        if "archived" in changes and payload.archived:
+        if postgres_runtime is None and "archived" in changes and payload.archived:
             await manager.close_room(
                 room_id,
                 _event("room.archived", room=room.model_dump(mode="json")),
             )
-        elif "frozen" in changes:
+        elif postgres_runtime is None and "frozen" in changes:
             await manager.broadcast(
                 room_id,
                 _event("room.frozen" if payload.frozen else "room.unfrozen", room=room.model_dump(mode="json")),
@@ -823,7 +902,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if created:
             if webhook_dispatcher is not None:
                 webhook_dispatcher.wake()
-            await manager.broadcast(room_id, event)
+            if postgres_runtime is None:
+                await manager.broadcast(room_id, event)
         return message
 
     @router.patch("/rooms/{room_id}/messages/{message_id}", response_model=Message, tags=["messages"])
@@ -874,7 +954,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise APIError(507, "webhook_capacity_reached", "Webhook delivery capacity reached") from exc
         if webhook_dispatcher is not None:
             webhook_dispatcher.wake()
-        await manager.broadcast(room_id, _event("message.updated", message=message.model_dump(mode="json")))
+        if postgres_runtime is None:
+            await manager.broadcast(room_id, _event("message.updated", message=message.model_dump(mode="json")))
         return message
 
     @router.delete("/rooms/{room_id}/messages/{message_id}", status_code=204, tags=["messages"])
@@ -916,7 +997,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if deleted:
             if webhook_dispatcher is not None:
                 webhook_dispatcher.wake()
-            await manager.broadcast(room_id, _event("message.deleted", message=message.model_dump(mode="json")))
+            if postgres_runtime is None:
+                await manager.broadcast(room_id, _event("message.deleted", message=message.model_dump(mode="json")))
         return Response(status_code=204)
 
     @router.patch(
@@ -946,7 +1028,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise APIError(507, "webhook_capacity_reached", "Webhook delivery capacity reached") from exc
         if webhook_dispatcher is not None:
             webhook_dispatcher.wake()
-        if moderation.banned_until is not None and moderation.banned_until > datetime.now(timezone.utc):
+        if (
+            postgres_runtime is None
+            and moderation.banned_until is not None
+            and moderation.banned_until > datetime.now(timezone.utc)
+        ):
             closed = await manager.close_member(
                 room_id,
                 subject,
@@ -966,7 +1052,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @router.get("/stats", tags=["operations"])
     async def stats(principal: PrincipalDependency) -> dict[str, int]:
         _authorize(principal, "admin")
-        return {"active_connections": manager.active_connections}
+        active_connections = (
+            await postgres_runtime.total_connection_count()
+            if postgres_runtime is not None
+            else manager.active_connections
+        )
+        return {"active_connections": active_connections}
 
     @router.get("/admin/audit-events", response_model=AuditEventPage, tags=["operations"])
     async def list_audit_events(
@@ -1086,7 +1177,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await websocket.send_json(_event("error", code="room_archived", message="Archived rooms are read-only"))
             await websocket.close(code=4409, reason="Room archived")
             return
-        if not await manager.register(websocket, room_id, username, principal.subject):
+        connection_id = f"socket-{uuid.uuid4().hex}"
+        if postgres_runtime is not None:
+            lease = await postgres_runtime.acquire_connection(
+                connection_id=connection_id,
+                room_id=room_id,
+                username=username,
+                subject=principal.subject,
+            )
+            admitted = lease is not None
+        else:
+            admitted = True
+        registered = admitted and await manager.register(
+            websocket,
+            room_id,
+            username,
+            principal.subject,
+            connection_id=connection_id,
+        )
+        if not registered:
+            if admitted and postgres_runtime is not None:
+                await postgres_runtime.release_connection(connection_id)
             await websocket.send_json(
                 _event("error", code="connection_capacity_reached", message="Connection capacity reached")
             )
@@ -1103,7 +1214,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             and moderation.banned_until > now
         )
         if room is None or room.archived_at is not None or banned:
-            await manager.unregister(websocket)
             code = "room_not_found" if room is None else "room_banned" if banned else "room_archived"
             status_message = (
                 "Room not found"
@@ -1112,18 +1222,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if banned
                 else "Archived rooms are read-only"
             )
-            await websocket.send_json(_event("error", code=code, message=status_message))
-            await websocket.close(code=4404 if room is None else 4403 if banned else 4409, reason=status_message)
+            await manager.send(websocket, _event("error", code=code, message=status_message))
+            await manager.close(
+                websocket,
+                code=4404 if room is None else 4403 if banned else 4409,
+                reason=status_message,
+            )
+            if postgres_runtime is not None:
+                await postgres_runtime.release_connection(connection_id)
             return
 
         history, next_before = await store.list_messages(room_id, limit=50)
+        if postgres_runtime is not None:
+            active_connections = (await postgres_runtime.connection_counts(room_id)).room
+        else:
+            active_connections = manager.room_connections(room_id)
         await manager.send(
             websocket,
             _event(
                 "ready",
                 room=room.model_dump(mode="json"),
                 username=username,
-                active_connections=manager.room_connections(room_id),
+                active_connections=active_connections,
                 max_message_chars=resolved.max_message_chars,
             ),
         )
@@ -1135,15 +1255,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 next_before=next_before,
             ),
         )
-        await manager.broadcast(
-            room_id,
-            _event("presence.joined", username=username, active_connections=manager.room_connections(room_id)),
-            exclude=websocket,
-        )
+        if postgres_runtime is None:
+            await manager.broadcast(
+                room_id,
+                _event("presence.joined", username=username, active_connections=active_connections),
+                exclude=websocket,
+            )
 
         typing_active = False
         typing_deadline = 0.0
         typing_task: asyncio.Task[None] | None = None
+        connection_heartbeat_task: asyncio.Task[None] | None = None
+
+        async def maintain_connection_lease() -> None:
+            if postgres_runtime is None:
+                raise RuntimeError("PostgreSQL runtime is unavailable")
+            try:
+                while True:
+                    await asyncio.sleep(resolved.postgres_lease_seconds / 3)
+                    await postgres_runtime.renew_connection(connection_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Closing WebSocket after PostgreSQL lease loss: %s", type(exc).__name__)
+                await manager.send(
+                    websocket,
+                    _event("error", code="storage_unavailable", message="Chat storage is temporarily unavailable"),
+                )
+                try:
+                    await manager.close(websocket, code=1012, reason="Storage unavailable")
+                except Exception as close_exc:
+                    logger.debug("WebSocket was already closed after lease loss: %s", type(close_exc).__name__)
+
+        if postgres_runtime is not None:
+            connection_heartbeat_task = asyncio.create_task(
+                maintain_connection_lease(),
+                name=f"samsarix-connection-{connection_id}",
+            )
 
         async def expire_typing() -> None:
             nonlocal typing_active, typing_task
@@ -1166,6 +1314,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         async def set_typing(active: bool) -> None:
             nonlocal typing_active, typing_deadline, typing_task
+            if postgres_runtime is not None:
+                await postgres_runtime.set_typing(connection_id, active)
+                typing_active = active
+                return
             if active:
                 typing_deadline = time.monotonic() + resolved.typing_timeout_seconds
                 if not typing_active:
@@ -1199,7 +1351,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         _event("error", code="text_required", message="Only JSON text frames are supported"),
                     )
                     if invalid_commands >= 3:
-                        await websocket.close(code=1003, reason="Text frames required")
+                        await manager.close(websocket, code=1003, reason="Text frames required")
                         break
                     continue
                 if len(raw.encode("utf-8")) > resolved.websocket_max_bytes:
@@ -1207,7 +1359,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         websocket,
                         _event("error", code="frame_too_large", message="WebSocket command is too large"),
                     )
-                    await websocket.close(code=1009, reason="Message too large")
+                    await manager.close(websocket, code=1009, reason="Message too large")
                     break
                 try:
                     command = _WS_COMMAND.validate_json(raw)
@@ -1218,7 +1370,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         _event("error", code="invalid_command", message="Expected a message, ping, or typing command"),
                     )
                     if invalid_commands >= 3:
-                        await websocket.close(code=1008, reason="Too many invalid commands")
+                        await manager.close(websocket, code=1008, reason="Too many invalid commands")
                         break
                     continue
 
@@ -1236,14 +1388,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     current_room = await store.get_room(room_id)
                     if current_room is None:
                         await manager.send(websocket, _event("error", code="room_not_found", message="Room not found"))
-                        await websocket.close(code=4404, reason="Room not found")
+                        await manager.close(websocket, code=4404, reason="Room not found")
                         break
                     if current_room.archived_at is not None:
                         await manager.send(
                             websocket,
                             _event("error", code="room_archived", message="Archived rooms are read-only"),
                         )
-                        await websocket.close(code=4409, reason="Room archived")
+                        await manager.close(websocket, code=4409, reason="Room archived")
                         break
                     if current_room.frozen_at is not None and not principal.is_admin:
                         await manager.send(
@@ -1265,7 +1417,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                 websocket,
                                 _event("error", code="room_banned", message="This account is banned from the room"),
                             )
-                            await websocket.close(code=4403, reason="Room access revoked")
+                            await manager.close(websocket, code=4403, reason="Room access revoked")
                             break
                         if moderation.muted_until is not None and moderation.muted_until > now:
                             await manager.send(
@@ -1330,7 +1482,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     )
                     if close_code is None:
                         continue
-                    await websocket.close(code=close_code, reason=close_reason or message_text)
+                    await manager.close(websocket, code=close_code, reason=close_reason or message_text)
                     break
                 message_event = _event(
                     "message.created",
@@ -1341,18 +1493,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if created:
                     if webhook_dispatcher is not None:
                         webhook_dispatcher.wake()
-                    await manager.broadcast(room_id, message_event)
+                    if postgres_runtime is None:
+                        await manager.broadcast(room_id, message_event)
                 else:
                     await manager.send(websocket, message_event)
         except (WebSocketDisconnect, asyncio.CancelledError):
             pass
         finally:
+            if connection_heartbeat_task is not None:
+                connection_heartbeat_task.cancel()
+                await asyncio.gather(connection_heartbeat_task, return_exceptions=True)
             if typing_task is not None:
                 typing_task.cancel()
-            if typing_active:
+            if typing_active and postgres_runtime is None:
                 await manager.broadcast(room_id, _event("typing.stopped", username=username), exclude=websocket)
             metadata = await manager.unregister(websocket)
-            if metadata:
+            if postgres_runtime is not None:
+                await postgres_runtime.release_connection(connection_id)
+            elif metadata:
                 await manager.broadcast(
                     room_id,
                     _event("presence.left", username=username, active_connections=manager.room_connections(room_id)),

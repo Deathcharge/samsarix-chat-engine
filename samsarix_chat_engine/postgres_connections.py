@@ -310,6 +310,27 @@ class PostgresConnectionRegistry:
             row = await cursor.fetchone()
         return ConnectionCounts(total=int(row[0]), room=int(row[1])) if row is not None else ConnectionCounts(0, 0)
 
+    async def total_count(self) -> int:
+        """Return live deployment-wide occupancy."""
+
+        async with self.foundation.transaction() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT COUNT(*)::BIGINT
+                FROM public.samsarix_connection_leases AS lease
+                JOIN public.samsarix_instance_cursors AS owner
+                  ON owner.instance_id = lease.instance_id
+                 AND owner.generation = lease.instance_generation
+                JOIN public.samsarix_rooms AS room
+                  ON room.id = lease.room_id
+                WHERE lease.lease_expires_at > clock_timestamp()
+                  AND owner.lease_expires_at > clock_timestamp()
+                  AND room.archived_at IS NULL
+                """
+            )
+            row = await cursor.fetchone()
+        return int(row[0]) if row is not None else 0
+
     async def reap_expired(self, *, limit: int = 100) -> list[PresenceTransition]:
         """Delete a bounded stale batch and emit best-effort leave transitions."""
 

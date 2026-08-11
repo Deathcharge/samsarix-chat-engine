@@ -90,9 +90,13 @@ This makes the supported topology repeatable without implying that a container m
 - [x] implement connection-bound PostgreSQL typing transitions, refresh, and bounded expiry sweeping;
 - [x] derive join/leave presence from connection leases with generation-fenced restart and crash convergence;
 - [x] bound the retained event log behind live cursors and fence/recover stale workers that return after a gap;
-- [ ] expose guarded PostgreSQL configuration only after the remaining topology gates are proven;
-- [ ] wire the proven cross-worker fan-out, presence, typing, and rate-control paths into the application;
+- [x] expose explicitly guarded PostgreSQL preview configuration without changing the SQLite default;
+- [x] wire cross-instance fan-out, presence, typing, rate controls, connection leases, maintenance, and readiness into the application;
+- [ ] prove subprocess kill/restart, listener interruption, archive/ban teardown, and reconnect recovery against real network processes;
 - [ ] run sustained load/soak and reconnect-storm tests and publish measured limits;
+- [ ] verify deployment manifests assign a unique stable instance ID to every replica and reject duplicate live ownership;
+- [ ] validate live-lag and `NOTIFY` interruption behavior under measured traffic;
+- [ ] exercise and publish PostgreSQL-native backup, point-in-time recovery, restore, and application rollback evidence;
 - [ ] add OpenTelemetry hooks only when an operator needs them, with telemetry disabled by default.
 
 No horizontal-scale claim is acceptable before those tests pass. Redis Pub/Sub is at-most-once and does not solve shared storage, migration/restore coordination, webhook leadership, or distributed quotas. A broker and shared authoritative database must solve a demonstrated topology together rather than decorate the architecture.
