@@ -100,6 +100,27 @@ async def test_broadcast_can_exclude_an_origin_connection_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pending_connection_receives_initial_frames_before_broadcasts() -> None:
+    manager = ConnectionManager(max_connections=2, max_per_room=2, send_timeout=0.1)
+    pending = FakeWebSocket()
+    websocket = as_websocket(pending)
+    await manager.register(websocket, "room", "Pending", broadcast_ready=False)
+
+    await manager.broadcast("room", {"type": "presence.joined"})
+    assert pending.sent == []
+    assert await manager.send(websocket, {"type": "ready"}) is True
+    assert await manager.send(websocket, {"type": "history"}) is True
+    assert await manager.activate(websocket) is True
+    await manager.broadcast("room", {"type": "message.created"})
+
+    assert pending.sent == [
+        {"type": "ready"},
+        {"type": "history"},
+        {"type": "message.created"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_send_and_close_are_serialized_per_connection() -> None:
     manager = ConnectionManager(max_connections=1, max_per_room=1, send_timeout=0.1)
     target = ContendedFakeWebSocket()

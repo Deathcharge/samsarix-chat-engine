@@ -20,6 +20,7 @@ class ConnectionMetadata(NamedTuple):
     subject: str | None
     connection_id: str | None
     operation_lock: asyncio.Lock
+    broadcast_ready: bool
 
 
 class ConnectionManager:
@@ -41,6 +42,7 @@ class ConnectionManager:
         subject: str | None = None,
         *,
         connection_id: str | None = None,
+        broadcast_ready: bool = True,
     ) -> bool:
         """Register an already-accepted socket, returning false at capacity."""
 
@@ -56,7 +58,18 @@ class ConnectionManager:
                 subject,
                 connection_id,
                 asyncio.Lock(),
+                broadcast_ready,
             )
+            return True
+
+    async def activate(self, websocket: WebSocket) -> bool:
+        """Allow broadcasts only after the socket's initial handshake is sent."""
+
+        async with self._lock:
+            metadata = self._metadata.get(websocket)
+            if metadata is None:
+                return False
+            self._metadata[websocket] = metadata._replace(broadcast_ready=True)
             return True
 
     async def unregister(self, websocket: WebSocket) -> tuple[str, str] | None:
@@ -111,6 +124,7 @@ class ConnectionManager:
                 (connection, self._metadata[connection].operation_lock)
                 for connection in self._rooms.get(room_id, ())
                 if connection is not exclude
+                and self._metadata[connection].broadcast_ready
                 and (exclude_connection_id is None or self._metadata[connection].connection_id != exclude_connection_id)
             )
         if recipients:

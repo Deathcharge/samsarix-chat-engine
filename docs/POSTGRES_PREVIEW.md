@@ -2,7 +2,7 @@
 
 Status: **guarded, unreleased v0.13 preview**.
 
-The repository's development branch can run the complete HTTP and WebSocket application against PostgreSQL. SQLite remains the default and the v0.12 supported topology remains one process. Do not describe the preview as production-supported until the remaining interruption, subprocess, load/soak, backup, and rollback gates in the [multi-instance architecture](MULTI_INSTANCE_ARCHITECTURE.md) are published.
+The repository's development branch can run the complete HTTP and WebSocket application against PostgreSQL. SQLite remains the default and the v0.12 supported topology remains one process. CI now exercises two real Uvicorn processes and crash-lease recovery, but do not describe the preview as production-supported until the remaining interruption, reconnect, load/soak, backup, and rollback gates in the [multi-instance architecture](MULTI_INSTANCE_ARCHITECTURE.md) are published.
 
 ## What the preview wires
 
@@ -79,7 +79,7 @@ Rolling back to a binary that supports an older schema requires restoring its ma
 
 ## Known preview boundaries
 
-- Real subprocess kill/restart, network interruption, reconnect-storm, and sustained load/soak evidence is still pending.
+- Two-process normal delivery and kill/lease-expiry/restart recovery run in CI; forced database/listener interruption, explicit reconnect recovery, reconnect storms, and sustained load/soak evidence remain pending.
 - A live but extremely slow replica can currently hold the event-retention floor; the configurable live-lag fence is not implemented yet.
 - Polling, rather than `LISTEN`/`NOTIFY`, currently determines normal fan-out latency.
 - The bundled Compose profile is still the supported SQLite single-replica example and does not provision PostgreSQL.
