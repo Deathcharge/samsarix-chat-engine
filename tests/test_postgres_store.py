@@ -165,6 +165,12 @@ async def test_schema_v6_backfills_matching_instance_generations(
         )
         await connection.execute(
             """
+            CREATE INDEX samsarix_connection_leases_instance
+            ON public.samsarix_connection_leases (instance_id, lease_expires_at, connection_id)
+            """
+        )
+        await connection.execute(
+            """
             INSERT INTO public.samsarix_instance_cursors (
                 instance_id, last_sequence, lease_expires_at
             ) VALUES ('legacy-node', 0, clock_timestamp() + interval '30 seconds')
@@ -197,8 +203,22 @@ async def test_schema_v6_backfills_matching_instance_generations(
                 """
             )
             generations = await cursor.fetchone()
+            cursor = await connection.execute(
+                """
+                SELECT indexname
+                FROM pg_indexes
+                WHERE schemaname = 'public'
+                  AND indexname IN (
+                      'samsarix_connection_leases_instance',
+                      'samsarix_connection_leases_instance_generation'
+                  )
+                ORDER BY indexname
+                """
+            )
+            lease_indexes = [str(row[0]) for row in await cursor.fetchall()]
         assert generations is not None
         assert generations[0] is not None and generations[0] == generations[1]
+        assert lease_indexes == ["samsarix_connection_leases_instance_generation"]
     finally:
         await service.close()
 

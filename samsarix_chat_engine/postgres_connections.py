@@ -20,6 +20,7 @@ from .postgres import (
 )
 
 POSTGRES_CONNECTION_CAP_LOCK_ID = 7_495_346_927_831_819_047
+_ADMISSION_SWEEP_LIMIT = 16
 _CONNECTION_ID_MAX_CHARS = 128
 _USERNAME_MAX_CHARS = 64
 _SUBJECT_MAX_CHARS = 64
@@ -132,7 +133,11 @@ class PostgresConnectionRegistry:
                 raise ConnectionRoomUnavailableError("connection room is missing or archived")
 
             await connection.execute("SELECT pg_advisory_xact_lock(%s)", (POSTGRES_CONNECTION_CAP_LOCK_ID,))
-            stale = await _delete_expired(connection, limit=1_000, prioritize_connection_id=connection_id)
+            stale = await _delete_expired(
+                connection,
+                limit=_ADMISSION_SWEEP_LIMIT,
+                prioritize_connection_id=connection_id,
+            )
             await self._append_departures(connection, stale)
 
             cursor = await connection.execute(

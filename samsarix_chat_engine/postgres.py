@@ -491,6 +491,8 @@ class PostgresFoundation:
                     ON public.samsarix_connection_leases (room_id, lease_expires_at, connection_id)
                     """
                 )
+                if current_version < 7:
+                    await connection.execute("DROP INDEX IF EXISTS public.samsarix_connection_leases_instance")
                 await connection.execute(
                     """
                     CREATE INDEX IF NOT EXISTS samsarix_connection_leases_instance_generation

@@ -161,8 +161,8 @@ async def test_crash_sweep_is_bounded_and_stops_typing_before_presence(clean_pos
                 """
             )
 
-        assert len(await registry.reap_expired(limit=1)) == 1
-        assert len(await registry.reap_expired(limit=1)) == 1
+        transitions = await registry.reap_expired(limit=10)
+        assert [transition.connection_id for transition in transitions] == ["socket-0", "socket-1"]
         assert await registry.reap_expired() == []
         events = await store.foundation.read_events("observer")
         assert [event.event_type for event in events] == [
