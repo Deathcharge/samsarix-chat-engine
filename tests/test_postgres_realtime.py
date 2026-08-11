@@ -299,6 +299,7 @@ async def test_relay_fences_and_skips_to_head_after_retained_event_gap(
             )
         pruned = await foundation.prune_events(max_events=1, max_age_seconds=31_536_000)
         assert pruned.pruned_events == 2
+        assert await relay.initialize() == 0
 
         task = asyncio.create_task(relay.run())
         await asyncio.wait_for(target.fenced.wait(), timeout=2)
