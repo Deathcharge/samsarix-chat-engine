@@ -30,6 +30,7 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 - Distributed rate buckets persist only a scope-separated SHA-256 digest of the caller key. The digest reduces routine identity exposure but is not anonymization; database access and retention still require normal privacy controls.
 - Internal typing coordination events retain an opaque origin connection ID so future application wiring can exclude the sender. The public realtime relay does not forward these events until that exclusion contract is implemented; clients must continue treating advertised expiry as the stop-event backstop.
 - A restarted process rotates its database generation token after lease expiry. Connection, typing, count, renewal, and cleanup queries require the matching generation so stale sockets cannot regain capacity, activity, or presence merely because an operator reused a stable instance name.
+- The asymmetric-authentication, test, and development dependency ranges now require `cryptography` 50.x, excluding the vulnerable 49.0.0 release identified by `PYSEC-2026-3552`.
 
 ## 0.12.0 — 2026-08-02
 

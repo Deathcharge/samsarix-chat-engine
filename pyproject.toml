@@ -36,13 +36,13 @@ dependencies = [
 
 [project.optional-dependencies]
 asymmetric-auth = [
-    "cryptography>=46,<50",
+    "cryptography>=50,<51",
 ]
 postgres = [
     "psycopg[binary,pool]>=3.3,<4",
 ]
 test = [
-    "cryptography>=46,<50",
+    "cryptography>=50,<51",
     "httpx2>=2,<3",
     "pytest>=8,<10",
     "pytest-asyncio>=0.24,<2.0",
@@ -51,7 +51,7 @@ test = [
 ]
 dev = [
     "build>=1.2,<2.0",
-    "cryptography>=46,<50",
+    "cryptography>=50,<51",
     "httpx2>=2,<3",
     "mypy>=1.11,<2.0",
     "pip-audit>=2.10,<3.0",
