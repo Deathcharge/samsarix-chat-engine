@@ -264,6 +264,63 @@ async def test_expired_relay_lease_fences_then_recovers_from_cursor(clean_postgr
         await foundation.close()
 
 
+@pytest.mark.asyncio
+async def test_relay_fences_and_skips_to_head_after_retained_event_gap(
+    clean_postgres_database: str,
+) -> None:
+    foundation = PostgresFoundation(clean_postgres_database)
+    await foundation.open()
+    target = RecordingTarget()
+    relay = PostgresRealtimeRelay(
+        foundation,
+        target,
+        instance_id="relay-retained-gap",
+        lease_seconds=3,
+        poll_interval_seconds=0.01,
+    )
+    task: asyncio.Task[None] | None = None
+    try:
+        await relay.initialize()
+        async with foundation.transaction() as connection:
+            for index in range(3):
+                final_sequence = await foundation.append_event(
+                    connection,
+                    room_id="general",
+                    event_type="message.created",
+                    payload={"type": "message.created", "message": {"id": str(index)}},
+                )
+            await connection.execute(
+                """
+                UPDATE public.samsarix_instance_cursors
+                SET lease_expires_at = clock_timestamp() - interval '1 second'
+                WHERE instance_id = %s
+                """,
+                (relay.instance_id,),
+            )
+        pruned = await foundation.prune_events(max_events=1, max_age_seconds=31_536_000)
+        assert pruned.pruned_events == 2
+
+        task = asyncio.create_task(relay.run())
+        await asyncio.wait_for(target.fenced.wait(), timeout=2)
+        for _attempt in range(100):
+            if await foundation.register_instance(relay.instance_id, lease_seconds=3) == final_sequence:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("relay did not recover its retained event gap")
+        relay.stop()
+        await asyncio.wait_for(task, timeout=2)
+        task = None
+        assert target.close_all_calls == 1
+        assert target.broadcasts == []
+    finally:
+        relay.stop()
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await foundation.close()
+
+
 def test_relay_configuration_is_bounded() -> None:
     foundation = PostgresFoundation("postgresql://unused")
     target = RecordingTarget()

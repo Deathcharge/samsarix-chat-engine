@@ -16,6 +16,7 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 - PostgreSQL schema v5 and internal deployment-wide message, search, and typing rate buckets with atomic per-identity consumption, database-time boundaries, bounded active cardinality, and raw-key minimization.
 - PostgreSQL schema v6 and internal connection-bound typing state with transition-only starts, refresh without event storms, explicit stops, database-time expiry, and bounded concurrent sweeping into durable coordination events.
 - PostgreSQL schema v7 and lease-derived presence transitions with exact join/explicit-leave counts, bounded crashed-process sweeping, typing-before-leave ordering, and process-generation fencing for safe stable-ID restarts.
+- PostgreSQL schema v8 realtime-retention metadata, bounded count/age pruning behind every live cursor, explicit retained-gap detection, and relay recovery that fences sockets, rotates the stale process generation, and resumes from the authoritative event head.
 
 ### Security and operations
 
@@ -30,6 +31,7 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 - Distributed rate buckets persist only a scope-separated SHA-256 digest of the caller key. The digest reduces routine identity exposure but is not anonymization; database access and retention still require normal privacy controls.
 - Internal typing coordination events retain an opaque origin connection ID so future application wiring can exclude the sender. The public realtime relay does not forward these events until that exclusion contract is implemented; clients must continue treating advertised expiry as the stop-event backstop.
 - A restarted process rotates its database generation token after lease expiry. Connection, typing, count, renewal, and cleanup queries require the matching generation so stale sockets cannot regain capacity, activity, or presence merely because an operator reused a stable instance name.
+- Event pruning records the greatest intentionally removed sequence even when no event rows remain. A returning stale relay cannot mistake that empty window for a healthy cursor: it closes local sockets before skipping to current authoritative state, and its generation rotation makes old connection leases non-live.
 - The asymmetric-authentication, test, and development dependency ranges now require `cryptography>=50,<51`, excluding the `cryptography>=44.0.0,<50.0.0` range affected by `PYSEC-2026-3552`.
 
 ## 0.12.0 — 2026-08-02
