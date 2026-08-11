@@ -1194,6 +1194,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             username,
             principal.subject,
             connection_id=connection_id,
+            broadcast_ready=False,
         )
         if not registered:
             if admitted and postgres_runtime is not None:
@@ -1237,7 +1238,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             active_connections = (await postgres_runtime.connection_counts(room_id)).room
         else:
             active_connections = manager.room_connections(room_id)
-        await manager.send(
+        ready_sent = await manager.send(
             websocket,
             _event(
                 "ready",
@@ -1247,7 +1248,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 max_message_chars=resolved.max_message_chars,
             ),
         )
-        await manager.send(
+        if not ready_sent:
+            if postgres_runtime is not None:
+                await postgres_runtime.release_connection(connection_id)
+            return
+        history_sent = await manager.send(
             websocket,
             _event(
                 "history",
@@ -1255,6 +1260,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 next_before=next_before,
             ),
         )
+        if not history_sent or not await manager.activate(websocket):
+            if postgres_runtime is not None:
+                await postgres_runtime.release_connection(connection_id)
+            return
         if postgres_runtime is None:
             await manager.broadcast(
                 room_id,
