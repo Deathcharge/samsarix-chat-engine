@@ -92,7 +92,8 @@ This makes the supported topology repeatable without implying that a container m
 - [x] bound the retained event log behind live cursors and fence/recover stale workers that return after a gap;
 - [x] expose explicitly guarded PostgreSQL preview configuration without changing the SQLite default;
 - [x] wire cross-instance fan-out, presence, typing, rate controls, connection leases, maintenance, and readiness into the application;
-- [ ] prove subprocess kill/restart, listener interruption, archive/ban teardown, and reconnect recovery against real network processes;
+- [x] prove two real Uvicorn processes share HTTP/WebSocket state, reclaim a killed replica's socket lease, restart its stable identity, and recover durable history;
+- [ ] prove listener interruption, archive/ban teardown, and explicit client reconnect recovery against real network processes;
 - [ ] run sustained load/soak and reconnect-storm tests and publish measured limits;
 - [ ] verify deployment manifests assign a unique stable instance ID to every replica and reject duplicate live ownership;
 - [ ] validate live-lag and `NOTIFY` interruption behavior under measured traffic;

@@ -46,6 +46,7 @@ jobs:
 
   postgres-foundation:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:18.4-bookworm
@@ -72,10 +73,11 @@ jobs:
           cache: pip
       - run: python -m pip install --upgrade pip setuptools wheel
       - run: python -m pip install -e ".[postgres,test]"
-      - run: python -m pytest -m postgres
+      - run: python -m pytest -m postgres --timeout=90
 
   quality:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:18.4-bookworm
@@ -106,7 +108,7 @@ jobs:
       - run: python -m ruff format --check .
       - run: python -m mypy samsarix_chat_engine
       - run: python -m pip_audit
-      - run: python -m pytest --cov=samsarix_chat_engine --cov-report=term-missing
+      - run: python -m pytest --cov=samsarix_chat_engine --cov-report=term-missing --timeout=90
       - run: python -m build
       - run: python -m twine check dist/*
       - run: python -m venv .wheel-smoke

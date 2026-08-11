@@ -19,6 +19,7 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 - PostgreSQL schema v8 realtime-retention metadata, bounded count/age pruning behind every live cursor, explicit retained-gap detection, and relay recovery that fences sockets, rotates the stale process generation, and resumes from the authoritative event head.
 - Guarded PostgreSQL application configuration and lifecycle orchestration for shared HTTP storage, cross-instance WebSocket messages and room state, global socket capacity/rate controls/stats, leased connection renewal, sender-excluded presence/typing, bounded maintenance, and readiness.
 - A PostgreSQL preview deployment guide covering protected URL files, mandatory remote `verify-full` TLS, unique replica identities, pool/lease/retention bounds, migration, backup/rollback ownership, and remaining release gates.
+- A real-network acceptance test that launches two independent Uvicorn processes, verifies cross-process HTTP/WebSocket delivery, kills one replica, observes lease-derived presence/capacity convergence, restarts its stable identity after expiry, and reloads durable history.
 
 ### Security and operations
 
