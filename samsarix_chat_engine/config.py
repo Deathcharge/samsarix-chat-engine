@@ -267,7 +267,18 @@ class Settings:
         if self.storage_backend not in {"sqlite", "postgres"}:
             raise ConfigurationError("SAMSARIX_CHAT_STORAGE must be sqlite or postgres")
         if self.storage_backend == "sqlite":
-            if self.postgres_url is not None or self.postgres_instance_id is not None:
+            postgres_tuning_is_nondefault = (
+                self.postgres_min_pool_size != 1
+                or self.postgres_max_pool_size != 10
+                or self.postgres_pool_timeout_seconds != 10.0
+                or self.postgres_lease_seconds != 30
+                or self.postgres_relay_poll_seconds != 0.25
+                or self.postgres_maintenance_interval_seconds != 1.0
+                or self.postgres_max_rate_buckets != 100_000
+                or self.postgres_max_realtime_events != 100_000
+                or self.postgres_realtime_event_max_age_seconds != 604_800
+            )
+            if self.postgres_url is not None or self.postgres_instance_id is not None or postgres_tuning_is_nondefault:
                 raise ConfigurationError("PostgreSQL settings require SAMSARIX_CHAT_STORAGE=postgres")
         else:
             if self.postgres_url is None:
@@ -434,6 +445,22 @@ class Settings:
         configured_database = _read_env("DATABASE")
         storage_backend = _read_env("STORAGE") or "sqlite"
         postgres_url = _read_secret_env("POSTGRES_URL") or None
+        postgres_operational_settings = (
+            "POSTGRES_INSTANCE_ID",
+            "POSTGRES_MIN_POOL_SIZE",
+            "POSTGRES_MAX_POOL_SIZE",
+            "POSTGRES_POOL_TIMEOUT",
+            "POSTGRES_LEASE_SECONDS",
+            "POSTGRES_RELAY_POLL",
+            "POSTGRES_MAINTENANCE_INTERVAL",
+            "POSTGRES_MAX_RATE_BUCKETS",
+            "POSTGRES_MAX_REALTIME_EVENTS",
+            "POSTGRES_REALTIME_EVENT_MAX_AGE",
+        )
+        if storage_backend != "postgres" and (
+            postgres_url is not None or any(_read_env(name) is not None for name in postgres_operational_settings)
+        ):
+            raise ConfigurationError("PostgreSQL settings require SAMSARIX_CHAT_STORAGE=postgres")
         if storage_backend == "postgres" and configured_database is not None:
             raise ConfigurationError("SAMSARIX_CHAT_DATABASE cannot be combined with PostgreSQL storage")
         return cls(

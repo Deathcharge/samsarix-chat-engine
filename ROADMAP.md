@@ -94,6 +94,9 @@ This makes the supported topology repeatable without implying that a container m
 - [x] wire cross-instance fan-out, presence, typing, rate controls, connection leases, maintenance, and readiness into the application;
 - [ ] prove subprocess kill/restart, listener interruption, archive/ban teardown, and reconnect recovery against real network processes;
 - [ ] run sustained load/soak and reconnect-storm tests and publish measured limits;
+- [ ] verify deployment manifests assign a unique stable instance ID to every replica and reject duplicate live ownership;
+- [ ] validate live-lag and `NOTIFY` interruption behavior under measured traffic;
+- [ ] exercise and publish PostgreSQL-native backup, point-in-time recovery, restore, and application rollback evidence;
 - [ ] add OpenTelemetry hooks only when an operator needs them, with telemetry disabled by default.
 
 No horizontal-scale claim is acceptable before those tests pass. Redis Pub/Sub is at-most-once and does not solve shared storage, migration/restore coordination, webhook leadership, or distributed quotas. A broker and shared authoritative database must solve a demonstrated topology together rather than decorate the architecture.

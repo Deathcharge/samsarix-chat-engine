@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections.abc import Awaitable, Callable
 
 from .postgres_connections import ConnectionCounts, ConnectionLease, PostgresConnectionRegistry
 from .postgres_rate_limits import PostgresRateLimiter
@@ -14,6 +16,7 @@ from .postgres_store import PostgresChatStore
 from .postgres_typing import PostgresTypingRegistry, TypingTransition
 
 logger = logging.getLogger(__name__)
+EVENT_PRUNE_INTERVAL_SECONDS = 60.0
 
 
 class PostgresApplicationRuntime:
@@ -107,6 +110,7 @@ class PostgresApplicationRuntime:
         self._stop = asyncio.Event()
         self._relay_task: asyncio.Task[None] | None = None
         self._maintenance_task: asyncio.Task[None] | None = None
+        self._next_event_prune_at = 0.0
 
     async def open(self) -> None:
         """Open storage and establish the process lease before accepting traffic."""
@@ -182,16 +186,31 @@ class PostgresApplicationRuntime:
     async def run_maintenance_once(self) -> None:
         """Run one bounded, retry-safe coordination cleanup pass."""
 
-        await self.typing.reap_expired(limit=100)
-        await self.connections.reap_expired(limit=100)
-        await self.message_limiter.prune_expired()
-        await self.search_limiter.prune_expired()
-        await self.typing_limiter.prune_expired()
-        await self.store.foundation.prune_events(
-            max_events=self.max_realtime_events,
-            max_age_seconds=self.realtime_event_max_age_seconds,
-            limit=1_000,
-        )
+        steps: list[tuple[str, Callable[[], Awaitable[object]]]] = [
+            ("typing", lambda: self.typing.reap_expired(limit=100)),
+            ("connections", lambda: self.connections.reap_expired(limit=100)),
+            ("message_rate", self.message_limiter.prune_expired),
+            ("search_rate", self.search_limiter.prune_expired),
+            ("typing_rate", self.typing_limiter.prune_expired),
+        ]
+        now = time.monotonic()
+        if now >= self._next_event_prune_at:
+            self._next_event_prune_at = now + EVENT_PRUNE_INTERVAL_SECONDS
+            steps.append(
+                (
+                    "events",
+                    lambda: self.store.foundation.prune_events(
+                        max_events=self.max_realtime_events,
+                        max_age_seconds=self.realtime_event_max_age_seconds,
+                        limit=1_000,
+                    ),
+                )
+            )
+        for name, step in steps:
+            try:
+                await step()
+            except Exception as exc:
+                logger.warning("PostgreSQL maintenance step %s failed: %s", name, type(exc).__name__)
 
     async def _run_maintenance(self) -> None:
         while not self._stop.is_set():

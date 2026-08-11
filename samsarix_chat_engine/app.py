@@ -14,7 +14,7 @@ from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Annotated, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, FastAPI, Header, Path, Query, Request, Response, WebSocket, WebSocketDisconnect
@@ -26,6 +26,9 @@ from pydantic import TypeAdapter, ValidationError
 from starlette.background import BackgroundTask
 from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.types import Message as ASGIMessage
+
+if TYPE_CHECKING:
+    from .postgres_runtime import PostgresApplicationRuntime
 
 from .auth import (
     AccessTokenService,
@@ -398,7 +401,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         max_per_room=resolved.max_connections_per_room,
         send_timeout=resolved.websocket_send_timeout_seconds,
     )
-    postgres_runtime: Any | None = None
+    postgres_runtime: PostgresApplicationRuntime | None = None
     lifecycle_lock: DatabaseLifecycleLock | None = None
     limiter: RateLimiter
     search_limiter: RateLimiter
@@ -1211,9 +1214,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             and moderation.banned_until > now
         )
         if room is None or room.archived_at is not None or banned:
-            await manager.unregister(websocket)
-            if postgres_runtime is not None:
-                await postgres_runtime.release_connection(connection_id)
             code = "room_not_found" if room is None else "room_banned" if banned else "room_archived"
             status_message = (
                 "Room not found"
@@ -1222,8 +1222,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if banned
                 else "Archived rooms are read-only"
             )
-            await websocket.send_json(_event("error", code=code, message=status_message))
-            await websocket.close(code=4404 if room is None else 4403 if banned else 4409, reason=status_message)
+            await manager.send(websocket, _event("error", code=code, message=status_message))
+            await manager.close(
+                websocket,
+                code=4404 if room is None else 4403 if banned else 4409,
+                reason=status_message,
+            )
+            if postgres_runtime is not None:
+                await postgres_runtime.release_connection(connection_id)
             return
 
         history, next_before = await store.list_messages(room_id, limit=50)
@@ -1277,7 +1283,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     _event("error", code="storage_unavailable", message="Chat storage is temporarily unavailable"),
                 )
                 try:
-                    await websocket.close(code=1012, reason="Storage unavailable")
+                    await manager.close(websocket, code=1012, reason="Storage unavailable")
                 except Exception as close_exc:
                     logger.debug("WebSocket was already closed after lease loss: %s", type(close_exc).__name__)
 
@@ -1345,7 +1351,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         _event("error", code="text_required", message="Only JSON text frames are supported"),
                     )
                     if invalid_commands >= 3:
-                        await websocket.close(code=1003, reason="Text frames required")
+                        await manager.close(websocket, code=1003, reason="Text frames required")
                         break
                     continue
                 if len(raw.encode("utf-8")) > resolved.websocket_max_bytes:
@@ -1353,7 +1359,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         websocket,
                         _event("error", code="frame_too_large", message="WebSocket command is too large"),
                     )
-                    await websocket.close(code=1009, reason="Message too large")
+                    await manager.close(websocket, code=1009, reason="Message too large")
                     break
                 try:
                     command = _WS_COMMAND.validate_json(raw)
@@ -1364,7 +1370,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         _event("error", code="invalid_command", message="Expected a message, ping, or typing command"),
                     )
                     if invalid_commands >= 3:
-                        await websocket.close(code=1008, reason="Too many invalid commands")
+                        await manager.close(websocket, code=1008, reason="Too many invalid commands")
                         break
                     continue
 
@@ -1382,14 +1388,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     current_room = await store.get_room(room_id)
                     if current_room is None:
                         await manager.send(websocket, _event("error", code="room_not_found", message="Room not found"))
-                        await websocket.close(code=4404, reason="Room not found")
+                        await manager.close(websocket, code=4404, reason="Room not found")
                         break
                     if current_room.archived_at is not None:
                         await manager.send(
                             websocket,
                             _event("error", code="room_archived", message="Archived rooms are read-only"),
                         )
-                        await websocket.close(code=4409, reason="Room archived")
+                        await manager.close(websocket, code=4409, reason="Room archived")
                         break
                     if current_room.frozen_at is not None and not principal.is_admin:
                         await manager.send(
@@ -1411,7 +1417,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                 websocket,
                                 _event("error", code="room_banned", message="This account is banned from the room"),
                             )
-                            await websocket.close(code=4403, reason="Room access revoked")
+                            await manager.close(websocket, code=4403, reason="Room access revoked")
                             break
                         if moderation.muted_until is not None and moderation.muted_until > now:
                             await manager.send(
@@ -1476,7 +1482,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     )
                     if close_code is None:
                         continue
-                    await websocket.close(code=close_code, reason=close_reason or message_text)
+                    await manager.close(websocket, code=close_code, reason=close_reason or message_text)
                     break
                 message_event = _event(
                     "message.created",

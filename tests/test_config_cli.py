@@ -152,6 +152,12 @@ def test_postgres_configuration_rejects_ambiguous_or_incomplete_storage(
 ) -> None:
     with pytest.raises(ConfigurationError, match="require SAMSARIX_CHAT_STORAGE=postgres"):
         Settings(postgres_url="postgresql://localhost/samsarix")
+    with pytest.raises(ConfigurationError, match="require SAMSARIX_CHAT_STORAGE=postgres"):
+        Settings(postgres_lease_seconds=45)
+    monkeypatch.setenv("SAMSARIX_CHAT_STORAGE", "sqlite")
+    monkeypatch.setenv("SAMSARIX_CHAT_POSTGRES_LEASE_SECONDS", "30")
+    with pytest.raises(ConfigurationError, match="require SAMSARIX_CHAT_STORAGE=postgres"):
+        Settings.from_env()
     with pytest.raises(ConfigurationError, match="is required"):
         Settings(storage_backend="postgres", postgres_instance_id="chat-a")
     with pytest.raises(ConfigurationError, match="safe identifier"):

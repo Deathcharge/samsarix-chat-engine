@@ -30,8 +30,7 @@ def _settings(conninfo: str, instance_id: str) -> Settings:
     )
 
 
-@pytest.mark.asyncio
-async def test_two_app_instances_share_http_websocket_presence_typing_and_messages(
+def test_two_app_instances_share_http_websocket_presence_typing_and_messages(
     clean_postgres_database: str,
 ) -> None:
     first_app = create_app(_settings(clean_postgres_database, "app-first"))

@@ -148,7 +148,7 @@ A mute preserves reads and blocks writes. A ban blocks HTTP room reads/writes, r
 
 ### `GET /v1/stats`
 
-Returns the current process's active WebSocket connection count.
+Returns the current process's active WebSocket connection count in SQLite mode. In the guarded PostgreSQL preview, the count is deployment-wide across active instance leases.
 
 ### `GET /v1/admin/audit-events?limit=50&before={event_id}`
 

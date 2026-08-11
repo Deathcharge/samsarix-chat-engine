@@ -470,7 +470,8 @@ class PostgresFoundation:
                 """,
                 (instance_id, generation),
             )
-        return cursor.rowcount == 1
+            released = cursor.rowcount == 1
+        return released
 
     async def heartbeat_claimed_instance(
         self,

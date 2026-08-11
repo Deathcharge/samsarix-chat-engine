@@ -7,11 +7,19 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import defaultdict
-from typing import Any
+from typing import Any, NamedTuple
 
 from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
+
+
+class ConnectionMetadata(NamedTuple):
+    room_id: str
+    username: str
+    subject: str | None
+    connection_id: str | None
+    operation_lock: asyncio.Lock
 
 
 class ConnectionManager:
@@ -22,7 +30,7 @@ class ConnectionManager:
         self.max_per_room = max_per_room
         self.send_timeout = send_timeout
         self._rooms: dict[str, set[WebSocket]] = defaultdict(set)
-        self._metadata: dict[WebSocket, tuple[str, str, str | None, str | None]] = {}
+        self._metadata: dict[WebSocket, ConnectionMetadata] = {}
         self._lock = asyncio.Lock()
 
     async def register(
@@ -42,7 +50,13 @@ class ConnectionManager:
                     self._rooms.pop(room_id, None)
                 return False
             self._rooms[room_id].add(websocket)
-            self._metadata[websocket] = (room_id, username, subject, connection_id)
+            self._metadata[websocket] = ConnectionMetadata(
+                room_id,
+                username,
+                subject,
+                connection_id,
+                asyncio.Lock(),
+            )
             return True
 
     async def unregister(self, websocket: WebSocket) -> tuple[str, str] | None:
@@ -52,24 +66,35 @@ class ConnectionManager:
             metadata = self._metadata.pop(websocket, None)
             if metadata is None:
                 return None
-            room_id, _, _, _ = metadata
+            room_id = metadata.room_id
             room_connections = self._rooms.get(room_id)
             if room_connections is not None:
                 room_connections.discard(websocket)
                 if not room_connections:
                     self._rooms.pop(room_id, None)
-            return metadata[0], metadata[1]
+            return metadata.room_id, metadata.username
 
     async def send(self, websocket: WebSocket, event: dict[str, Any]) -> bool:
         """Send one event with a timeout and evict a failed connection."""
 
+        async with self._lock:
+            metadata = self._metadata.get(websocket)
+        operation_lock = metadata.operation_lock if metadata is not None else asyncio.Lock()
+        return await self._send_with_lock(websocket, event, operation_lock)
+
+    async def close(self, websocket: WebSocket, *, code: int, reason: str) -> None:
+        """Serialize a close with pending sends and forget the connection."""
+
+        async with self._lock:
+            metadata = self._metadata.get(websocket)
+        operation_lock = metadata.operation_lock if metadata is not None else asyncio.Lock()
         try:
-            await asyncio.wait_for(websocket.send_json(event), timeout=self.send_timeout)
-            return True
-        except Exception as exc:
-            logger.info("Dropping unavailable WebSocket connection: %s", type(exc).__name__)
+            async with operation_lock:
+                await asyncio.wait_for(websocket.close(code=code, reason=reason), timeout=self.send_timeout)
+        except Exception:
+            logger.debug("WebSocket was already closed")
+        finally:
             await self.unregister(websocket)
-            return False
 
     async def broadcast(
         self,
@@ -83,22 +108,28 @@ class ConnectionManager:
 
         async with self._lock:
             recipients = tuple(
-                connection
+                (connection, self._metadata[connection].operation_lock)
                 for connection in self._rooms.get(room_id, ())
                 if connection is not exclude
-                and (exclude_connection_id is None or self._metadata[connection][3] != exclude_connection_id)
+                and (exclude_connection_id is None or self._metadata[connection].connection_id != exclude_connection_id)
             )
         if recipients:
-            await asyncio.gather(*(self.send(connection, event) for connection in recipients))
+            await asyncio.gather(
+                *(self._send_with_lock(connection, event, operation_lock) for connection, operation_lock in recipients)
+            )
 
     async def close_all(self) -> None:
         """Close and forget all connections during graceful shutdown."""
 
         async with self._lock:
-            connections = tuple(self._metadata)
+            connections = tuple(
+                (connection, metadata.operation_lock) for connection, metadata in self._metadata.items()
+            )
             self._metadata.clear()
             self._rooms.clear()
-        await asyncio.gather(*(self._close(connection) for connection in connections))
+        await asyncio.gather(
+            *(self._close_with_lock(connection, operation_lock) for connection, operation_lock in connections)
+        )
 
     async def close_room(
         self,
@@ -113,7 +144,10 @@ class ConnectionManager:
         connections = await self._detach_room_connections(room_id)
         if connections:
             await asyncio.gather(
-                *(self._notify_and_close(connection, event, code=code, reason=reason) for connection in connections)
+                *(
+                    self._notify_and_close(connection, operation_lock, event, code=code, reason=reason)
+                    for connection, operation_lock in connections
+                )
             )
 
     async def close_member(
@@ -130,7 +164,10 @@ class ConnectionManager:
         connections = await self._detach_room_connections(room_id, subject=subject)
         if connections:
             await asyncio.gather(
-                *(self._notify_and_close(connection, event, code=code, reason=reason) for connection in connections)
+                *(
+                    self._notify_and_close(connection, operation_lock, event, code=code, reason=reason)
+                    for connection, operation_lock in connections
+                )
             )
         return len(connections)
 
@@ -139,7 +176,7 @@ class ConnectionManager:
         room_id: str,
         *,
         subject: str | None = None,
-    ) -> tuple[WebSocket, ...]:
+    ) -> tuple[tuple[WebSocket, asyncio.Lock], ...]:
         """Atomically detach all room sockets or only those for one subject."""
 
         async with self._lock:
@@ -147,42 +184,60 @@ class ConnectionManager:
             if room_connections is None:
                 return ()
             connections = tuple(
-                connection
+                (connection, self._metadata[connection].operation_lock)
                 for connection in room_connections
-                if subject is None or self._metadata[connection][2] == subject
+                if subject is None or self._metadata[connection].subject == subject
             )
-            for connection in connections:
+            for connection, _operation_lock in connections:
                 self._metadata.pop(connection, None)
                 room_connections.discard(connection)
             if not room_connections:
                 self._rooms.pop(room_id, None)
             return connections
 
-    async def _close(self, websocket: WebSocket) -> None:
+    async def _send_with_lock(
+        self,
+        websocket: WebSocket,
+        event: dict[str, Any],
+        operation_lock: asyncio.Lock,
+    ) -> bool:
         try:
-            await asyncio.wait_for(
-                websocket.close(code=1012, reason="Service restarting"),
-                timeout=self.send_timeout,
-            )
-        except Exception:
-            logger.debug("WebSocket was already closed during shutdown")
+            async with operation_lock:
+                await asyncio.wait_for(websocket.send_json(event), timeout=self.send_timeout)
+            return True
+        except Exception as exc:
+            logger.info("Dropping unavailable WebSocket connection: %s", type(exc).__name__)
+            await self.unregister(websocket)
+            return False
+
+    async def _close_with_lock(self, websocket: WebSocket, operation_lock: asyncio.Lock) -> None:
+        async with operation_lock:
+            try:
+                await asyncio.wait_for(
+                    websocket.close(code=1012, reason="Service restarting"),
+                    timeout=self.send_timeout,
+                )
+            except Exception:
+                logger.debug("WebSocket was already closed during shutdown")
 
     async def _notify_and_close(
         self,
         websocket: WebSocket,
+        operation_lock: asyncio.Lock,
         event: dict[str, Any],
         *,
         code: int,
         reason: str,
     ) -> None:
-        try:
-            await asyncio.wait_for(websocket.send_json(event), timeout=self.send_timeout)
-        except Exception:
-            logger.debug("WebSocket notification failed during room lifecycle change")
-        try:
-            await asyncio.wait_for(websocket.close(code=code, reason=reason), timeout=self.send_timeout)
-        except Exception:
-            logger.debug("WebSocket was already closed during room lifecycle change")
+        async with operation_lock:
+            try:
+                await asyncio.wait_for(websocket.send_json(event), timeout=self.send_timeout)
+            except Exception:
+                logger.debug("WebSocket notification failed during room lifecycle change")
+            try:
+                await asyncio.wait_for(websocket.close(code=code, reason=reason), timeout=self.send_timeout)
+            except Exception:
+                logger.debug("WebSocket was already closed during room lifecycle change")
 
     @property
     def active_connections(self) -> int:
