@@ -70,6 +70,7 @@ def _start_server(
     pool_timeout: float = 10,
     operation_timeout: float = 10,
     signing_secret: str | None = None,
+    settings: dict[str, str] | None = None,
 ) -> LoggedServer:
     environment = {
         key: value for key, value in os.environ.items() if not key.startswith(("SAMSARIX_CHAT_", "HELIX_CHAT_"))
@@ -92,6 +93,8 @@ def _start_server(
     )
     if signing_secret is not None:
         environment["SAMSARIX_CHAT_TOKEN_SIGNING_SECRET"] = signing_secret
+    for key, value in (settings or {}).items():
+        environment[f"SAMSARIX_CHAT_{key}"] = value
     return LoggedServer(
         [
             sys.executable,
