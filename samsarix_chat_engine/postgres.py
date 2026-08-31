@@ -16,7 +16,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID
 
 import psycopg
@@ -61,6 +61,14 @@ class InstanceLeaseError(PostgresFoundationError):
 
 class EventLogGapError(InstanceLeaseError):
     """Raised when an instance cursor predates the retained event window."""
+
+
+class EventLogLagError(InstanceLeaseError):
+    """Raised before dispatch when an active cursor's unread backlog is excessive."""
+
+    def __init__(self, reason: Literal["count", "age"]) -> None:
+        self.reason = reason
+        super().__init__(f"instance unread event backlog exceeds the {reason} limit")
 
 
 @dataclass(frozen=True, slots=True)
@@ -663,18 +671,88 @@ class PostgresFoundation:
             raise InstanceLeaseError("instance generation is missing")
         return InstanceRegistration(cast(UUID, recovered[0]), int(recovered[1]))
 
+    async def resynchronize_claimed_instance(
+        self,
+        instance_id: str,
+        *,
+        generation: UUID,
+        recovery_generation: UUID,
+        lease_seconds: int,
+    ) -> InstanceRegistration:
+        """Start at the committed head after the caller fences every local consumer.
+
+        The caller retains one recovery UUID across ambiguous failures. A retry
+        observing that UUID renews its lease without skipping any newer events.
+        Neither the old owner nor a retry can overwrite a different generation.
+        """
+
+        _validate_instance(instance_id, lease_seconds)
+        if generation == recovery_generation:
+            raise ValueError("recovery generation must differ from the current generation")
+        async with self.transaction() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT generation, last_sequence
+                FROM public.samsarix_instance_cursors
+                WHERE instance_id = %s AND generation IN (%s, %s)
+                FOR UPDATE
+                """,
+                (instance_id, generation, recovery_generation),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                raise InstanceLeaseError("instance generation is missing")
+            if cast(UUID, row[0]) == recovery_generation:
+                cursor = await connection.execute(
+                    """
+                    UPDATE public.samsarix_instance_cursors
+                    SET lease_expires_at = clock_timestamp() + make_interval(secs => %s),
+                        updated_at = clock_timestamp()
+                    WHERE instance_id = %s AND generation = %s
+                    RETURNING generation, last_sequence
+                    """,
+                    (lease_seconds, instance_id, recovery_generation),
+                )
+            else:
+                cursor = await connection.execute(
+                    """
+                    UPDATE public.samsarix_instance_cursors
+                    SET generation = %s,
+                        last_sequence = (
+                            SELECT GREATEST(
+                                (SELECT COALESCE(MAX(sequence), 0) FROM public.samsarix_realtime_events),
+                                retention.pruned_through_sequence
+                            )
+                            FROM public.samsarix_realtime_retention AS retention
+                            WHERE retention.singleton = TRUE
+                        ),
+                        lease_expires_at = clock_timestamp() + make_interval(secs => %s),
+                        updated_at = clock_timestamp()
+                    WHERE instance_id = %s AND generation = %s
+                    RETURNING generation, last_sequence
+                    """,
+                    (recovery_generation, lease_seconds, instance_id, generation),
+                )
+            recovered = await cursor.fetchone()
+        if recovered is None:
+            raise InstanceLeaseError("instance generation is missing")
+        return InstanceRegistration(cast(UUID, recovered[0]), int(recovered[1]))
+
     async def read_events(
         self,
         instance_id: str,
         *,
         limit: int = 100,
         generation: UUID | None = None,
+        max_pending_events: int | None = None,
+        max_event_age_seconds: int | None = None,
     ) -> list[RealtimeEvent]:
         """Read committed events after an active instance's durable cursor."""
 
         _validate_instance_id(instance_id)
         if not 1 <= limit <= 1_000:
             raise ValueError("event read limit must be between 1 and 1000")
+        _validate_lag_limits(max_pending_events, max_event_age_seconds)
         async with self.transaction() as connection:
             cursor = await connection.execute(
                 """
@@ -702,6 +780,35 @@ class PostgresFoundation:
                 raise PostgresFoundationError("PostgreSQL realtime retention metadata is missing")
             if int(instance[0]) < int(retention[0]):
                 raise EventLogGapError("instance cursor predates the retained realtime event window")
+            if max_pending_events is not None or max_event_age_seconds is not None:
+                cursor = await connection.execute(
+                    """
+                    SELECT
+                        %s::INTEGER IS NOT NULL AND EXISTS (
+                            SELECT 1 FROM public.samsarix_realtime_events
+                            WHERE sequence > %s ORDER BY sequence
+                            OFFSET COALESCE(%s::INTEGER, 0) LIMIT 1
+                        ),
+                        %s::INTEGER IS NOT NULL AND COALESCE((
+                            SELECT created_at < clock_timestamp() - make_interval(secs => %s)
+                            FROM public.samsarix_realtime_events
+                            WHERE sequence > %s ORDER BY sequence LIMIT 1
+                        ), FALSE)
+                    """,
+                    (
+                        max_pending_events,
+                        int(instance[0]),
+                        max_pending_events,
+                        max_event_age_seconds,
+                        max_event_age_seconds,
+                        int(instance[0]),
+                    ),
+                )
+                lag = await cursor.fetchone()
+                if lag is not None and bool(lag[0]):
+                    raise EventLogLagError("count")
+                if lag is not None and bool(lag[1]):
+                    raise EventLogLagError("age")
             cursor = await connection.execute(
                 """
                 SELECT sequence, room_id, event_type, payload, created_at
@@ -1182,6 +1289,17 @@ class PostgresFoundation:
     def _require_open(self) -> None:
         if not self._opened:
             raise PostgresFoundationError("PostgreSQL foundation is not open")
+
+
+def _validate_lag_limits(max_pending_events: int | None, max_event_age_seconds: int | None) -> None:
+    if max_pending_events is not None and (
+        type(max_pending_events) is not int or not 1 <= max_pending_events <= 100_000
+    ):
+        raise ValueError("pending event limit must be an integer between 1 and 100000")
+    if max_event_age_seconds is not None and (
+        type(max_event_age_seconds) is not int or not 1 <= max_event_age_seconds <= 3_600
+    ):
+        raise ValueError("pending event age must be an integer between 1 and 3600 seconds")
 
 
 def _validate_event(room_id: str, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:

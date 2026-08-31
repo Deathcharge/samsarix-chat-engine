@@ -75,6 +75,8 @@ PostgreSQL [table-lock compatibility](https://www.postgresql.org/docs/current/ex
 | `SAMSARIX_CHAT_POSTGRES_OPERATION_TIMEOUT` | `10` | Checked-out operation deadline seconds, 0.1–300; also sets per-session statement and idle-in-transaction limits |
 | `SAMSARIX_CHAT_POSTGRES_LEASE_SECONDS` | `30` | Process and socket lease, 3–300 seconds |
 | `SAMSARIX_CHAT_POSTGRES_RELAY_POLL` | `0.25` | Durable-log poll interval, 0.01–5 seconds |
+| `SAMSARIX_CHAT_POSTGRES_RELAY_MAX_PENDING_EVENTS` | `10000` | Unread committed event-count ceiling per replica, integer 1–100000 |
+| `SAMSARIX_CHAT_POSTGRES_RELAY_MAX_EVENT_AGE` | `30` | First unread event's creation-age ceiling in seconds, integer 1–3600 |
 | `SAMSARIX_CHAT_POSTGRES_MAINTENANCE_INTERVAL` | `1` | Bounded cleanup cadence, 0.1–60 seconds |
 | `SAMSARIX_CHAT_POSTGRES_MAX_RATE_BUCKETS` | `100000` | Deployment-wide active bucket cardinality cap |
 | `SAMSARIX_CHAT_POSTGRES_MAX_REALTIME_EVENTS` | `100000` | Retained coordination-event count target |
@@ -85,6 +87,22 @@ PostgreSQL [table-lock compatibility](https://www.postgresql.org/docs/current/ex
 ## Database connection interruption and recovery
 
 On a detected database connection failure, the relay fences its existing local sockets with close code `1012`. The process remains live, but readiness returns `503` while storage or the relay claim is unavailable. A failed explicit socket/instance release is logged by exception type only and left for lease expiry; shutdown still closes the pool. Once connectivity returns, the process reacquires its cursor and resumes polling without requiring an application restart. Clients must reconnect with backoff and reload authoritative history; they must not expect missed events to reappear on their closed socket.
+
+## Live relay lag and resynchronization
+
+A live lease alone does not make a replica's stream current. Before each payload batch, the relay checks the committed rows after its durable cursor. More than `POSTGRES_RELAY_MAX_PENDING_EVENTS` unread rows, or a first unread row older than `POSTGRES_RELAY_MAX_EVENT_AGE`, triggers a local fence. Both positive integer limits are always enabled in application PostgreSQL mode and are rejected in SQLite mode. They cover all coordination events, not only chat messages, and are distinct from the retained-log count/age targets.
+
+Readiness fails and new local socket admission stops before closing existing local sockets with 1012. Only after successful local fencing does recovery atomically rotate the exact owner generation and snapshot the logical committed head (including the retention watermark). It then resumes polling; clients must reconnect with backoff and reload authoritative room/history state, including HTTP pagination when needed. Skipped realtime notifications are not re-sent to the old socket. Other replicas are not globally fenced.
+
+Recovery holds one proposed generation UUID across retries. If the database committed the rotation but its response was lost, the same retry renews that generation without sampling a later head or skipping additional events. A different owner cannot be overwritten; the local relay remains fenced while it reacquires a usable claim. Application retained-gap recovery uses the same retry-safe operation. This is not a general guarantee that other timed-out database writes rolled back.
+
+The count probe uses ordered committed rows, not `MAX(sequence) - cursor`: PostgreSQL [sequences can have gaps after aborts or conflicts](https://www.postgresql.org/docs/current/functions-sequence.html). The age probe compares the first unread row's `created_at` to the database's [current clock](https://www.postgresql.org/docs/current/functions-datetime.html#FUNCTIONS-DATETIME-CURRENT), avoiding application-host clock skew. Creation time is not a commit timestamp. The count probe stops after at most the configured count plus one visible row; payloads still use the bounded batch size. Query cost under churn, index bloat and load has not been benchmarked.
+
+Checks occur before batches, not continuously during an in-flight dispatch. Concurrent commits can arrive after the check. The age setting is therefore **not a maximum delivery delay**, and retention targets remain soft during detection, fencing, database interruption and lease expiry. There is no hard disk, throughput or reconnect-storm guarantee. Sustained overload may repeatedly fence a replica; size capacity and choose thresholds using measured deployment behavior rather than disabling recovery.
+
+Controlled real-PostgreSQL tests cover count/age violations with a valid lease, sequence gaps, retry ownership, retention progress, and a signed-member two-application flow: local 1012 closure and failed readiness/admission, healthy-peer writes, fresh history and resumed fan-out. The latter uses deterministic in-process ASGI barriers; it is not a separate-process overload, network-fault or load/soak test.
+
+## Database interruption test scope
 
 `tests/test_postgres_processes.py::test_database_network_cut_fences_clients_and_recovers_without_process_restart` cuts one replica's real database TCP connections using a test-only loopback proxy and refuses replacement connections. A second Uvicorn process connects directly to the dedicated `samsarix_test` database. The test checks that the healthy peer keeps publishing, rejected writes do not appear in recovered history, readiness returns after reconnection, and fresh sockets again receive cross-replica messages. It does not stop PostgreSQL or modify its networking configuration.
 
@@ -124,7 +142,7 @@ Live PostgreSQL tests pause a replica's relay, mutate lifecycle state through a 
 
 Registered sockets now buffer room broadcasts while reading/sending initial history. Activation drains those snapshots before enabling live broadcasts; overflow or a flush exceeding one send-timeout interval closes 1013 for reconnect. The shared buffer budget also counts in-flight activation sends, preventing detachment from making their retained payload invisible to accounting. See the [protocol limits](API_REFERENCE.md#server-events). This queue is local and ephemeral, and is discarded on cancellation, moderation teardown, fencing, or disconnect.
 
-Controlled SQLite and PostgreSQL application tests pause a captured history snapshot, commit create/edit/delete operations through HTTP, wait for dispatch, and then verify that initial history plus queued mutations converges to current database rows, including tombstones. This is real-storage/ASGI evidence, not a network-process stall, load, or failover benchmark. Post-admission relay events can overlap history and duplicates remain possible; no durable per-client cursor or end-of-catch-up marker is added. Presence counts remain event-time snapshots and can predate the later count in `ready`. Combined lifecycle/outage cases, live-lag fencing and reconnect/load acceptance remain release gates.
+Controlled SQLite and PostgreSQL application tests pause a captured history snapshot, commit create/edit/delete operations through HTTP, wait for dispatch, and then verify that initial history plus queued mutations converges to current database rows, including tombstones. This is real-storage/ASGI evidence, not a network-process stall, load, or failover benchmark. Post-admission relay events can overlap history and duplicates remain possible; no durable per-client cursor or end-of-catch-up marker is added. Presence counts remain event-time snapshots and can predate the later count in `ready`. Combined lifecycle/outage cases and measured live-lag/reconnect/load acceptance remain release gates.
 
 ## Migration, backup, and rollback
 
@@ -135,7 +153,7 @@ Rolling back to a binary that supports an older schema requires restoring its ma
 ## Known preview boundaries
 
 - Two-process normal delivery, kill/lease-expiry/restart, database TCP reset/refusal, and silent bidirectional database-traffic stalls with explicit reconnect/history recovery run in CI. Kernel-level packet blackholes, database failover, notification-listener interruption, reconnect storms, and sustained load/soak evidence remain pending.
-- A live but extremely slow replica can currently hold the event-retention floor; the configurable live-lag fence is not implemented yet.
+- Live-lag checks fence before the next over-limit batch; in-flight dispatch, interrupted storage, and lease expiry can still delay retention. Hard disk/latency bounds and measured overload/reconnect-storm recovery are not claimed.
 - Polling, rather than `LISTEN`/`NOTIFY`, currently determines normal fan-out latency.
 - The bundled Compose profile is still the supported SQLite single-replica example and does not provision PostgreSQL.
 - Presence and WebSocket delivery remain best effort at the individual socket boundary. Reconnecting clients reload authoritative history over HTTP.

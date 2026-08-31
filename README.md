@@ -79,6 +79,8 @@ The development branch also contains a guarded, unreleased PostgreSQL multi-inst
 
 PostgreSQL same-version startup inspects schema metadata without replaying DDL against live replicas. Actual schema upgrades still require drained/stopped old replicas and a PostgreSQL-native backup/rollback plan; mixed-version rolling upgrades are not supported.
 
+The preview also checks each replica's unread relay backlog before each batch. Exceeding its configurable event-count or event-age limit closes that replica's sockets with 1012 before a fresh cursor is established. Clients reconnect and reload history; these checks are not a delivery-latency SLA or a hard event-log disk limit. See [live-lag recovery](docs/POSTGRES_PREVIEW.md#live-relay-lag-and-resynchronization).
+
 The [application-workflow guide](docs/APPLICATION_WORKFLOWS.md) and runnable `examples/03_support_workflow.py` show a two-party support case with separate customer and agent identities. [Reliable application webhooks](docs/WEBHOOKS.md) covers receiver verification, retries, replay, rotation, and failure recovery.
 
 ## Container quick start

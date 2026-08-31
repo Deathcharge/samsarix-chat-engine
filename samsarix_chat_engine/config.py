@@ -227,6 +227,8 @@ class Settings:
     postgres_operation_timeout_seconds: float = 10.0
     postgres_lease_seconds: int = 30
     postgres_relay_poll_seconds: float = 0.25
+    postgres_relay_max_pending_events: int = 10_000
+    postgres_relay_max_event_age_seconds: int = 30
     postgres_maintenance_interval_seconds: float = 1.0
     postgres_max_rate_buckets: int = 100_000
     postgres_max_realtime_events: int = 100_000
@@ -275,6 +277,8 @@ class Settings:
                 or self.postgres_operation_timeout_seconds != 10.0
                 or self.postgres_lease_seconds != 30
                 or self.postgres_relay_poll_seconds != 0.25
+                or self.postgres_relay_max_pending_events != 10_000
+                or self.postgres_relay_max_event_age_seconds != 30
                 or self.postgres_maintenance_interval_seconds != 1.0
                 or self.postgres_max_rate_buckets != 100_000
                 or self.postgres_max_realtime_events != 100_000
@@ -337,6 +341,8 @@ class Settings:
             "postgres_lease_seconds": (self.postgres_lease_seconds, 3, 300),
             "postgres_max_rate_buckets": (self.postgres_max_rate_buckets, 1, 10_000_000),
             "postgres_max_realtime_events": (self.postgres_max_realtime_events, 1, 10_000_000),
+            "postgres_relay_max_pending_events": (self.postgres_relay_max_pending_events, 1, 100_000),
+            "postgres_relay_max_event_age_seconds": (self.postgres_relay_max_event_age_seconds, 1, 3_600),
             "postgres_realtime_event_max_age_seconds": (
                 self.postgres_realtime_event_max_age_seconds,
                 60,
@@ -344,6 +350,11 @@ class Settings:
             ),
         }
         for name, (value, minimum, maximum) in checks.items():
+            if (
+                name in {"postgres_relay_max_pending_events", "postgres_relay_max_event_age_seconds"}
+                and type(value) is not int
+            ):
+                raise ConfigurationError(f"{name} must be an integer")
             if not minimum <= value <= maximum:
                 raise ConfigurationError(f"{name} must be between {minimum} and {maximum}")
         if self.token_verification_jwks_path is not None:
@@ -456,6 +467,8 @@ class Settings:
             "POSTGRES_POOL_TIMEOUT",
             "POSTGRES_LEASE_SECONDS",
             "POSTGRES_RELAY_POLL",
+            "POSTGRES_RELAY_MAX_PENDING_EVENTS",
+            "POSTGRES_RELAY_MAX_EVENT_AGE",
             "POSTGRES_MAINTENANCE_INTERVAL",
             "POSTGRES_MAX_RATE_BUCKETS",
             "POSTGRES_MAX_REALTIME_EVENTS",
@@ -480,6 +493,12 @@ class Settings:
             ),
             postgres_lease_seconds=_read_int("POSTGRES_LEASE_SECONDS", 30, minimum=3, maximum=300),
             postgres_relay_poll_seconds=_read_float("POSTGRES_RELAY_POLL", 0.25, minimum=0.01, maximum=5),
+            postgres_relay_max_pending_events=_read_int(
+                "POSTGRES_RELAY_MAX_PENDING_EVENTS", 10_000, minimum=1, maximum=100_000
+            ),
+            postgres_relay_max_event_age_seconds=_read_int(
+                "POSTGRES_RELAY_MAX_EVENT_AGE", 30, minimum=1, maximum=3_600
+            ),
             postgres_maintenance_interval_seconds=_read_float(
                 "POSTGRES_MAINTENANCE_INTERVAL", 1.0, minimum=0.1, maximum=60
             ),

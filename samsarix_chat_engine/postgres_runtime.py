@@ -56,6 +56,8 @@ class PostgresApplicationRuntime:
         operation_timeout_seconds: float = 10.0,
         lease_seconds: int = 30,
         relay_poll_interval_seconds: float = 0.25,
+        relay_max_pending_events: int = 10_000,
+        relay_max_event_age_seconds: int = 30,
         maintenance_interval_seconds: float = 1.0,
         max_rate_buckets: int = 100_000,
         max_realtime_events: int = 100_000,
@@ -116,6 +118,8 @@ class PostgresApplicationRuntime:
             instance_id=instance_id,
             lease_seconds=lease_seconds,
             poll_interval_seconds=relay_poll_interval_seconds,
+            max_pending_events=relay_max_pending_events,
+            max_event_age_seconds=relay_max_event_age_seconds,
         )
         self._stop = asyncio.Event()
         self._relay_task: asyncio.Task[None] | None = None

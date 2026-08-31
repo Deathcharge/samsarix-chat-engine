@@ -66,13 +66,13 @@ PostgreSQL-backed deployments require all of the following:
 
 ## Event retention and backpressure
 
-Event rows can now be bounded by age and count without pruning past the minimum healthy instance cursor. Instance leases distinguish an offline instance from a slow active instance. An expired instance may fall behind the recorded retention watermark; when it returns, the relay fences its sockets and atomically skips to the logical head so clients reconnect and reload database history. A configurable lag ceiling for a still-live but unhealthy process and application-owned scheduling of the bounded maintenance pass remain release gates.
+Event retention uses age/count targets without pruning past the minimum live instance cursor; application-owned maintenance schedules bounded pruning. Before every payload batch, the relay checks actual unread committed rows and the database-clock creation age of the first unread row. A count/age violation or a retained gap fails local readiness/admission and closes local sockets before rotating the owner generation and advancing to the logical committed head. A stable proposed recovery UUID makes lost-response retries preserve the first recovery cursor; another owner cannot be overwritten. Clients reconnect and reload authoritative history. These pre-batch checks do not impose an in-flight delivery deadline or hard disk bound. See [limits and recovery](POSTGRES_PREVIEW.md#live-relay-lag-and-resynchronization); measured overload and reconnect storms remain release gates.
 
 Payloads contain the same versioned event envelopes sent over WebSockets. Administrative metadata may be logged, but access tokens, API keys, database credentials, and message bodies are excluded from operational logs.
 
 ## Configuration and deployment boundary
 
-The guarded preview accepts a protected PostgreSQL URL or preferred connection-string file, requires `sslmode=verify-full` for non-loopback servers, exposes bounded pool/lease/poll/maintenance/retention settings, and rejects simultaneous SQLite and PostgreSQL configuration. Connection strings do not appear in settings representations, translated errors, readiness responses, or generated OpenAPI. A live-lag ceiling is still pending.
+The guarded preview accepts a protected PostgreSQL URL or preferred connection-string file, requires `sslmode=verify-full` for non-loopback servers, exposes bounded pool/lease/poll/live-lag/maintenance/retention settings, and rejects simultaneous SQLite and PostgreSQL configuration. Connection strings do not appear in settings representations, translated errors, readiness responses, or generated OpenAPI.
 
 Application replicas must run the exact same Samsarix version and security configuration. PostgreSQL backup, point-in-time recovery, high availability, encryption, user privileges, patching, and capacity remain deployment responsibilities. The SQLite backup/restore CLI will refuse PostgreSQL targets rather than implying that copying one file backs up a remote database.
 
@@ -89,7 +89,7 @@ v0.13 cannot claim multi-instance support until CI proves:
 - two webhook workers never hold the same live claim, and a killed worker's claim is recovered (the storage-level lease/recovery case is implemented; the killed-process gate remains);
 - migration concurrency is serialized and newer schemas fail closed;
 - crashed connection leases expire and presence converges (a killed real Uvicorn process now emits the expected lease-derived leave/count on its surviving peer, then restarts under the same stable ID after expiry);
-- an event-log gap fences the lagging instance and clients recover through history (the storage/relay contract is implemented; the real-client recovery gate remains);
+- an event-log gap or an over-limit live backlog fences the lagging instance and clients recover through history (storage/relay tests cover both; a two-application ASGI barrier test covers signed-member live-lag closure, rejected admission, healthy-peer progress, history recovery and resumed fan-out; separate-process overload and retained-gap client recovery remain);
 - sustained load and forced database/network interruptions have measured, published outcomes (CI now proves one replica's TCP reset/refusal and silent bidirectional traffic stall over open TCP connections, healthy-peer progress, explicit reconnect/history recovery, and resumed fan-out without application restart; kernel-level packet blackholes, database failover, and sustained load remain);
 - SQLite single-instance behavior, package installation, Windows support, and rollback documentation remain green.
 

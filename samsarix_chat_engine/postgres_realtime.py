@@ -15,9 +15,12 @@ from pydantic import ValidationError
 from .models import MemberModeration
 from .postgres import (
     EventLogGapError,
+    EventLogLagError,
+    InstanceLeaseError,
     PostgresFoundation,
     PostgresFoundationError,
     RealtimeEvent,
+    _validate_lag_limits,
 )
 
 if TYPE_CHECKING:
@@ -88,6 +91,8 @@ class PostgresRealtimeRelay:
         lease_seconds: int = 30,
         poll_interval_seconds: float = 0.25,
         batch_size: int = 100,
+        max_pending_events: int = 10_000,
+        max_event_age_seconds: int = 30,
     ) -> None:
         if not 3 <= lease_seconds <= 300:
             raise ValueError("realtime relay lease must be between 3 and 300 seconds")
@@ -95,6 +100,9 @@ class PostgresRealtimeRelay:
             raise ValueError("realtime relay poll interval must be between 0.01 and 5 seconds")
         if not 1 <= batch_size <= 1_000:
             raise ValueError("realtime relay batch size must be between 1 and 1000")
+        _validate_lag_limits(max_pending_events, max_event_age_seconds)
+        if max_pending_events is None or max_event_age_seconds is None:
+            raise ValueError("realtime relay lag limits cannot be disabled")
         self.foundation = foundation
         self.target = target
         self.instance_id = instance_id if instance_id is not None else f"relay-{uuid.uuid4().hex}"
@@ -103,6 +111,8 @@ class PostgresRealtimeRelay:
         self.lease_seconds = lease_seconds
         self.poll_interval_seconds = poll_interval_seconds
         self.batch_size = batch_size
+        self.max_pending_events = max_pending_events
+        self.max_event_age_seconds = max_event_age_seconds
         self._cursor: int | None = None
         self._generation: UUID | None = None
         self._next_heartbeat = 0.0
@@ -112,6 +122,8 @@ class PostgresRealtimeRelay:
         self._fenced = False
         self._fence_required = False
         self._gap_recovery_required = False
+        self._lag_recovery_required = False
+        self._recovery_generation: UUID | None = None
 
     @property
     def ready(self) -> bool:
@@ -123,6 +135,8 @@ class PostgresRealtimeRelay:
             and not self._fenced
             and not self._fence_required
             and not self._gap_recovery_required
+            and not self._lag_recovery_required
+            and self._recovery_generation is None
             and not self._stop.is_set()
             and asyncio.get_running_loop().time() < self._lease_deadline
         )
@@ -165,6 +179,8 @@ class PostgresRealtimeRelay:
             self.instance_id,
             limit=self.batch_size,
             generation=self._generation,
+            max_pending_events=self.max_pending_events,
+            max_event_age_seconds=self.max_event_age_seconds,
         )
         dispatched_sequence: int | None = None
         try:
@@ -200,17 +216,22 @@ class PostgresRealtimeRelay:
         """Poll forever, fencing sockets and resuming from the cursor after a lease/database loss."""
 
         while not self._stop.is_set():
-            if self._fence_required and not await self._fence():
+            if (
+                self._fence_required or self._gap_recovery_required or self._lag_recovery_required
+            ) and not await self._fence():
                 await self._wait_for_work()
                 continue
             try:
-                if self._gap_recovery_required:
+                if self._gap_recovery_required or self._lag_recovery_required:
                     if self._generation is None:
                         raise RuntimeError("realtime relay generation is not initialized")
                     started = asyncio.get_running_loop().time()
-                    registration = await self.foundation.recover_claimed_instance_after_gap(
+                    if self._recovery_generation is None:
+                        self._recovery_generation = uuid.uuid4()
+                    registration = await self.foundation.resynchronize_claimed_instance(
                         self.instance_id,
                         generation=self._generation,
+                        recovery_generation=self._recovery_generation,
                         lease_seconds=self.lease_seconds,
                     )
                     self._generation = registration.generation
@@ -219,6 +240,8 @@ class PostgresRealtimeRelay:
                     self._lease_deadline = started + self.lease_seconds
                     self._next_heartbeat = asyncio.get_running_loop().time() + self.lease_seconds / 3
                     self._gap_recovery_required = False
+                    self._lag_recovery_required = False
+                    self._recovery_generation = None
                     self._fenced = False
                 if self._cursor is None:
                     await self.initialize()
@@ -227,10 +250,26 @@ class PostgresRealtimeRelay:
                 processed = await self.process_once()
                 if processed == self.batch_size:
                     continue
+            except EventLogLagError as exc:
+                logger.warning("Fencing local sockets after PostgreSQL relay lag exceeded its %s limit", exc.reason)
+                self._cursor = None
+                self._lag_recovery_required = True
+                self._fence_required = True
+                await self._fence()
             except EventLogGapError:
                 logger.warning("Fencing local sockets after a retained PostgreSQL event-log gap")
                 self._cursor = None
                 self._gap_recovery_required = True
+                self._fence_required = True
+                await self._fence()
+            except InstanceLeaseError:
+                # A different owner may have claimed the ID during an outage.
+                # Do not retry a stale recovery UUID forever or overwrite it.
+                logger.warning("Fencing local sockets after the PostgreSQL instance claim became unusable")
+                self._cursor = None
+                self._gap_recovery_required = False
+                self._lag_recovery_required = False
+                self._recovery_generation = None
                 self._fence_required = True
                 await self._fence()
             except PostgresFoundationError as exc:
