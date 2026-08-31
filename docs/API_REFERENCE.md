@@ -215,6 +215,12 @@ In the PostgreSQL preview, a room archived or deleted between validation and adm
 
 ### Server events
 
+From successful registration until activation, room broadcasts are queued rather than discarded. On a successful handshake the server sends `ready`, then `history`, then queued events in their local broadcast-arrival order before admitting ordinary live broadcasts. Events arriving while the queue drains join its tail. Archive/ban, storage failure, cancellation, and transport failure can still interrupt initialization; initial frames are not guaranteed on those paths.
+
+The application uses `ConnectionManager` defaults of **64 events and 262144 serialized UTF-8 JSON bytes per pending connection**, with an **8388608-byte aggregate budget**. Payloads in an activation send remain charged until that send finishes, even if the socket has detached. These are retained-payload bounds, not a claim about total process RSS or sustainable traffic capacity. Embedded callers can set `max_pending_events`, `max_pending_bytes`, and `max_total_pending_bytes` to positive integers. Normal active delivery does not use this queue.
+
+Activation has one deadline equal to `SAMSARIX_CHAT_WS_SEND_TIMEOUT`, including time waiting for its per-socket operation lock. New arrivals do not reset it. Queue overflow or failed/timed-out activation attempts close **1013**; activation cancellation attempts **1012**. Clients reconnect with backoff and reload history; they must not treat an interrupted initialization as a complete stream. Buffering adds no durable client cursor, end-of-catch-up marker, or exactly-once guarantee. History and queued/late-relayed events can overlap: merge messages by ID, apply edits/tombstones, and reload current state after reconnect. Rapid lifecycle changes with delayed relay events remain a separate PostgreSQL preview gate.
+
 After authentication and room validation, events begin with:
 
 ```json

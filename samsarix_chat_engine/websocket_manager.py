@@ -5,9 +5,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Callable, Coroutine
+from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 
 from anyio import CancelScope
@@ -32,22 +34,49 @@ async def _finish_connection_cleanup(cleanup: Coroutine[Any, Any, object]) -> No
             raise asyncio.CancelledError
 
 
-class ConnectionMetadata(NamedTuple):
+class _PendingEvent(NamedTuple):
+    payload: str
+    size: int
+
+
+@dataclass(slots=True)
+class ConnectionMetadata:
     room_id: str
     username: str
     subject: str | None
     connection_id: str | None
     operation_lock: asyncio.Lock
     broadcast_ready: bool
+    pending: deque[_PendingEvent] = field(default_factory=deque)
+    pending_bytes: int = 0
+    inflight: _PendingEvent | None = None
 
 
 class ConnectionManager:
     """Track bounded connections and broadcast without blocking on slow peers."""
 
-    def __init__(self, *, max_connections: int, max_per_room: int, send_timeout: float) -> None:
+    def __init__(
+        self,
+        *,
+        max_connections: int,
+        max_per_room: int,
+        send_timeout: float,
+        max_pending_events: int = 64,
+        max_pending_bytes: int = 262_144,
+        max_total_pending_bytes: int = 8_388_608,
+    ) -> None:
+        if any(
+            type(limit) is not int or limit < 1
+            for limit in (max_pending_events, max_pending_bytes, max_total_pending_bytes)
+        ):
+            raise ValueError("pending broadcast limits must be positive integers")
         self.max_connections = max_connections
         self.max_per_room = max_per_room
         self.send_timeout = send_timeout
+        self.max_pending_events = max_pending_events
+        self.max_pending_bytes = max_pending_bytes
+        self.max_total_pending_bytes = max_total_pending_bytes
+        self._pending_bytes = 0
         self._rooms: dict[str, set[WebSocket]] = defaultdict(set)
         self._metadata: dict[WebSocket, ConnectionMetadata] = {}
         self._lock = asyncio.Lock()
@@ -87,14 +116,43 @@ class ConnectionManager:
             return True
 
     async def activate(self, websocket: WebSocket) -> bool:
-        """Allow broadcasts only after the socket's initial handshake is sent."""
+        """Flush queued broadcasts after initial frames, within one send deadline."""
 
         async with self._lock:
             metadata = self._metadata.get(websocket)
             if metadata is None:
                 return False
-            self._metadata[websocket] = metadata._replace(broadcast_ready=True)
-            return True
+            if metadata.broadcast_ready:
+                return True
+        try:
+            return await asyncio.wait_for(self._activate(websocket, metadata), timeout=self.send_timeout)
+        except asyncio.CancelledError:
+            await self.close(websocket, code=1012, reason="Initialization cancelled")
+            raise
+        except Exception as exc:
+            logger.info("Closing incomplete WebSocket initialization: %s", type(exc).__name__)
+            await self.close(websocket, code=1013, reason="History synchronization unavailable")
+            return False
+
+    async def _activate(self, websocket: WebSocket, metadata: ConnectionMetadata) -> bool:
+        async with metadata.operation_lock:
+            while True:
+                async with self._lock:
+                    if self._metadata.get(websocket) is not metadata:
+                        return False
+                    if not metadata.pending:
+                        metadata.broadcast_ready = True
+                        return True
+                    event = metadata.pending.popleft()
+                    metadata.inflight = event
+                try:
+                    await websocket.send_json(json.loads(event.payload))
+                finally:
+                    # No suspension here: repeated cancellation cannot leak budget.
+                    # Retain the charge during I/O, including after detachment.
+                    metadata.inflight = None
+                    metadata.pending_bytes -= event.size
+                    self._pending_bytes -= event.size
 
     async def unregister(self, websocket: WebSocket) -> tuple[str, str] | None:
         """Remove a socket and return its room/user metadata once."""
@@ -109,12 +167,21 @@ class ConnectionManager:
         metadata = self._metadata.pop(websocket, None)
         if metadata is None:
             return None
+        self._discard_pending(metadata)
         room_connections = self._rooms.get(metadata.room_id)
         if room_connections is not None:
             room_connections.discard(websocket)
             if not room_connections:
                 self._rooms.pop(metadata.room_id, None)
         return metadata
+
+    def _discard_pending(self, metadata: ConnectionMetadata) -> None:
+        """Release queued budget while preserving any activation-owned send."""
+
+        retained = metadata.inflight.size if metadata.inflight is not None else 0
+        self._pending_bytes -= metadata.pending_bytes - retained
+        metadata.pending_bytes = retained
+        metadata.pending.clear()
 
     async def send(self, websocket: WebSocket, event: dict[str, Any]) -> bool:
         """Send to a registered socket; detached/unknown sockets return false."""
@@ -149,20 +216,57 @@ class ConnectionManager:
         exclude: WebSocket | None = None,
         exclude_connection_id: str | None = None,
     ) -> None:
-        """Broadcast to a bounded snapshot of one room's connections."""
+        """Send to active peers; queue bounded snapshots for initializing peers."""
 
+        recipients: list[tuple[WebSocket, asyncio.Lock]] = []
+        overflow: list[tuple[WebSocket, asyncio.Lock]] = []
+        buffered: _PendingEvent | None = None
+        invalid_payload = False
         async with self._lock:
-            recipients = tuple(
-                (connection, self._metadata[connection].operation_lock)
-                for connection in self._rooms.get(room_id, ())
-                if connection is not exclude
-                and self._metadata[connection].broadcast_ready
-                and (exclude_connection_id is None or self._metadata[connection].connection_id != exclude_connection_id)
-            )
-        if recipients:
+            for connection in tuple(self._rooms.get(room_id, ())):
+                metadata = self._metadata[connection]
+                if connection is exclude or (
+                    exclude_connection_id is not None and metadata.connection_id == exclude_connection_id
+                ):
+                    continue
+                if metadata.broadcast_ready:
+                    recipients.append((connection, metadata.operation_lock))
+                    continue
+                if buffered is None and not invalid_payload:
+                    try:
+                        payload = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+                        buffered = _PendingEvent(payload, len(payload.encode("utf-8")))
+                    except (TypeError, ValueError, UnicodeError):
+                        invalid_payload = True
+                if (
+                    buffered is None
+                    or len(metadata.pending) + (metadata.inflight is not None) >= self.max_pending_events
+                    or metadata.pending_bytes + buffered.size > self.max_pending_bytes
+                    or self._pending_bytes + buffered.size > self.max_total_pending_bytes
+                ):
+                    self._detach_connection(connection)
+                    overflow.append((connection, metadata.operation_lock))
+                    continue
+                metadata.pending.append(buffered)
+                metadata.pending_bytes += buffered.size
+                self._pending_bytes += buffered.size
+
+        async def deliver() -> None:
             await asyncio.gather(
-                *(self._send_with_lock(connection, event, operation_lock) for connection, operation_lock in recipients)
+                *(self._send_with_lock(connection, event, operation_lock) for connection, operation_lock in recipients),
+                *(
+                    self._close_with_lock(
+                        connection, operation_lock, code=1013, reason="History synchronization overflow"
+                    )
+                    for connection, operation_lock in overflow
+                ),
             )
+
+        if overflow:
+            # Once detached, this caller owns bounded physical closure even if cancelled.
+            await _finish_connection_cleanup(deliver())
+        elif recipients:
+            await deliver()
 
     async def close_all(self) -> None:
         """Close and forget all connections during graceful shutdown."""
@@ -171,6 +275,8 @@ class ConnectionManager:
             connections = tuple(
                 (connection, metadata.operation_lock) for connection, metadata in self._metadata.items()
             )
+            for metadata in self._metadata.values():
+                self._discard_pending(metadata)
             self._metadata.clear()
             self._rooms.clear()
         await asyncio.gather(
@@ -235,7 +341,8 @@ class ConnectionManager:
                 if subject is None or self._metadata[connection].subject == subject
             )
             for connection, _operation_lock in connections:
-                self._metadata.pop(connection, None)
+                metadata = self._metadata.pop(connection)
+                self._discard_pending(metadata)
                 room_connections.discard(connection)
             if not room_connections:
                 self._rooms.pop(room_id, None)

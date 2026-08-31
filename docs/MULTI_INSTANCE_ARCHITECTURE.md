@@ -79,6 +79,7 @@ Application replicas must run the exact same Samsarix version and security confi
 v0.13 cannot claim multi-instance support until CI proves:
 
 - two or more real app processes share one PostgreSQL database and deliver create/update/delete events exactly once to each connected test socket under normal operation (two independent OS processes now pass for message creation; update/delete process coverage remains);
+- initial history hands off to live delivery without silently discarding post-registration broadcasts (bounded local buffering, whole-flush deadlines, overflow closure, and real-storage/ASGI create/edit/delete snapshot convergence are implemented; this does not add durable client cursors, a catch-up-complete marker, or prove rapid lifecycle ordering across delayed processes);
 - a listener disconnect/reconnect replays committed event rows without relying on `NOTIFY` delivery (the internal polling relay and cursor replay case are implemented; the real-process listener gate remains);
 - concurrent idempotent message creation returns one authoritative message;
 - global and per-room connection caps plus rate limits hold across processes (storage-level concurrency and real application request paths are implemented; separate OS subprocess contention remains);
