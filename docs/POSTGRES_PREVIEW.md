@@ -51,6 +51,16 @@ Use a separate ID such as `chat-b` for a second replica. A concurrently active d
 
 All replicas must run the exact same Samsarix version and use identical authentication, limits, webhook, retention, and timing settings. Use `/readyz` to decide whether a replica should receive traffic and `/healthz` for process liveness. Liveness does not depend on PostgreSQL. Readiness requires the schema, pool, running coordination loops, and a locally unexpired relay claim with no pending socket fence or recovery. A live task alone is not evidence that the relay can serve traffic. WebSocket admission captures both the database generation and a local admission epoch before reserving capacity, then rechecks them under the same local lock used to detach fenced sockets. A reservation that crosses a fence is released and rejected even if the relay recovered with the same database generation in the meantime.
 
+## Schema startup and upgrades
+
+Every start inspects the committed schema version under the shared migration advisory lock. When it already matches this binary, initialization executes no DDL, backfills, metadata timestamp update, or retention-row write. This avoids taking exclusive table locks merely to restart or add a same-version replica. A future version is rejected without a DDL attempt; readiness also requires exact version equality. Missing or older schemas still migrate transactionally, and the version marker is written only after the migration statements succeed. A cancelled startup closes its pool and propagates cancellation without publishing the open state.
+
+The marker is authoritative: manually edited or partially restored schemas are unsupported and are not silently repaired by a current-version restart. This inspection is not a full physical-schema integrity audit. Tests run inspection in a server-enforced read-only transaction to verify the absence of writes; the chat application itself still requires writable storage and its configured database permissions.
+
+For an actual version upgrade, drain and stop **all** old replicas and background workers, take a PostgreSQL-native backup, initialize one replica of the new version without user traffic, verify startup/readiness and the intended migration, then start the other matching replicas. Keep a tested rollback/restore plan. Do not run schema upgrades beside old active replicas or infer support for mixed-version rolling upgrades. Migration lock waits and DDL remain subject to the configured operation deadline; a failed migration rolls back, and a later fresh initialization can retry after the blocker is removed. Do not edit the version marker to force a retry or downgrade.
+
+PostgreSQL [table-lock compatibility](https://www.postgresql.org/docs/current/explicit-locking.html) and [ALTER TABLE behavior](https://www.postgresql.org/docs/current/sql-altertable.html) explain why even `IF NOT EXISTS` DDL could previously conflict with maintenance. The controlled tests cover active table locks, migration rollback, concurrent version inspection and continuity across application replica starts; measured startup/load/soak and online migration guarantees are not claimed.
+
 ## PostgreSQL settings
 
 | Variable | Default | Contract |

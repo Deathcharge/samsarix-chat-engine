@@ -153,7 +153,7 @@ class PostgresFoundation:
             except psycopg.DatabaseError as exc:
                 await self._pool.close()
                 raise PostgresFoundationError(_safe_database_error("schema initialization", exc)) from None
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 await self._pool.close()
                 raise
             self._opened = True
@@ -796,17 +796,20 @@ class PostgresFoundation:
             async with connection.transaction():
                 await connection.execute("SET LOCAL search_path = pg_catalog, public")
                 await connection.execute("SELECT pg_advisory_xact_lock(%s)", (POSTGRES_MIGRATION_LOCK_ID,))
-                await connection.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS public.samsarix_schema_metadata (
-                        singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
-                        version INTEGER NOT NULL CHECK (version > 0),
-                        updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+                cursor = await connection.execute("SELECT to_regclass('public.samsarix_schema_metadata')")
+                metadata = await cursor.fetchone()
+                if metadata is None or metadata[0] is None:
+                    await connection.execute(
+                        """
+                        CREATE TABLE public.samsarix_schema_metadata (
+                            singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+                            version INTEGER NOT NULL CHECK (version > 0),
+                            updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+                        )
+                        """
                     )
-                    """
-                )
                 cursor = await connection.execute(
-                    "SELECT version FROM public.samsarix_schema_metadata WHERE singleton = TRUE FOR UPDATE"
+                    "SELECT version FROM public.samsarix_schema_metadata WHERE singleton = TRUE"
                 )
                 row = await cursor.fetchone()
                 current_version = int(row[0]) if row is not None else 0
@@ -815,6 +818,12 @@ class PostgresFoundation:
                         f"PostgreSQL schema version {current_version} is newer than supported version "
                         f"{POSTGRES_SCHEMA_VERSION}"
                     )
+                if current_version == POSTGRES_SCHEMA_VERSION:
+                    # The committed version marker is authoritative. Replaying
+                    # even IF NOT EXISTS DDL can exclusively lock live tables.
+                    # Inspection and actual migrations share the same lock so
+                    # another initializer cannot change the version mid-check.
+                    return
                 await connection.execute(
                     """
                     CREATE TABLE IF NOT EXISTS public.samsarix_realtime_events (

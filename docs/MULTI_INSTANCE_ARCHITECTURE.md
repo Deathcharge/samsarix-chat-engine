@@ -54,7 +54,7 @@ An instance that falls behind the retained event window must close its local soc
 
 PostgreSQL-backed deployments require all of the following:
 
-- **Migrations:** one transaction-scoped advisory lock serializes schema inspection and migration. A newer unsupported schema fails closed.
+- **Migrations:** one transaction-scoped advisory lock serializes schema inspection and migration. Current-version startup is inspection-only: no DDL, backfill or metadata/retention write. A newer unsupported schema fails closed without DDL, and readiness requires exact schema equality. Missing/older schemas migrate atomically; actual upgrades require stopped/drained old replicas and a PostgreSQL-native backup/rollback plan, not mixed-version live migration. The committed marker is authoritative and does not certify arbitrary manual schema edits.
 - **Connection capacity:** schema-v4 per-socket leases enforce deployment-wide and per-room caps with database-time expiry and owner-bound renewal/release. The application renews each admitted socket at one third of the configured lease; crashed-instance and archived-room rows are excluded and reclaimable.
 - **Presence:** schema-v7 joins/leaves derive from connection transactions, and bounded generation-aware application maintenance emits expiry transitions for crashed instances. Presence remains best effort and carries no authorization meaning; the public relay excludes the origin socket and strips its internal ID.
 - **Rate limits:** schema-v5 atomic time-bucket counters enforce deployment-wide subject/client limits for message, search, and typing scopes on the real request paths. Database time defines boundaries so host clock skew cannot multiply quotas.
