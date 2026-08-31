@@ -151,9 +151,9 @@ async def test_slow_headers_hit_total_deadline_and_close_peer(tmp_path: Path, fi
 
 
 @pytest.mark.timeout(10)
-@pytest.mark.parametrize("finish", ["deadline", "cancel", "stop"])
+@pytest.mark.parametrize("finish,record_delay", [("deadline", 0), ("deadline", 1), ("cancel", 0), ("stop", 0)])
 async def test_blocked_dns_is_bounded_and_cannot_send_late(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, finish: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, finish: str, record_delay: float
 ) -> None:
     entered = threading.Event()
     release = threading.Event()
@@ -180,6 +180,15 @@ async def test_blocked_dns_is_bounded_and_cannot_send_late(
     monkeypatch.setattr("samsarix_chat_engine.webhooks.socket.getaddrinfo", resolve)
     monkeypatch.setattr("samsarix_chat_engine.webhooks._PinnedHTTPSConnection", connect)
     async with _dispatcher(tmp_path, timeout=0.15 if finish == "deadline" else 10) as (dispatcher, store):
+        original_record = store.record_webhook_attempt
+
+        async def record(*args: Any, **kwargs: Any) -> None:
+            # Storage is outside the network-attempt budget. Deliberately make
+            # it slower than the old 0.8-second whole-iteration assertion.
+            await asyncio.sleep(record_delay)
+            await original_record(*args, **kwargs)
+
+        monkeypatch.setattr(store, "record_webhook_attempt", record)
         task = asyncio.create_task(dispatcher.run() if finish == "stop" else dispatcher.process_due_once())
         try:
             await _event(entered)
