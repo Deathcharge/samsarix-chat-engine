@@ -67,6 +67,14 @@ def direct_socket_options() -> dict[str, Any]:
     return {"proxy": None} if "proxy" in inspect.signature(connect).parameters else {}
 
 
+def validate_environment() -> None:
+    # libpq hostaddr/service defaults can redirect even an explicit numeric host.
+    require(
+        not any(os.environ.get(name) for name in ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE", "PGOPTIONS")),
+        "unset_libpq_routing_and_session_overrides",
+    )
+
+
 def memory_sample(pid: int) -> dict[str, int]:
     # smaps_rollup avoids the documented inaccuracy of status VmRSS/VmHWM.
     # PSS and RSS are sampled, not lifetime peaks; shared RSS can be double-counted.
@@ -423,6 +431,7 @@ class World:
                     "connections": member.connections,
                     "fences": member.fences,
                     "frames": dict(member.frames),
+                    "uninterrupted_stream": member.uninterrupted(),
                     "expected_acknowledged_live_versions": len(member.expected_live()),
                     "missing_acknowledged_live_versions": len(member.expected_live() - member.observed.keys()),
                     "duplicate_live_versions": sum(max(0, count - 1) for count in member.observed.values()),
@@ -461,6 +470,12 @@ class Member:
     def complete_stream(self) -> bool:
         return self.expected_live().issubset(self.observed) and all(count == 1 for count in self.observed.values())
 
+    def apply_event(self, event: dict[str, Any]) -> None:
+        message = event["message"]
+        version = 2 if message["deleted_at"] else 1 if message["edited_at"] else 0
+        require(event["type"] == ("message.created", "message.updated", "message.deleted")[version], "wrong_event_type")
+        self.apply(message, live=True)
+
     def apply(self, message: dict[str, Any], *, live: bool) -> None:
         index, version = self.world.check_message(message, self.room, live=live)
         outcome = merge_message(self.state, message, allow_redaction=(index, 2) in self.world.sent)
@@ -482,7 +497,7 @@ class Member:
             kind = event["type"]
             require(not (self.expect_fence and self.world.resumed and kind != "error"), "obsolete_frame_after_resume")
             if kind.startswith("message."):
-                self.apply(event["message"], live=True)
+                self.apply_event(event)
             elif kind == "error":
                 require(self.allow_reconnect, "unexpected_socket_error")
                 self.frames["error_frames"] += 1
@@ -529,7 +544,7 @@ class Member:
                             if event["type"] == "pong":
                                 break
                             if event["type"].startswith("message."):
-                                self.apply(event["message"], live=True)
+                                self.apply_event(event)
                             else:
                                 require(
                                     event["type"]
@@ -655,6 +670,7 @@ async def exercise(world: World, conninfo: str, observer: Any) -> None:
 
 async def run(profile: Profile, conninfo: str) -> dict[str, Any]:
     validate_target(conninfo)
+    validate_environment()
     require(sys.platform == "linux", "requires_linux_procfs_and_sigstop")
     world = World(profile)
     async with await psycopg.AsyncConnection.connect(conninfo, autocommit=True, connect_timeout=5) as observer:
@@ -723,6 +739,7 @@ def main() -> int:
         )
         conninfo = os.environ.get("SAMSARIX_TEST_POSTGRES_URL", "")
         validate_target(conninfo)
+        validate_environment()
         require(sys.platform == "linux", "requires_linux_procfs_and_sigstop")
     except (ValueError, CheckFailed) as exc:
         parser.error(str(exc))

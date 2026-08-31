@@ -21,6 +21,8 @@ The CI workflow calls this tool for `steady`, `count`, `age` and `retained-gap` 
 
 ## Workload contract
 
+Unset `PGHOSTADDR`, `PGSERVICE`, `PGSERVICEFILE` and `PGOPTIONS` before running. The harness rejects these [libpq environment defaults](https://www.postgresql.org/docs/current/libpq-envars.html), which can redirect the numeric host or silently alter the measured sessions. It does not print their values or modify the user's environment.
+
 - Writes enter replica 1; subscribers are split evenly between both replicas and four rooms by default. This measures cross-instance fan-out, not balanced ingress or geographically distributed clients.
 - Scheduled create cycles arrive independently of earlier completion. Twenty percent attempt one edit; ten percent attempt that edit followed by deletion. `--rate` is **create cycles**, not total HTTP requests or fan-out deliveries. Dependent mutations stop if an earlier request is rejected or has an unknown outcome.
 - Late schedule slots and exhausted concurrency are counted and dropped, never accumulated into an unbounded queue or replayed in a catch-up burst. Actual-start delay is measured. Any dropped work makes acceptance fail; it must not disappear into a misleading successful-request latency percentile.
@@ -53,5 +55,33 @@ The harness caps scheduled creates at 20000, subscribers at 128, in-flight cycle
 The first live [run 33422510240](https://github.com/Deathcharge/samsarix-chat-engine/actions/runs/33422510240) passed the ten existing jobs but failed all four new profiles. The harness incorrectly required original content in every retained create/edit event, overlooking the store's intentional deletion scrubbing; 16 subscribers in the two rooms receiving deletions rejected those frames. All 3600 scheduled create cycles started in each profile, but these failed subscriber/recovery results are **not accepted measurements**. The validator now distinguishes scrubbed prior-version live events from normal HTTP content, retains exact event-coverage and final-state checks, and tests redaction/history overlap without restoring deleted bodies. Corrected live results remain required; 59 local harness tests alone do not establish performance.
 
 Loopback WebSocket connections explicitly disable environment proxies on versions that support automatic proxy discovery, without forwarding unsupported options to older supported versions. See the [websockets proxy documentation](https://websockets.readthedocs.io/en/stable/topics/proxies.html).
+
+### First corrected measurements — 2026-08-31
+
+All four profiles in [run 33423357906](https://github.com/Deathcharge/samsarix-chat-engine/actions/runs/33423357906) passed at PR head `4c8ba301708e85b68624a96b2f2561b9cdd1c0e8` (tested merge checkout `3c118eb67267227fba329233d80660036e72e5c4`). Each ran 180 scheduled seconds, 20 create cycles/s, four rooms, eight subscribers/room, 128-byte content, concurrency limit 32 and the documented per-scenario overrides. Every job used its own shared GitHub Ubuntu x86-64 runner with four visible/affinity CPUs, Python 3.14.7 and PostgreSQL 18.4 (Debian). This fixed CI database version is the measured environment, not a claim that it is the latest PostgreSQL patch.
+
+| Profile | Started / offered creates | Accepted creates / edits / deletes | POST p95 / p99, ms | Resume to reconnected, s |
+| --- | ---: | ---: | ---: | ---: |
+| steady | 3600 / 3600 | 3600 / 720 / 360 | 11.49 / 13.15 | not injected |
+| count | 3600 / 3600 | 3590 / 717 / 357 | 13.96 / 40.71 | 0.537 |
+| age | 3600 / 3600 | 3590 / 717 / 357 | 11.78 / 14.06 | 0.614 |
+| retained-gap | 3600 / 3600 | 3589 / 717 / 357 | 12.00 / 14.77 | 0.861 |
+
+POST percentiles include all 3600 responses, including the deliberate lifecycle refusals. Each fault profile recorded exactly 11 expected frozen/archived HTTP rejections, zero unexpected rejections/ambiguous outcomes, 16 stale-owner closes with 1012, and 52 successful connections including reconnects. All profiles had zero scheduling/concurrency drops, 32 converged clients, 32 verified cross-room denials, zero committed creates without acknowledgement, and zero final connection leases. Steady streams had zero missing or duplicate acknowledged live versions; all uninterrupted healthy streams in fault profiles also passed exact coverage. Fault-interrupted streams deliberately miss live versions and recover through history; their aggregate missing-version counters were count 388, age 392 and retained-gap 7732, **not zero-latency deliveries or an exactly-once fault guarantee**.
+
+Steady live delivery p95/p99 was 62.74/65.43 ms on replica 0 and 63.02/66.04 ms on replica 1 (request-start to frame receipt). Start-delay p99 stayed below 2.13 ms in these four runs. Sampled application RSS peaks ranged from 87072 to 91044 KiB and PSS from 64582 to 68510 KiB; PostgreSQL and driver memory are excluded. Final scratch database sizes were approximately 14.65–15.39 MB versus 8.66–8.69 MB initially, with intentionally accumulated message history. Three-minute samples are not resource-growth or leak evidence.
+
+Count and age barriers both observed backlog 107 with a live lease; measured oldest unread age was about 4.03 s. Natural retained-gap recovery waited for the application's real periodic bounded pruning, not just the three-second lease expiry: its pause lasted about 74.69 s, and its eventual barrier observed a pruned gap with an expired lease. The resumption figures above exclude that intentional pause. One-second samples can miss a barrier peak and can exceed the later barrier's backlog after pruning; do not equate their maxima with the precise barrier snapshot.
+
+Original JSON artifact SHA-256 digests (artifact names are `postgres-load-<profile>-33423357906-1`, file `load-report.json`; retention 30 days):
+
+| Profile | SHA-256 |
+| --- | --- |
+| steady | `D9D70DE91C07FAF1B6C59E5744EACAD712B2AE791670B6E1D3DFE99C48D8D966` |
+| count | `D50240B899D8A270B0BF070A5F21642296327AB18B4A768C18A8DCBE6482F81D` |
+| age | `6A3C150736A7539D4C62DD1D66C6DF44AF4E864031B24FF470114EEB4BBDAC0A` |
+| retained-gap | `9A00BDFD4CF55B246FCCFB7DDF880E984CF72B9EE248D3E08F4BB802982207B8` |
+
+These are the first corrected workload results, not the final reviewed-head or post-merge acceptance record. Subsequent validation adds event-type and libpq-environment checks; final CI and installed-package evidence is recorded on PR #41 before merge.
 
 Measured host-specific profiles will not by themselves close kernel packet-loss, database failover, production-sized datasets, long-duration resource-growth, backup/PITR/restore/rollback or deployment-identity gates. The framework-neutral SDK has its own recovery tests; this Python workload is not a substitute for a browser/client-device matrix. Multi-instance production support remains gated by the full [architecture acceptance list](MULTI_INSTANCE_ARCHITECTURE.md).

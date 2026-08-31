@@ -13,7 +13,15 @@ from typing import Any
 import pytest
 
 from scripts.load_metrics import Profile, arrivals, distribution, merge_message, validate_target
-from scripts.load_postgres import CheckFailed, Member, World, content_for, direct_socket_options, main
+from scripts.load_postgres import (
+    CheckFailed,
+    Member,
+    World,
+    content_for,
+    direct_socket_options,
+    main,
+    validate_environment,
+)
 
 
 @pytest.mark.parametrize(
@@ -279,6 +287,23 @@ def test_loopback_socket_disables_proxy_without_breaking_older_websockets(monkey
     assert direct_socket_options() == {"proxy": None}
     monkeypatch.setattr("scripts.load_postgres.connect", legacy)
     assert direct_socket_options() == {}
+
+
+@pytest.mark.parametrize("name", ["PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE", "PGOPTIONS"])
+def test_libpq_defaults_cannot_redirect_the_scratch_target(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    monkeypatch.setenv(name, "private-routing-value")
+    with pytest.raises(CheckFailed, match="unset_libpq_routing_and_session_overrides") as failure:
+        validate_environment()
+    assert "private-routing-value" not in str(failure.value)
+
+
+def test_live_event_type_must_match_the_message_version() -> None:
+    world = World(Profile())
+    world.sent[0, 0] = 1
+    member = Member(world, 0, "load-0", "reader")
+    with pytest.raises(CheckFailed, match="wrong_event_type"):
+        member.apply_event({"type": "message.updated", "message": message()})
+    assert not member.observed
 
 
 @pytest.mark.parametrize(
