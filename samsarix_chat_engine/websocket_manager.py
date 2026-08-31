@@ -49,6 +49,8 @@ class ConnectionManager:
         """Register an already-accepted socket, returning false at capacity."""
 
         async with self._lock:
+            if websocket in self._metadata:
+                return False
             # Check under the same lock that fencing uses to detach sockets.
             if admission_check is not None and not admission_check():
                 return False
@@ -81,38 +83,38 @@ class ConnectionManager:
         """Remove a socket and return its room/user metadata once."""
 
         async with self._lock:
-            metadata = self._metadata.pop(websocket, None)
-            if metadata is None:
-                return None
-            room_id = metadata.room_id
-            room_connections = self._rooms.get(room_id)
-            if room_connections is not None:
-                room_connections.discard(websocket)
-                if not room_connections:
-                    self._rooms.pop(room_id, None)
-            return metadata.room_id, metadata.username
+            metadata = self._detach_connection(websocket)
+        return (metadata.room_id, metadata.username) if metadata is not None else None
+
+    def _detach_connection(self, websocket: WebSocket) -> ConnectionMetadata | None:
+        """Remove one socket while the caller holds the manager lock."""
+
+        metadata = self._metadata.pop(websocket, None)
+        if metadata is None:
+            return None
+        room_connections = self._rooms.get(metadata.room_id)
+        if room_connections is not None:
+            room_connections.discard(websocket)
+            if not room_connections:
+                self._rooms.pop(metadata.room_id, None)
+        return metadata
 
     async def send(self, websocket: WebSocket, event: dict[str, Any]) -> bool:
-        """Send one event with a timeout and evict a failed connection."""
+        """Send to a registered socket; detached/unknown sockets return false."""
 
         async with self._lock:
             metadata = self._metadata.get(websocket)
-        operation_lock = metadata.operation_lock if metadata is not None else asyncio.Lock()
-        return await self._send_with_lock(websocket, event, operation_lock)
+        if metadata is None:
+            return False
+        return await self._send_with_lock(websocket, event, metadata.operation_lock)
 
     async def close(self, websocket: WebSocket, *, code: int, reason: str) -> None:
-        """Serialize a close with pending sends and forget the connection."""
+        """Detach before closing; only an already-started send may finish first."""
 
         async with self._lock:
-            metadata = self._metadata.get(websocket)
-        operation_lock = metadata.operation_lock if metadata is not None else asyncio.Lock()
-        try:
-            async with operation_lock:
-                await asyncio.wait_for(websocket.close(code=code, reason=reason), timeout=self.send_timeout)
-        except Exception:
-            logger.debug("WebSocket was already closed")
-        finally:
-            await self.unregister(websocket)
+            metadata = self._detach_connection(websocket)
+        if metadata is not None:
+            await self._close_with_lock(websocket, metadata.operation_lock, code=code, reason=reason)
 
     async def broadcast(
         self,
@@ -222,18 +224,29 @@ class ConnectionManager:
     ) -> bool:
         try:
             async with operation_lock:
+                async with self._lock:
+                    metadata = self._metadata.get(websocket)
+                    if metadata is None or metadata.operation_lock is not operation_lock:
+                        return False
                 await asyncio.wait_for(websocket.send_json(event), timeout=self.send_timeout)
             return True
         except Exception as exc:
             logger.info("Dropping unavailable WebSocket connection: %s", type(exc).__name__)
-            await self.unregister(websocket)
+            await self.close(websocket, code=1013, reason="Client unavailable")
             return False
 
-    async def _close_with_lock(self, websocket: WebSocket, operation_lock: asyncio.Lock) -> None:
+    async def _close_with_lock(
+        self,
+        websocket: WebSocket,
+        operation_lock: asyncio.Lock,
+        *,
+        code: int = 1012,
+        reason: str = "Service restarting",
+    ) -> None:
         async with operation_lock:
             try:
                 await asyncio.wait_for(
-                    websocket.close(code=1012, reason="Service restarting"),
+                    websocket.close(code=code, reason=reason),
                     timeout=self.send_timeout,
                 )
             except Exception:

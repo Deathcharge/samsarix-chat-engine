@@ -24,9 +24,12 @@ import pytest
 pytest.importorskip("psycopg")
 websockets = pytest.importorskip("websockets.asyncio.client")
 
+from samsarix_chat_engine import AccessTokenService  # noqa: E402
+
 pytestmark = pytest.mark.postgres
 
 _OPERATOR_KEY = "postgres-process-operator-key-1234"
+_SIGNING_SECRET = "postgres-process-test-signing-secret-at-least-32-bytes"
 
 
 def _unused_port() -> int:
@@ -60,7 +63,13 @@ class LoggedServer(subprocess.Popen[str]):
 
 
 def _start_server(
-    conninfo: str, instance_id: str, port: int, *, pool_timeout: float = 10, operation_timeout: float = 10
+    conninfo: str,
+    instance_id: str,
+    port: int,
+    *,
+    pool_timeout: float = 10,
+    operation_timeout: float = 10,
+    signing_secret: str | None = None,
 ) -> LoggedServer:
     environment = {
         key: value for key, value in os.environ.items() if not key.startswith(("SAMSARIX_CHAT_", "HELIX_CHAT_"))
@@ -81,6 +90,8 @@ def _start_server(
             "SAMSARIX_CHAT_MAX_CONNECTIONS_PER_ROOM": "8",
         }
     )
+    if signing_secret is not None:
+        environment["SAMSARIX_CHAT_TOKEN_SIGNING_SECRET"] = signing_secret
     return LoggedServer(
         [
             sys.executable,
@@ -410,3 +421,201 @@ def test_child_output_is_drained_beyond_pipe_capacity_and_remains_bounded() -> N
     output = _process_output(process)
     assert output.endswith("output-complete\n")
     assert len(output) <= 4_000
+
+
+@pytest.fixture
+async def moderation_replicas(clean_postgres_database: str) -> AsyncIterator[tuple[httpx.AsyncClient, int, int]]:
+    processes: list[LoggedServer] = []
+    try:
+        async with httpx.AsyncClient(timeout=5, trust_env=False) as client:
+            first_port = _unused_port()
+            first = _start_server(clean_postgres_database, "moderation-a", first_port, signing_secret=_SIGNING_SECRET)
+            processes.append(first)
+            await _wait_ready(client, f"http://127.0.0.1:{first_port}", first)
+            second_port = _unused_port()
+            second = _start_server(clean_postgres_database, "moderation-b", second_port, signing_secret=_SIGNING_SECRET)
+            processes.append(second)
+            await _wait_ready(client, f"http://127.0.0.1:{second_port}", second)
+            for room_id in ("moderated", "unrelated"):
+                created = await client.post(
+                    f"http://127.0.0.1:{first_port}/v1/rooms",
+                    headers={"X-API-Key": _OPERATOR_KEY},
+                    json={"id": room_id, "name": room_id},
+                )
+                assert created.status_code == 201
+            yield client, first_port, second_port
+    finally:
+        for process in reversed(processes):
+            await asyncio.to_thread(_stop_server, process)
+
+
+def _member_token(subject: str, room_id: str = "moderated") -> str:
+    return AccessTokenService(_SIGNING_SECRET).issue(
+        subject, rooms=[room_id], permissions=["room:read", "room:write"], expires_in_seconds=300
+    )
+
+
+@asynccontextmanager
+async def _member_socket(
+    port: int, subject: str, room_id: str = "moderated"
+) -> AsyncIterator[tuple[Any, dict[str, Any]]]:
+    async with websockets.connect(
+        f"ws://127.0.0.1:{port}/v1/rooms/{room_id}/ws",
+        additional_headers={"Authorization": f"Bearer {_member_token(subject, room_id)}"},
+        open_timeout=5,
+        close_timeout=1,
+    ) as connection:
+        ready = json.loads(await asyncio.wait_for(connection.recv(), 5))
+        assert ready["type"] == "ready"
+        assert ready["username"] == subject
+        history = json.loads(await asyncio.wait_for(connection.recv(), 5))
+        assert history["type"] == "history"
+        yield connection, history
+
+
+async def _wait_connection_count(client: httpx.AsyncClient, port: int, expected: int) -> None:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        response = await client.get(f"http://127.0.0.1:{port}/v1/stats", headers={"X-API-Key": _OPERATOR_KEY})
+        response.raise_for_status()
+        if response.json() == {"active_connections": expected}:
+            return
+        await asyncio.sleep(0.05)
+    pytest.fail(f"global connection count did not converge to {expected}")
+
+
+async def _assert_member_reconnect_denied(port: int, *, code: str, close_code: int) -> None:
+    async with websockets.connect(
+        f"ws://127.0.0.1:{port}/v1/rooms/moderated/ws",
+        additional_headers={"Authorization": f"Bearer {_member_token('Alice')}"},
+        open_timeout=5,
+        close_timeout=1,
+    ) as connection:
+        rejection = json.loads(await asyncio.wait_for(connection.recv(), 5))
+        assert rejection["type"] == "error"
+        assert rejection["code"] == code
+        await asyncio.wait_for(connection.wait_closed(), 5)
+        assert connection.close_code == close_code
+
+
+@pytest.mark.asyncio
+async def test_cross_process_freeze_mute_ban_and_unban_preserve_room_isolation(
+    moderation_replicas: tuple[httpx.AsyncClient, int, int],
+) -> None:
+    client, first_port, second_port = moderation_replicas
+    first = f"http://127.0.0.1:{first_port}/v1/rooms/moderated"
+    second = f"http://127.0.0.1:{second_port}/v1/rooms/moderated"
+    operator = {"X-API-Key": _OPERATOR_KEY}
+    alice_headers = {"Authorization": f"Bearer {_member_token('Alice')}"}
+    bob_headers = {"Authorization": f"Bearer {_member_token('Bob')}"}
+    async with (
+        _member_socket(first_port, "Alice") as (alice_a, _),
+        _member_socket(second_port, "Alice") as (alice_b, _),
+        _member_socket(second_port, "Bob") as (bob, _),
+        _member_socket(first_port, "Alice", "unrelated") as (unrelated, _),
+    ):
+        assert (await client.patch(first, headers=bob_headers, json={"frozen": True})).status_code == 403
+        assert (await client.patch(first, headers=operator, json={"frozen": True})).status_code == 200
+        for connection in (alice_a, alice_b, bob):
+            assert (await _receive_type(connection, "room.frozen"))["room"]["frozen_at"] is not None
+        blocked = await client.post(f"{second}/messages", headers=bob_headers, json={"content": "blocked by freeze"})
+        assert blocked.status_code == 409 and blocked.json()["error"]["code"] == "room_frozen"
+        await bob.send(json.dumps({"type": "message", "content": "blocked socket write"}))
+        assert (await _receive_type(bob, "error"))["code"] == "room_frozen"
+        announcement = await client.post(
+            f"{first}/messages", headers=operator, json={"sender": "operator", "content": "announcement"}
+        )
+        assert announcement.status_code == 201
+        for connection in (alice_a, alice_b, bob):
+            assert (await _receive_type(connection, "message.created"))["message"]["id"] == announcement.json()["id"]
+        assert (await client.patch(second, headers=operator, json={"frozen": False})).status_code == 200
+        for connection in (alice_a, alice_b, bob):
+            await _receive_type(connection, "room.unfrozen")
+
+        moderation = f"{first}/members/Alice/moderation"
+        assert (
+            await client.patch(moderation, headers=bob_headers, json={"banned_for_seconds": 300})
+        ).status_code == 403
+        assert (await client.patch(moderation, headers=operator, json={"muted_for_seconds": 300})).status_code == 200
+        muted = await client.post(f"{second}/messages", headers=alice_headers, json={"content": "blocked by mute"})
+        assert muted.status_code == 403 and muted.json()["error"]["code"] == "room_muted"
+        assert (await client.get(f"{second}/messages", headers=alice_headers)).status_code == 200
+        await alice_b.send(json.dumps({"type": "message", "content": "muted socket write"}))
+        assert (await _receive_type(alice_b, "error"))["code"] == "room_muted"
+        assert (
+            await client.patch(f"{second}/members/Alice/moderation", headers=operator, json={"muted_for_seconds": 0})
+        ).status_code == 200
+        resumed = await client.post(f"{second}/messages", headers=alice_headers, json={"content": "after unmute"})
+        assert resumed.status_code == 201
+        for connection in (alice_a, alice_b, bob):
+            assert (await _receive_type(connection, "message.created"))["message"]["id"] == resumed.json()["id"]
+
+        assert (await client.patch(moderation, headers=operator, json={"banned_for_seconds": 300})).status_code == 200
+        for connection in (alice_a, alice_b):
+            assert (await _receive_type(connection, "member.banned"))["subject"] == "Alice"
+            await asyncio.wait_for(connection.wait_closed(), 5)
+            assert connection.close_code == 4403
+        for port in (first_port, second_port):
+            await _wait_connection_count(client, port, 2)
+            await _assert_member_reconnect_denied(port, code="room_banned", close_code=4403)
+        denied = await client.get(f"{second}/messages", headers=alice_headers)
+        assert denied.status_code == 403 and denied.json()["error"]["code"] == "room_banned"
+        departures = [await _receive_type(bob, "presence.left", username="Alice") for _ in range(2)]
+        assert sorted(event["active_connections"] for event in departures) == [1, 2]
+        # An identically named subject in another room must receive neither moderation nor room messages.
+        await unrelated.send(json.dumps({"type": "ping"}))
+        assert json.loads(await asyncio.wait_for(unrelated.recv(), 5)) == {"type": "pong"}
+        await unrelated.send(json.dumps({"type": "message", "content": "other room remains writable"}))
+        assert (await _receive_type(unrelated, "message.created"))["message"][
+            "content"
+        ] == "other room remains writable"
+        await bob.send(json.dumps({"type": "ping"}))
+        assert json.loads(await asyncio.wait_for(bob.recv(), 5)) == {"type": "pong"}
+        assert (
+            await client.patch(f"{second}/members/Alice/moderation", headers=operator, json={"banned_for_seconds": 0})
+        ).status_code == 200
+        async with _member_socket(first_port, "Alice") as (_, history):
+            assert {item["id"] for item in history["items"]} == {announcement.json()["id"], resumed.json()["id"]}
+
+
+@pytest.mark.asyncio
+async def test_cross_process_archive_closes_both_replicas_and_reopen_restores_history(
+    moderation_replicas: tuple[httpx.AsyncClient, int, int],
+) -> None:
+    client, first_port, second_port = moderation_replicas
+    first = f"http://127.0.0.1:{first_port}/v1/rooms/moderated"
+    second = f"http://127.0.0.1:{second_port}/v1/rooms/moderated"
+    operator = {"X-API-Key": _OPERATOR_KEY}
+    member = {"Authorization": f"Bearer {_member_token('Alice')}"}
+    async with (
+        _member_socket(first_port, "Alice") as (alice, _),
+        _member_socket(second_port, "Bob") as (bob, _),
+        _member_socket(second_port, "Alice", "unrelated") as (unrelated, _),
+    ):
+        saved = await client.post(f"{first}/messages", headers=member, json={"content": "retained across archive"})
+        assert saved.status_code == 201
+        for connection in (alice, bob):
+            assert (await _receive_type(connection, "message.created"))["message"]["id"] == saved.json()["id"]
+        assert (await client.patch(second, headers=operator, json={"archived": True})).status_code == 200
+        for connection in (alice, bob):
+            archived = await _receive_type(connection, "room.archived")
+            assert archived["room"]["archived_at"] is not None
+            await asyncio.wait_for(connection.wait_closed(), 5)
+            assert connection.close_code == 4409
+        for port in (first_port, second_port):
+            await _wait_connection_count(client, port, 1)
+            await _assert_member_reconnect_denied(port, code="room_archived", close_code=4409)
+        blocked = await client.post(f"{first}/messages", headers=member, json={"content": "must not append"})
+        assert blocked.status_code == 409 and blocked.json()["error"]["code"] == "room_archived"
+        assert (await client.get(f"{second}/messages", headers=member)).json()["items"][0]["id"] == saved.json()["id"]
+        await unrelated.send(json.dumps({"type": "ping"}))
+        assert json.loads(await asyncio.wait_for(unrelated.recv(), 5)) == {"type": "pong"}
+        assert (await client.patch(first, headers=operator, json={"archived": False})).status_code == 200
+        async with (
+            _member_socket(first_port, "Alice") as (reopened_a, history_a),
+            _member_socket(second_port, "Bob") as (reopened_b, history_b),
+        ):
+            assert history_a["items"] == history_b["items"] == [saved.json()]
+            await reopened_a.send(json.dumps({"type": "message", "content": "after reopen"}))
+            message = await _receive_type(reopened_a, "message.created")
+            assert (await _receive_type(reopened_b, "message.created"))["message"]["id"] == message["message"]["id"]

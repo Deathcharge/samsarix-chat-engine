@@ -82,6 +82,7 @@ async def test_failed_send_evicts_connection_and_unregister_is_idempotent() -> N
 
     assert await manager.send(websocket, {"type": "test"}) is False
     assert manager.active_connections == 0
+    assert broken.closed == [(1013, "Client unavailable")]
     assert await manager.unregister(websocket) is None
 
 
@@ -193,3 +194,83 @@ async def test_close_member_targets_subject_without_disrupting_room() -> None:
     assert await manager.close_member("room", "subject-2", {"type": "member.banned"}) == 1
     assert manager.active_connections == 0
     assert manager.room_connections("room") == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["room", "member", "all", "single"])
+async def test_detached_socket_rejects_sends_and_duplicate_close(operation: str) -> None:
+    manager = ConnectionManager(max_connections=1, max_per_room=1, send_timeout=1)
+    close_started = asyncio.Event()
+    finish_close = asyncio.Event()
+
+    class ClosingSocket(FakeWebSocket):
+        async def close(self, *, code: int, reason: str) -> None:
+            self.closed.append((code, reason))
+            close_started.set()
+            await finish_close.wait()
+
+    target = ClosingSocket()
+    websocket = as_websocket(target)
+    assert await manager.register(websocket, "room", "A", "subject")
+    if operation == "room":
+        closing = asyncio.create_task(manager.close_room("room", {"type": "room.archived"}))
+    elif operation == "member":
+        closing = asyncio.create_task(manager.close_member("room", "subject", {"type": "member.banned"}))
+    elif operation == "all":
+        closing = asyncio.create_task(manager.close_all())
+    else:
+        closing = asyncio.create_task(manager.close(websocket, code=1012, reason="Storage unavailable"))
+    try:
+        await asyncio.wait_for(close_started.wait(), 1)
+        assert manager.active_connections == 0
+        assert not await manager.send(websocket, {"type": "must.not.send"})
+        await asyncio.wait_for(manager.close(websocket, code=1000, reason="duplicate"), 0.2)
+        assert len(target.closed) == 1
+        assert not await manager.activate(websocket)
+        assert all(event["type"] != "must.not.send" for event in target.sent)
+    finally:
+        finish_close.set()
+        await asyncio.wait_for(closing, 1)
+
+
+@pytest.mark.asyncio
+async def test_queued_broadcast_snapshot_is_discarded_after_room_detaches() -> None:
+    manager = ConnectionManager(max_connections=1, max_per_room=1, send_timeout=1)
+    target = FakeWebSocket()
+    websocket = as_websocket(target)
+    await manager.register(websocket, "room", "A")
+    operation_lock = manager._metadata[websocket].operation_lock
+    await operation_lock.acquire()
+    broadcast = asyncio.create_task(manager.broadcast("room", {"type": "message.created"}))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    close = asyncio.create_task(manager.close_room("room", {"type": "room.archived"}))
+    try:
+        await asyncio.sleep(0)
+        assert manager.active_connections == 0
+        operation_lock.release()
+        await asyncio.wait_for(asyncio.gather(broadcast, close), 1)
+        assert target.sent == [{"type": "room.archived"}]
+        assert target.closed == [(4409, "Room archived")]
+    finally:
+        if operation_lock.locked():
+            operation_lock.release()
+        for task in (broadcast, close):
+            task.cancel()
+        await asyncio.gather(broadcast, close, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_unknown_sockets_are_inert_and_duplicate_registration_preserves_lock() -> None:
+    manager = ConnectionManager(max_connections=2, max_per_room=2, send_timeout=0.1)
+    target = FakeWebSocket()
+    websocket = as_websocket(target)
+    assert not await manager.send(websocket, {"type": "not.registered"})
+    await manager.close(websocket, code=1000, reason="not registered")
+    assert target.sent == target.closed == []
+    assert await manager.register(websocket, "room", "A")
+    metadata = manager._metadata[websocket]
+    assert not await manager.register(websocket, "other", "B")
+    assert manager._metadata[websocket] is metadata
+    assert manager.room_connections("room") == 1
+    assert manager.room_connections("other") == 0
