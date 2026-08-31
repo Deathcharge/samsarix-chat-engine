@@ -4,8 +4,9 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
-from httpx import Response
 
 from scripts.postgres_restore_probe import (
     CONFIRMATION,
@@ -90,7 +91,7 @@ def test_rehearsal_rejects_libpq_environment_routing_without_echoing_values() ->
 
 def test_request_failure_never_echoes_response_content() -> None:
     secret = "private message and credential"
-    response = Response(500, text=secret)
+    response = SimpleNamespace(status_code=500, json=lambda: {"private": secret})
     with pytest.raises(RuntimeError) as caught:
         _expect("restore read", response, 200)
     assert "HTTP 500" in str(caught.value)
