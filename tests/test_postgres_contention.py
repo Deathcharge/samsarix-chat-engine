@@ -351,7 +351,7 @@ async def test_process_room_capacity(clean_postgres_database: str) -> None:
         for port in replicas.ports:
             response = await replicas.client.get(f"http://127.0.0.1:{port}/v1/rooms", headers=_OPERATOR)
             assert response.status_code == 200
-            assert {room["id"] for room in response.json()["items"]} == expected
+            assert {room["id"] for room in response.json()} == expected
 
 
 async def _rate_window(conninfo: str) -> int:
@@ -409,3 +409,76 @@ async def test_process_shared_subject_http_rate_limit(clean_postgres_database: s
             await connection.send(json.dumps({"type": "message", "content": "independent websocket budget"}))
             event = await _receive_type(connection, "message.created")
             assert event["message"]["content"] == "independent websocket budget"
+
+
+async def _send_burst(connection: Any, commands: list[dict[str, Any]], error_code: str) -> int:
+    """Ping is a receive-loop barrier, not an acknowledgement of relay delivery."""
+    for command in commands:
+        await connection.send(json.dumps(command))
+    await connection.send(json.dumps({"type": "ping"}))
+    errors = 0
+    deadline = time.monotonic() + 10
+    for _ in range(64):
+        event = json.loads(await asyncio.wait_for(connection.recv(), max(0.01, deadline - time.monotonic())))
+        if event["type"] == "pong":
+            return errors
+        if event["type"] == "error":
+            assert event["code"] == error_code, event
+            errors += 1
+        else:
+            assert event["type"].startswith(("presence.", "typing.", "message.")), event
+    pytest.fail("burst completion pong not reached within bounded frame count")
+
+
+@pytest.mark.parametrize("typing", [False, True], ids=["websocket-message", "typing"])
+async def test_process_shared_subject_websocket_rate_limit(clean_postgres_database: str, typing: bool) -> None:
+    async with _replicas(clean_postgres_database, MESSAGES_PER_MINUTE="3", TYPING_EVENTS_PER_MINUTE="3") as replicas:
+        for room_id in ("shared", "other"):
+            await _create_room(replicas, room_id)
+        async with (
+            _member_socket(replicas.ports[0], "Alice", "shared") as (first, _),
+            _member_socket(replicas.ports[1], "Alice", "other") as (second, _),
+        ):
+            await asyncio.gather(_activate(first), _activate(second))
+
+            def command(label: str) -> dict[str, Any]:
+                return {"type": "typing", "active": True} if typing else {"type": "message", "content": label}
+
+            error_code = "typing_rate_limit_exceeded" if typing else "rate_limit_exceeded"
+            window = await _start_rate_window(clean_postgres_database)
+            assert await _send_burst(first, [command("seed")], error_code) == 0
+            rejected = await _contend(
+                replicas,
+                [
+                    _send_burst(connection, [command(f"burst-{index}-{n}") for n in range(4)], error_code)
+                    for index, connection in enumerate((first, second))
+                ],
+                rate_scope="typing" if typing else "message",
+            )
+            assert await _rate_window(clean_postgres_database) == window, "burst crossed a database minute boundary"
+            assert sum(rejected) == 6
+            async with await psycopg.AsyncConnection.connect(clean_postgres_database, autocommit=True) as connection:
+                cursor = await connection.execute(
+                    "SELECT event_count FROM public.samsarix_rate_buckets WHERE scope = %s",
+                    ("typing" if typing else "message",),
+                )
+                assert await cursor.fetchall() == [(3,)]
+            if not typing:
+                messages = []
+                for index, room_id in enumerate(("shared", "other")):
+                    response = await replicas.client.get(
+                        f"{replicas.room(index, room_id)}/messages", headers=_member("Alice", room_id)
+                    )
+                    assert response.status_code == 200
+                    messages.extend(response.json()["items"])
+                assert len(messages) == 3
+                assert sum(message["content"] == "seed" for message in messages) == 1
+                assert len({message["content"] for message in messages}) == 3
+            async with _member_socket(replicas.ports[1], "Bob", "shared") as (bob, _):
+                await _activate(bob)
+                assert await _send_burst(bob, [command("independent subject")], error_code) == 0
+            # HTTP writes have a distinct transport key even for the exhausted subject.
+            response = await replicas.client.post(
+                f"{replicas.room(1)}/messages", headers=_member("Alice"), json={"content": "independent HTTP budget"}
+            )
+            assert response.status_code == 201
