@@ -56,7 +56,8 @@ async def test_current_schema_startup_only_inspects_without_ddl_or_row_mutation(
     await service.open()
     assert service._opened
     assert statements
-    assert all(sql.startswith(("SELECT ", "SET LOCAL ")) for sql, _parameters in statements)
+    assert statements[0][0] == "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+    assert all(sql.startswith(("SELECT ", "SET LOCAL ", "SET TRANSACTION ")) for sql, _parameters in statements)
     assert not any("FOR UPDATE" in sql for sql, _parameters in statements)
     service._pool.close.assert_not_awaited()
 
@@ -67,7 +68,7 @@ async def test_future_schema_rejection_does_not_attempt_ddl():
     with pytest.raises(UnsupportedPostgresSchemaError, match="newer"):
         await service.open()
     assert not service._opened
-    assert all(sql.startswith(("SELECT ", "SET LOCAL ")) for sql, _parameters in statements)
+    assert all(sql.startswith(("SELECT ", "SET LOCAL ", "SET TRANSACTION ")) for sql, _parameters in statements)
     service._pool.close.assert_awaited_once()
 
 

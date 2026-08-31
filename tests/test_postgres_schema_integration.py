@@ -111,6 +111,21 @@ async def test_current_schema_restarts_preserve_metadata_and_retention_rows(clea
 
 
 @pytest.mark.asyncio
+async def test_inspection_isolation_override_does_not_change_later_transactions(clean_postgres_database):
+    await _initialize(clean_postgres_database)
+    conninfo = psycopg.conninfo.make_conninfo(
+        clean_postgres_database,
+        options="-c default_transaction_isolation=serializable -c default_transaction_read_only=on",
+    )
+    async with PostgresFoundation(conninfo) as service:
+        async with service.transaction() as connection:
+            isolation = await connection.execute("SHOW transaction_isolation")
+            assert await isolation.fetchone() == ("serializable",)
+            readonly = await connection.execute("SHOW transaction_read_only")
+            assert await readonly.fetchone() == ("on",)
+
+
+@pytest.mark.asyncio
 async def test_blocked_older_schema_migration_rolls_back_then_can_be_retried(clean_postgres_database):
     await _initialize(clean_postgres_database)
     async with await psycopg.AsyncConnection.connect(clean_postgres_database) as connection:

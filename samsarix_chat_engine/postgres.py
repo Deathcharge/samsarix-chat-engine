@@ -794,6 +794,9 @@ class PostgresFoundation:
     async def _initialize_schema(self) -> None:
         async with self._timed_connection() as connection:
             async with connection.transaction():
+                # A transaction-wide snapshot taken before the advisory-lock
+                # wait could hide a version committed by the previous holder.
+                await connection.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
                 await connection.execute("SET LOCAL search_path = pg_catalog, public")
                 await connection.execute("SELECT pg_advisory_xact_lock(%s)", (POSTGRES_MIGRATION_LOCK_ID,))
                 cursor = await connection.execute("SELECT to_regclass('public.samsarix_schema_metadata')")
