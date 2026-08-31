@@ -20,6 +20,7 @@ from samsarix_chat_engine.postgres import (  # noqa: E402
     InvalidRealtimeEventError,
     PostgresFoundation,
     PostgresFoundationError,
+    PostgresUnavailableError,
     UnsupportedPostgresSchemaError,
     _validate_event,
 )
@@ -80,6 +81,26 @@ async def foundation(clean_postgres_database: str) -> AsyncIterator[PostgresFoun
     await service.open()
     try:
         yield service
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_operation_deadline_discards_stalled_session_and_pool_recovers(clean_postgres_database: str) -> None:
+    service = PostgresFoundation(clean_postgres_database, min_pool_size=1, max_pool_size=1)
+    await service.open()
+    # Keep schema initialization independent of the accelerated fault deadline.
+    service._operation_timeout_seconds = 0.2
+    stalled_connection = None
+    try:
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(PostgresUnavailableError):
+            async with service.transaction() as connection:
+                stalled_connection = connection
+                await connection.execute("SELECT pg_sleep(2)")
+        assert asyncio.get_running_loop().time() - started < 1.5
+        assert stalled_connection is not None and stalled_connection.closed
+        assert await service.schema_version() == POSTGRES_SCHEMA_VERSION
     finally:
         await service.close()
 

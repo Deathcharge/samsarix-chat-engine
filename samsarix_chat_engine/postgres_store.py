@@ -104,6 +104,7 @@ class PostgresChatStore:
         min_pool_size: int = 1,
         max_pool_size: int = 5,
         pool_timeout_seconds: float = 10.0,
+        operation_timeout_seconds: float = 10.0,
     ) -> None:
         if max_rooms < 1:
             raise ValueError("PostgreSQL room capacity must be positive")
@@ -138,6 +139,7 @@ class PostgresChatStore:
             min_pool_size=min_pool_size,
             max_pool_size=max_pool_size,
             pool_timeout_seconds=pool_timeout_seconds,
+            operation_timeout_seconds=operation_timeout_seconds,
         )
 
     async def initialize(self) -> None:

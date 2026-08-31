@@ -224,6 +224,7 @@ class Settings:
     postgres_min_pool_size: int = 1
     postgres_max_pool_size: int = 10
     postgres_pool_timeout_seconds: float = 10.0
+    postgres_operation_timeout_seconds: float = 10.0
     postgres_lease_seconds: int = 30
     postgres_relay_poll_seconds: float = 0.25
     postgres_maintenance_interval_seconds: float = 1.0
@@ -271,6 +272,7 @@ class Settings:
                 self.postgres_min_pool_size != 1
                 or self.postgres_max_pool_size != 10
                 or self.postgres_pool_timeout_seconds != 10.0
+                or self.postgres_operation_timeout_seconds != 10.0
                 or self.postgres_lease_seconds != 30
                 or self.postgres_relay_poll_seconds != 0.25
                 or self.postgres_maintenance_interval_seconds != 1.0
@@ -373,6 +375,8 @@ class Settings:
             raise ConfigurationError("webhook_timeout_seconds must be between 0.1 and 30")
         if not 0.1 <= self.postgres_pool_timeout_seconds <= 60:
             raise ConfigurationError("postgres_pool_timeout_seconds must be between 0.1 and 60")
+        if not 0.1 <= self.postgres_operation_timeout_seconds <= 300:
+            raise ConfigurationError("postgres_operation_timeout_seconds must be between 0.1 and 300")
         if not 0.01 <= self.postgres_relay_poll_seconds <= 5:
             raise ConfigurationError("postgres_relay_poll_seconds must be between 0.01 and 5")
         if not 0.1 <= self.postgres_maintenance_interval_seconds <= 60:
@@ -471,6 +475,9 @@ class Settings:
             postgres_min_pool_size=_read_int("POSTGRES_MIN_POOL_SIZE", 1, minimum=0, maximum=100),
             postgres_max_pool_size=_read_int("POSTGRES_MAX_POOL_SIZE", 10, minimum=1, maximum=100),
             postgres_pool_timeout_seconds=_read_float("POSTGRES_POOL_TIMEOUT", 10.0, minimum=0.1, maximum=60),
+            postgres_operation_timeout_seconds=_read_float(
+                "POSTGRES_OPERATION_TIMEOUT", 10.0, minimum=0.1, maximum=300
+            ),
             postgres_lease_seconds=_read_int("POSTGRES_LEASE_SECONDS", 30, minimum=3, maximum=300),
             postgres_relay_poll_seconds=_read_float("POSTGRES_RELAY_POLL", 0.25, minimum=0.01, maximum=5),
             postgres_maintenance_interval_seconds=_read_float(

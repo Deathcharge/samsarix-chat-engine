@@ -121,6 +121,7 @@ def test_postgres_configuration_is_explicit_tls_guarded_and_secret_safe(
     monkeypatch.setenv("SAMSARIX_CHAT_POSTGRES_URL_FILE", str(postgres_file))
     monkeypatch.setenv("SAMSARIX_CHAT_POSTGRES_INSTANCE_ID", "chat-a")
     monkeypatch.setenv("SAMSARIX_CHAT_POSTGRES_MAX_POOL_SIZE", "12")
+    monkeypatch.setenv("SAMSARIX_CHAT_POSTGRES_OPERATION_TIMEOUT", "4.5")
 
     settings = Settings.from_env()
 
@@ -128,6 +129,7 @@ def test_postgres_configuration_is_explicit_tls_guarded_and_secret_safe(
     assert settings.postgres_url == postgres_secret
     assert settings.postgres_instance_id == "chat-a"
     assert settings.postgres_max_pool_size == 12
+    assert settings.postgres_operation_timeout_seconds == 4.5
     assert postgres_secret not in repr(settings)
     with pytest.raises(ConfigurationError, match="--database"):
         settings.with_database_path(tmp_path / "not-used.db")
@@ -144,6 +146,16 @@ def test_postgres_configuration_is_explicit_tls_guarded_and_secret_safe(
         postgres_instance_id="chat-a",
     )
     assert remote.storage_backend == "postgres"
+
+
+@pytest.mark.parametrize("value", ["0", "301", "nan", "inf", "slow"])
+def test_postgres_operation_timeout_is_bounded(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("SAMSARIX_CHAT_STORAGE", "postgres")
+    monkeypatch.setenv("SAMSARIX_CHAT_POSTGRES_URL", "postgresql://localhost/samsarix")
+    monkeypatch.setenv("SAMSARIX_CHAT_POSTGRES_INSTANCE_ID", "chat-a")
+    monkeypatch.setenv("SAMSARIX_CHAT_POSTGRES_OPERATION_TIMEOUT", value)
+    with pytest.raises(ConfigurationError, match="POSTGRES_OPERATION_TIMEOUT"):
+        Settings.from_env()
 
 
 def test_postgres_configuration_rejects_ambiguous_or_incomplete_storage(
