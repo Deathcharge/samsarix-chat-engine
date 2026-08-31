@@ -90,6 +90,11 @@ async def test_operation_deadline_discards_stalled_session_and_pool_recovers(cle
     service = PostgresFoundation(clean_postgres_database, min_pool_size=1, max_pool_size=1)
     await service.open()
     # Keep schema initialization independent of the accelerated fault deadline.
+    async with service.transaction() as connection:
+        statement = await connection.execute("SHOW statement_timeout")
+        assert await statement.fetchone() == ("10s",)
+        idle = await connection.execute("SHOW idle_in_transaction_session_timeout")
+        assert await idle.fetchone() == ("10s",)
     service._operation_timeout_seconds = 0.2
     stalled_connection = None
     try:

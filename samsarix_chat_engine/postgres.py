@@ -21,6 +21,7 @@ from uuid import UUID
 
 import psycopg
 from psycopg import AsyncConnection
+from psycopg.conninfo import conninfo_to_dict
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
@@ -109,9 +110,17 @@ class PostgresFoundation:
             raise ValueError("PostgreSQL pool timeout must be positive")
         if not math.isfinite(operation_timeout_seconds) or not 0.1 <= operation_timeout_seconds <= 300:
             raise ValueError("PostgreSQL operation timeout must be between 0.1 and 300 seconds")
+        try:
+            existing_options = conninfo_to_dict(conninfo).get("options", "")
+        except psycopg.ProgrammingError:
+            raise ValueError("invalid PostgreSQL connection information") from None
+        timeout_ms = math.ceil(operation_timeout_seconds * 1_000)
+        options = (
+            f"{existing_options} -c statement_timeout={timeout_ms} -c idle_in_transaction_session_timeout={timeout_ms}"
+        ).strip()
         self._pool = AsyncConnectionPool(
             conninfo=conninfo,
-            kwargs={"connect_timeout": max(2, math.ceil(pool_timeout_seconds))},
+            kwargs={"connect_timeout": max(2, math.ceil(pool_timeout_seconds)), "options": options},
             min_size=min_pool_size,
             max_size=max_pool_size,
             timeout=pool_timeout_seconds,

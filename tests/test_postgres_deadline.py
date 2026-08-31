@@ -126,3 +126,33 @@ async def test_deadline_still_breaks_stalled_external_cancellation_cleanup() -> 
 def test_operation_timeout_validation(timeout: float) -> None:
     with pytest.raises(ValueError, match="operation timeout"):
         PostgresFoundation("postgresql://localhost/samsarix_test", operation_timeout_seconds=timeout)
+
+
+def test_server_deadlines_preserve_other_connection_options() -> None:
+    service = PostgresFoundation(
+        "dbname=samsarix_test options='-c timezone=UTC'", pool_timeout_seconds=0.5, operation_timeout_seconds=4.5
+    )
+    assert service._pool.kwargs == {
+        "connect_timeout": 2,
+        "options": "-c timezone=UTC -c statement_timeout=4500 -c idle_in_transaction_session_timeout=4500",
+    }
+    with pytest.raises(ValueError, match="invalid PostgreSQL connection information") as error:
+        PostgresFoundation("not-a-connection-string private-value")
+    assert "private-value" not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_schema_initialization_timeout_closes_pool_and_does_not_mark_open() -> None:
+    service, connection = _foundation()
+    service._opened = False
+    service._pool.open = AsyncMock()
+
+    async def stalled(*_args):
+        await asyncio.Event().wait()
+
+    connection.execute.side_effect = stalled
+    with pytest.raises(PostgresUnavailableError):
+        await service.open()
+    assert not service._opened
+    service._pool.close.assert_awaited_once()
+    connection.pgconn.finish.assert_called_once()
