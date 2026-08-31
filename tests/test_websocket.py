@@ -38,7 +38,9 @@ def test_websocket_broadcasts_between_clients(client: TestClient, room: dict[str
             bob.send_json({"type": "message", "content": "Hi Alice"})
             alice_message = alice.receive_json()
             bob_message = bob.receive_json()
-        left = alice.receive_json()
+            # Context exit cancels the ASGI task; observe an orderly disconnect first.
+            bob.close()
+            left = alice.receive_json()
 
     assert joined["type"] == "presence.joined"
     assert joined["username"] == "Bob"
