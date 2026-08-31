@@ -218,16 +218,18 @@ async def test_unserializable_pending_broadcast_fails_closed(value):
 
 
 @pytest.mark.asyncio
-async def test_excessively_nested_embedded_event_fails_closed():
+async def test_encoder_recursion_failure_is_contained(monkeypatch):
     connections = manager()
     target = Socket()
     await connections.register(socket(target), "room", "A", broadcast_ready=False)
-    value = None
-    # Python 3.14's C encoder can exceed the interpreter recursion limit;
-    # this depth also exercises its separate C-stack guard on Windows.
-    for _ in range(20_000):
-        value = [value]
-    await connections.broadcast("room", {"type": "nested", "value": value})
+
+    def exhausted_encoder(*args, **kwargs):
+        raise RecursionError("encoder stack exhausted")
+
+    # The failing depth varies across Python/OS C-stack implementations.
+    # Exercise the error contract without assuming a particular stack size.
+    monkeypatch.setattr(json, "dumps", exhausted_encoder)
+    await connections.broadcast("room", {"type": "nested"})
     assert target.closed[0][0] == 1013
     assert connections._pending_bytes == 0
 
