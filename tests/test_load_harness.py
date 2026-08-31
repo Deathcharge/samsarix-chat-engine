@@ -123,11 +123,19 @@ async def test_open_arrivals_count_concurrency_drops_instead_of_waiting() -> Non
 
     counters: Counter[str] = Counter()
     samples: list[float] = []
+    drops = []
     await arrivals(
-        Profile(duration=1, rate=10, concurrency=2), operation, counters, samples.append, clock=lambda: now, sleep=sleep
+        Profile(duration=1, rate=10, concurrency=2),
+        operation,
+        counters,
+        samples.append,
+        record_drop=lambda *values: drops.append(values),
+        clock=lambda: now,
+        sleep=sleep,
     )
     assert counters == {"offered": 10, "started": 2, "dropped_concurrency": 8, "peak_inflight": 2}
     assert sorted(completed) == [0, 1] and samples == [0, 0]
+    assert [drop[:2] for drop in drops] == [(index, "concurrency") for index in range(2, 10)]
 
 
 async def test_missed_schedule_slots_are_not_a_catch_up_burst() -> None:
@@ -147,11 +155,21 @@ async def test_missed_schedule_slots_are_not_a_catch_up_burst() -> None:
 
     counters: Counter[str] = Counter()
     samples: list[float] = []
-    await arrivals(Profile(duration=1, rate=10), operation, counters, samples.append, clock=lambda: now, sleep=sleep)
+    drops = []
+    await arrivals(
+        Profile(duration=1, rate=10),
+        operation,
+        counters,
+        samples.append,
+        record_drop=lambda *values: drops.append(values),
+        clock=lambda: now,
+        sleep=sleep,
+    )
     assert counters["offered"] == 10 and counters["dropped_schedule"] == 3
     assert counters["started"] == 7 and counters["dropped_concurrency"] == 0
     assert [index for index, _ in scheduled] == list(range(3, 10))
     assert max(samples) == pytest.approx(50)
+    assert [drop[:2] for drop in drops] == [(0, "schedule"), (1, "schedule"), (2, "schedule")]
 
 
 async def test_arrival_cancellation_awaits_every_owned_operation() -> None:
@@ -338,6 +356,22 @@ def test_report_rejects_missing_convergence_or_no_work(monkeypatch: pytest.Monke
     world.counts["converged_clients"] = 32
     world.failures["incorrect_message_content"] = 1
     assert not world.report()["accepted"]
+
+
+def test_drop_evidence_is_profile_bounded_and_contains_no_absolute_deadline() -> None:
+    world = World(Profile(duration=1, rate=1))
+    world.record_drop(0, "schedule", 51.25)
+    report = world.report()
+    assert report["arrival_drops"] == [
+        {
+            "index": 0,
+            "phase": "setup",
+            "observed_elapsed_s": pytest.approx(0, abs=0.1),
+            "lateness_ms": 51.25,
+            "reason": "schedule",
+        }
+    ]
+    assert len(report["arrival_drops"]) <= world.profile.duration * world.profile.rate
 
 
 def test_cli_requires_explicit_reset_authorization_before_access(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:

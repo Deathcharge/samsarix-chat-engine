@@ -95,6 +95,7 @@ class World:
         self.acknowledged: set[tuple[int, int]] = set()
         self.ids: dict[int, str] = {}
         self.samples: list[dict[str, Any]] = []
+        self.arrival_drops: list[dict[str, Any]] = []
         self.timeline: list[dict[str, Any]] = []
         self.failures: Counter[str] = Counter()
         self.tokens: dict[tuple[str, str], str] = {}
@@ -141,6 +142,17 @@ class World:
 
     def measure(self, name: str, value: float) -> None:
         self.measurements.record(name, value, time.monotonic() - self.started)
+
+    def record_drop(self, index: int, reason: str, lateness_ms: float) -> None:
+        self.arrival_drops.append(
+            {
+                "index": index,
+                "phase": self.phase,
+                "observed_elapsed_s": round(time.monotonic() - self.started, 6),
+                "lateness_ms": round(lateness_ms, 6),
+                "reason": reason,
+            }
+        )
 
     def check_message(self, message: dict[str, Any], room: str, *, live: bool = False) -> tuple[int, int]:
         require(message["room_id"] == room, "cross_room_message")
@@ -417,6 +429,7 @@ class World:
             "failures": dict(self.failures),
             "latency_ms": {name: distribution(values) for name, values in sorted(self.latencies.items())},
             "latency_windows": self.measurements.window_report(),
+            "arrival_drops": self.arrival_drops,
             "server_log_tail_signals": [log_signals(process.output_tail()) for process in self.processes],
             "achieved_creates_per_scheduled_second": self.counts["http_POST_accepted"] / self.profile.duration,
             "fault": self.fault,
@@ -652,6 +665,7 @@ async def exercise(world: World, conninfo: str, observer: Any) -> None:
                         lambda index, due: world.cycle(http, index, due),
                         world.counts,
                         lambda delay: world.measure("start_delay_ms", delay),
+                        record_drop=world.record_drop,
                     )
                     await fault
                     require(not sampler.done(), "sampler_stopped_early")
