@@ -211,7 +211,10 @@ class BoundedTransport(Generic[T]):
         try:
             # wait() neither waits for native cancellation nor suppresses caller
             # cancellation when completion races it on older Python versions.
-            done, _ = await asyncio.wait({work.future}, timeout=work.budget.remaining())
+            # Owner cleanup may already have marked the budget finished before
+            # we wait. That is not a timeout: consult the deadline and future.
+            remaining = max(0.0, work.budget.deadline - time.monotonic())
+            done, _ = await asyncio.wait({work.future}, timeout=remaining)
             if not done:
                 raise TimeoutError("webhook attempt deadline exceeded")
             return work.future.result()
