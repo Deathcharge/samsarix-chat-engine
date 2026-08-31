@@ -13,6 +13,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  postgres-pitr-rehearsal:
+    uses: ./.github/workflows/postgres-pitr-rehearsal.yml
+
   postgres-restore-rehearsal:
     uses: ./.github/workflows/postgres-restore-rehearsal.yml
 

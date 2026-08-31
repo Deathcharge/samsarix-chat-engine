@@ -1,6 +1,6 @@
 # PostgreSQL backup, restore, and recovery contract
 
-Status: **logical restore rehearsal implemented; physical PITR remains deployment-owned and unverified**.
+Status: **logical restore and disposable physical PITR rehearsals implemented; provider failover remains deployment-owned and unverified**.
 
 Samsarix does not copy PostgreSQL files or hide database recovery behind an application command. PostgreSQL exposes three distinct backup families—logical dumps, physical filesystem/base backups, and continuous WAL archiving—and they have different portability, recovery-point, privilege, and version properties. The authoritative starting point is PostgreSQL's [backup and restore chapter](https://www.postgresql.org/docs/18/backup.html).
 
@@ -16,7 +16,20 @@ The `PostgreSQL logical restore rehearsal` workflow provisions a disposable Post
 6. starts a different Samsarix instance against the restored database and verifies readiness, room metadata, edited history, tombstones, search, read state, archived state, metadata-only audit actions, and schema compatibility;
 7. proves the restored database remains writable through create, edit, delete, unarchive, and rearchive operations.
 
-The probe refuses remote hosts, URL query/fragment overrides, libpq routing environment overrides, any database name except the two fixed disposable rehearsal names, and execution without an exact confirmation value. HTTP failures never echo response bodies. This is repeatable application-level restore evidence, not a production backup service, a durability SLA, or proof of physical/PITR recovery.
+The probe refuses remote hosts, URL query/fragment overrides, libpq routing environment overrides, any database name except the two fixed disposable rehearsal names, and execution without an exact confirmation value. HTTP failures never echo response bodies. This is repeatable application-level logical-restore evidence, not a production backup service or durability SLA.
+
+The separate `PostgreSQL physical PITR rehearsal` workflow also provisions a disposable PostgreSQL 18.6 cluster and:
+
+1. enables continuous WAL archiving, provisions a separate application role, and initializes schema 8 through Samsarix;
+2. records baseline application state, takes a plain whole-cluster `pg_basebackup` with streamed WAL and SHA-256 manifest checksums, and requires `pg_verifybackup --exit-on-error` to accept it;
+3. commits another message after the base backup, creates a named restore point, then commits a divergent message after that target;
+4. forces and confirms archival of the WAL segment containing the post-target write;
+5. revokes the old primary's application-role `CONNECT` privilege, terminates its sessions, and proves that credential cannot reconnect;
+6. starts the physical backup as an isolated second cluster, replays archived WAL to the named restore point, promotes it, and requires a newer timeline with the same cluster system identifier;
+7. verifies through a different Samsarix instance that base-backup and WAL-only state survived, the later divergent message did not, search/read-state/audit invariants hold, and five post-recovery writes succeed; and
+8. publishes a content-free JSON evidence artifact with the exact revision, PostgreSQL version, restore point/LSN, timelines, archived-WAL count, manifest/inventory hashes, fencing result, and application acceptance result.
+
+Its second safety probe accepts only `samsarix_pitr_source` on loopback port 5432 for source phases and port 55432 for recovery verification, with a separate exact confirmation. This is real physical recovery evidence on one ephemeral CI host. The archive and backup share that host, and the old process remains available to its superuser: the test proves an application-role database fence, not storage durability, network/power fencing, routing cutover, provider promotion, failback, RPO, or RTO.
 
 ## Choose the recovery layer deliberately
 
@@ -48,7 +61,7 @@ A hash detects accidental change only when its stored value is separately protec
 
 A periodic logical dump cannot recover commits made after its snapshot. PostgreSQL PITR starts from a physical base backup and replays a continuous, complete WAL archive. PostgreSQL 18 requires `wal_level=replica` or higher and enabled archiving; `pg_basebackup` can create a live cluster base backup suitable for PITR or a standby. See [continuous archiving and PITR](https://www.postgresql.org/docs/18/continuous-archiving.html), [`pg_basebackup`](https://www.postgresql.org/docs/18/app-pgbasebackup.html), and [WAL configuration](https://www.postgresql.org/docs/18/runtime-config-wal.html).
 
-Samsarix cannot choose an archive repository, retention window, encryption/KMS design, replication topology, or recovery objective for the operator. Before production use, the deployment owner must prove on isolated infrastructure that:
+Samsarix cannot choose an archive repository, retention window, encryption/KMS design, replication topology, or recovery objective for the operator. The repository now proves base-backup/WAL mechanics and application-level target acceptance on a single disposable host. Before production use, the deployment owner must still prove on isolated infrastructure that:
 
 - every required WAL segment reaches durable storage and alerting detects an archive gap;
 - the base backup and WAL archive can be decrypted without the primary environment;
@@ -57,7 +70,7 @@ Samsarix cannot choose an archive repository, retention window, encryption/KMS d
 - the measured recovery point objective (RPO) and recovery time objective (RTO) meet the service commitment;
 - promotion, DNS/router cutover, fencing of the old primary, and failback cannot create two writable primaries.
 
-This repository does not yet run that physical recovery or failover gate, so PostgreSQL remains a preview.
+This repository does not yet run provider/database failover, external old-primary fencing, routing cutover, or failback gates, so PostgreSQL remains a preview.
 
 ## Restore rehearsal and cutover
 

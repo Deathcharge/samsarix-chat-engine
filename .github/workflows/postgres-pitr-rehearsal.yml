@@ -1,0 +1,302 @@
+name: PostgreSQL physical PITR rehearsal
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rehearse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18.6-bookworm
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_PASSWORD: postgres-pitr-superuser-password
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+          - 55432:55432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      SAMSARIX_PITR_REHEARSAL_CONFIRM: disposable-physical-pitr-cluster
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+          cache: pip
+      - run: python -m pip install --upgrade pip setuptools wheel
+      - run: python -m pip install -e ".[postgres,test]"
+      - name: Take, verify, recover, fence, and exercise a physical backup
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+          POSTGRES_SUPERUSER_PASSWORD: postgres-pitr-superuser-password
+          PITR_APP_PASSWORD: postgres-pitr-application-password
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$POSTGRES_CONTAINER"
+
+          source_database=samsarix_pitr_source
+          app_role=samsarix_pitr_app
+          wal_archive=/tmp/samsarix-pitr-wal
+          base_backup=/tmp/samsarix-pitr-base
+          target_data=/tmp/samsarix-pitr-target
+          target_log=/tmp/samsarix-pitr-target.log
+          target_port=55432
+          restore_point=samsarix_pitr_target
+          source_url="postgresql://${app_role}:${PITR_APP_PASSWORD}@127.0.0.1:5432/${source_database}"
+          target_url="postgresql://${app_role}:${PITR_APP_PASSWORD}@127.0.0.1:${target_port}/${source_database}"
+          target_started=0
+
+          super_psql() {
+            docker exec \
+              --env PGPASSWORD="$POSTGRES_SUPERUSER_PASSWORD" \
+              "$POSTGRES_CONTAINER" \
+              psql --no-psqlrc --set ON_ERROR_STOP=1 --username=postgres "$@"
+          }
+
+          cleanup() {
+            status=$?
+            set +e
+            if [ "$status" -ne 0 ] && [ "$target_started" -eq 1 ]; then
+              echo 'recovered-cluster diagnostic tail:' >&2
+              docker exec "$POSTGRES_CONTAINER" tail --lines=100 "$target_log" >&2 || true
+            fi
+            if [ "$target_started" -eq 1 ]; then
+              docker exec --user postgres "$POSTGRES_CONTAINER" \
+                pg_ctl --pgdata="$target_data" --mode=fast --wait stop >/dev/null 2>&1 || true
+            fi
+            docker exec \
+              --env PGPASSWORD="$POSTGRES_SUPERUSER_PASSWORD" \
+              "$POSTGRES_CONTAINER" \
+              dropdb --if-exists --force --username=postgres "$source_database" >/dev/null 2>&1 || true
+            super_psql --dbname=postgres --command="DROP ROLE IF EXISTS ${app_role}" >/dev/null 2>&1 || true
+            return "$status"
+          }
+          trap cleanup EXIT
+
+          for path in "$wal_archive" "$base_backup" "$target_data" "$target_log"; do
+            if docker exec "$POSTGRES_CONTAINER" test -e "$path"; then
+              echo "refusing pre-existing disposable rehearsal path: $path" >&2
+              exit 1
+            fi
+          done
+          docker exec --user postgres "$POSTGRES_CONTAINER" mkdir --mode=700 "$wal_archive"
+
+          super_psql --dbname=postgres --command="ALTER SYSTEM SET wal_level TO 'replica'"
+          super_psql --dbname=postgres --command="ALTER SYSTEM SET archive_mode TO 'on'"
+          super_psql --dbname=postgres \
+            --command="ALTER SYSTEM SET archive_command TO 'test ! -f ${wal_archive}/%f && cp %p ${wal_archive}/%f'"
+          super_psql --dbname=postgres --command="ALTER SYSTEM SET max_wal_senders TO '5'"
+          docker restart "$POSTGRES_CONTAINER" >/dev/null
+          for attempt in $(seq 1 60); do
+            if docker exec "$POSTGRES_CONTAINER" pg_isready --username=postgres --dbname=postgres >/dev/null 2>&1; then
+              break
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              echo 'PostgreSQL did not recover after enabling WAL archiving' >&2
+              exit 1
+            fi
+            sleep 1
+          done
+
+          super_psql --dbname=postgres \
+            --command="CREATE ROLE ${app_role} LOGIN PASSWORD '${PITR_APP_PASSWORD}'"
+          docker exec \
+            --env PGPASSWORD="$POSTGRES_SUPERUSER_PASSWORD" \
+            "$POSTGRES_CONTAINER" \
+            createdb --username=postgres --owner=postgres --template=template0 "$source_database"
+          super_psql --dbname="$source_database" \
+            --command="REVOKE CONNECT ON DATABASE ${source_database} FROM PUBLIC"
+          super_psql --dbname="$source_database" \
+            --command="GRANT CONNECT ON DATABASE ${source_database} TO ${app_role}"
+          super_psql --dbname="$source_database" \
+            --command="GRANT USAGE, CREATE ON SCHEMA public TO ${app_role}"
+
+          seed_result=$(SAMSARIX_PITR_REHEARSAL_URL="$source_url" python scripts/postgres_pitr_probe.py seed)
+          echo "$seed_result"
+
+          docker exec \
+            --env PGPASSWORD="$POSTGRES_SUPERUSER_PASSWORD" \
+            --user postgres \
+            "$POSTGRES_CONTAINER" \
+            pg_basebackup \
+              --host=127.0.0.1 \
+              --port=5432 \
+              --username=postgres \
+              --pgdata="$base_backup" \
+              --format=plain \
+              --wal-method=stream \
+              --checkpoint=fast \
+              --manifest-checksums=SHA256 \
+              --progress
+          docker exec --user postgres "$POSTGRES_CONTAINER" \
+            pg_verifybackup --exit-on-error "$base_backup"
+          manifest_sha256=$(docker exec "$POSTGRES_CONTAINER" \
+            sha256sum "$base_backup/backup_manifest" | awk '{print $1}')
+
+          target_result=$(SAMSARIX_PITR_REHEARSAL_URL="$source_url" python scripts/postgres_pitr_probe.py target)
+          echo "$target_result"
+          restore_lsn=$(super_psql --tuples-only --no-align --dbname="$source_database" \
+            --command="SELECT pg_create_restore_point('${restore_point}')")
+          test -n "$restore_lsn"
+
+          after_target_result=$(SAMSARIX_PITR_REHEARSAL_URL="$source_url" \
+            python scripts/postgres_pitr_probe.py after-target)
+          echo "$after_target_result"
+          required_lsn=$(super_psql --tuples-only --no-align --dbname="$source_database" \
+            --command='SELECT pg_current_wal_flush_lsn()')
+          required_wal=$(super_psql --tuples-only --no-align --dbname="$source_database" \
+            --command="SELECT pg_walfile_name('${required_lsn}'::pg_lsn)")
+          super_psql --dbname="$source_database" --command='SELECT pg_switch_wal()' >/dev/null
+          for attempt in $(seq 1 60); do
+            if docker exec "$POSTGRES_CONTAINER" test -f "$wal_archive/$required_wal"; then
+              break
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              echo "required WAL segment was not archived: $required_wal" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+
+          super_psql --dbname="$source_database" \
+            --command="REVOKE CONNECT ON DATABASE ${source_database} FROM ${app_role}"
+          super_psql --dbname="$source_database" \
+            --command="SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${source_database}' AND usename = '${app_role}'" \
+            >/dev/null
+          if docker exec \
+            --env PGPASSWORD="$PITR_APP_PASSWORD" \
+            "$POSTGRES_CONTAINER" \
+            psql --no-psqlrc --username="$app_role" --dbname="$source_database" --command='SELECT 1' >/dev/null 2>&1; then
+            echo 'old primary still accepts the fenced application role' >&2
+            exit 1
+          fi
+
+          docker exec --user postgres "$POSTGRES_CONTAINER" cp --archive "$base_backup" "$target_data"
+          docker exec --interactive --user postgres "$POSTGRES_CONTAINER" \
+            sh -c "cat >> '$target_data/postgresql.auto.conf'" <<PITR_CONFIG
+          port = ${target_port}
+          listen_addresses = '*'
+          unix_socket_directories = '/tmp'
+          restore_command = 'cp ${wal_archive}/%f %p'
+          recovery_target_name = '${restore_point}'
+          recovery_target_action = 'promote'
+          PITR_CONFIG
+          docker exec --user postgres "$POSTGRES_CONTAINER" touch "$target_data/recovery.signal"
+          docker exec --user postgres "$POSTGRES_CONTAINER" \
+            pg_ctl --pgdata="$target_data" --log="$target_log" --wait --timeout=60 start
+          target_started=1
+
+          promoted=0
+          for attempt in $(seq 1 60); do
+            if docker exec \
+              --env PGPASSWORD="$POSTGRES_SUPERUSER_PASSWORD" \
+              "$POSTGRES_CONTAINER" \
+              psql --no-psqlrc --tuples-only --no-align --username=postgres \
+                --host=127.0.0.1 --port="$target_port" --dbname=postgres \
+                --command='SELECT NOT pg_is_in_recovery()' 2>/dev/null | grep --quiet '^t$'; then
+              promoted=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$promoted" -ne 1 ]; then
+            docker exec "$POSTGRES_CONTAINER" tail --lines=100 "$target_log" || true
+            echo 'recovered cluster did not promote at the named restore point' >&2
+            exit 1
+          fi
+
+          verify_result=$(SAMSARIX_PITR_REHEARSAL_URL="$target_url" python scripts/postgres_pitr_probe.py verify)
+          echo "$verify_result"
+
+          docker exec \
+            --env PGPASSWORD="$POSTGRES_SUPERUSER_PASSWORD" \
+            "$POSTGRES_CONTAINER" \
+            psql --no-psqlrc --username=postgres --host=127.0.0.1 --port="$target_port" \
+              --dbname=postgres --command='CHECKPOINT' >/dev/null
+
+          if docker exec \
+            --env PGPASSWORD="$PITR_APP_PASSWORD" \
+            "$POSTGRES_CONTAINER" \
+            psql --no-psqlrc --username="$app_role" --dbname="$source_database" --command='SELECT 1' >/dev/null 2>&1; then
+            echo 'old primary application-role fence did not survive recovery verification' >&2
+            exit 1
+          fi
+
+          source_system=$(super_psql --tuples-only --no-align --dbname=postgres \
+            --command='SELECT system_identifier FROM pg_control_system()')
+          source_timeline=$(super_psql --tuples-only --no-align --dbname=postgres \
+            --command='SELECT timeline_id FROM pg_control_checkpoint()')
+          target_system=$(docker exec \
+            --env PGPASSWORD="$POSTGRES_SUPERUSER_PASSWORD" \
+            "$POSTGRES_CONTAINER" \
+            psql --no-psqlrc --tuples-only --no-align --username=postgres \
+              --host=127.0.0.1 --port="$target_port" --dbname=postgres \
+              --command='SELECT system_identifier FROM pg_control_system()')
+          target_timeline=$(docker exec \
+            --env PGPASSWORD="$POSTGRES_SUPERUSER_PASSWORD" \
+            "$POSTGRES_CONTAINER" \
+            psql --no-psqlrc --tuples-only --no-align --username=postgres \
+              --host=127.0.0.1 --port="$target_port" --dbname=postgres \
+              --command='SELECT timeline_id FROM pg_control_checkpoint()')
+          test "$source_system" = "$target_system"
+          test "$target_timeline" -gt "$source_timeline"
+
+          archive_files=$(docker exec "$POSTGRES_CONTAINER" \
+            find "$wal_archive" -maxdepth 1 -type f | wc -l | tr -d ' ')
+          test "$archive_files" -gt 0
+          wal_inventory_sha256=$(docker exec "$POSTGRES_CONTAINER" \
+            sh -c "find '$wal_archive' -maxdepth 1 -type f -exec sha256sum {} \; | sort | sha256sum" | awk '{print $1}')
+          postgres_version=$(super_psql --tuples-only --no-align --dbname=postgres \
+            --command="SELECT current_setting('server_version')")
+
+          mkdir -p dist
+          jq --null-input \
+            --arg revision "$GITHUB_SHA" \
+            --arg postgres_version "$postgres_version" \
+            --arg manifest_sha256 "$manifest_sha256" \
+            --arg wal_inventory_sha256 "$wal_inventory_sha256" \
+            --arg restore_point "$restore_point" \
+            --arg restore_lsn "$restore_lsn" \
+            --argjson archive_files "$archive_files" \
+            --argjson source_timeline "$source_timeline" \
+            --argjson recovered_timeline "$target_timeline" \
+            '{
+              schema_version: 1,
+              accepted: true,
+              revision: $revision,
+              postgres_version: $postgres_version,
+              backup_manifest_sha256: $manifest_sha256,
+              wal_inventory_sha256: $wal_inventory_sha256,
+              archived_wal_files: $archive_files,
+              restore_point: $restore_point,
+              restore_lsn: $restore_lsn,
+              source_timeline: $source_timeline,
+              recovered_timeline: $recovered_timeline,
+              old_primary_application_role_fenced: true,
+              recovered_cluster_promoted: true,
+              post_recovery_writes: 5,
+              divergent_post_target_message_excluded: true
+            }' > dist/postgres-pitr-report.json
+          python -m json.tool dist/postgres-pitr-report.json
+      - name: Preserve the physical recovery evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: postgres-pitr-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/postgres-pitr-report.json
+          if-no-files-found: error
+          retention-days: 30
