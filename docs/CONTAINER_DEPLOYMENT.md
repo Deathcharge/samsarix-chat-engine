@@ -28,7 +28,9 @@ SAMSARIX_CHAT_TOKEN_SIGNING_SECRET_FILE=/run/secrets/token_signing_secret
 
 The same `_FILE` convention is supported for the current and previous webhook signing secrets. Setting both a direct secret variable and its `_FILE` counterpart is a startup error; the engine never logs file contents. File paths are operator configuration, not secret values, but should still avoid user-controlled directories.
 
-The image includes the optional asymmetric-auth dependencies. To keep signing authority outside the engine, mount a public JWKS and override the Compose environment (for example in `compose.override.yaml`):
+The image includes the optional asymmetric-auth and PostgreSQL dependencies. The bundled Compose profile still selects SQLite and remains strictly single-replica. PostgreSQL images are used only by the guarded [Kubernetes evaluation topology](../deploy/kubernetes/README.md) or an operator's separately reviewed deployment.
+
+To keep signing authority outside the engine, mount a public JWKS and override the Compose environment (for example in `compose.override.yaml`):
 
 ```yaml
 services:
@@ -96,7 +98,7 @@ Version 0.12 still uses SQLite schema 5, so rollback to 0.11 requires no databas
 
 ## Operational limits
 
-- Run one replica and one process. Do not use `docker compose up --scale chat=...`, Uvicorn workers, Kubernetes replicas, or multiple containers against the volume.
+- Run one replica and one process with this SQLite Compose profile. Do not use `docker compose up --scale chat=...`, Uvicorn workers, Kubernetes replicas, or multiple containers against the volume. The separate PostgreSQL preview uses no SQLite volume and has its own identity and acceptance contract.
 - Readiness proves the process can query SQLite; it does not test a reverse proxy, webhook receiver, backup freshness, disk capacity, or client path.
 - The health check is intentionally unauthenticated and returns no chat data.
 - Container logs are operational metadata but may include request paths and search query strings from access logging. Govern them as potentially sensitive data.

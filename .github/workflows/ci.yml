@@ -143,6 +143,7 @@ jobs:
       - run: python -m ruff check .
       - run: python -m ruff format --check .
       - run: python -m mypy samsarix_chat_engine
+      - run: python scripts/verify_kubernetes_preview.py
       - run: python -m pip_audit
       - run: python -m pytest --cov=samsarix_chat_engine --cov-report=term-missing --timeout=90
       - run: python -m build
@@ -196,6 +197,7 @@ jobs:
           printf '%s' 'container-ci-token-signing-secret-32-bytes' > secrets/token-signing-secret.txt
           docker compose config --quiet
           docker compose build --pull
+          docker run --rm --entrypoint python samsarix-chat-engine:0.12.0 -c 'import psycopg; print(psycopg.__version__)'
 
           cleanup() {
             docker compose logs --no-color || true

@@ -1,0 +1,181 @@
+# Copyright (c) 2026 Samsarix LLC
+# SPDX-License-Identifier: MPL-2.0
+# Guarded PostgreSQL preview. See README.md in this directory before use.
+apiVersion: v1
+kind: Service
+metadata:
+  name: samsarix-chat-headless
+  labels:
+    app.kubernetes.io/name: samsarix-chat
+    app.kubernetes.io/component: engine
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: samsarix-chat
+    app.kubernetes.io/component: engine
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: samsarix-chat
+  labels:
+    app.kubernetes.io/name: samsarix-chat
+    app.kubernetes.io/component: engine
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: samsarix-chat
+    app.kubernetes.io/component: engine
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: samsarix-chat
+  labels:
+    app.kubernetes.io/name: samsarix-chat
+    app.kubernetes.io/component: engine
+spec:
+  serviceName: samsarix-chat-headless
+  replicas: 2
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: samsarix-chat
+      app.kubernetes.io/component: engine
+  updateStrategy:
+    type: OnDelete
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: samsarix-chat
+        app.kubernetes.io/component: engine
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: samsarix-chat
+                    app.kubernetes.io/component: engine
+      containers:
+        - name: chat
+          image: samsarix-chat-engine:0.12.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - serve
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+          env:
+            - name: SAMSARIX_CHAT_STORAGE
+              value: postgres
+            - name: SAMSARIX_CHAT_POSTGRES_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.name
+            - name: SAMSARIX_CHAT_POSTGRES_URL_FILE
+              value: /run/secrets/postgres-url
+            - name: SAMSARIX_CHAT_API_KEY_FILE
+              value: /run/secrets/operator-api-key
+            - name: SAMSARIX_CHAT_TOKEN_SIGNING_SECRET_FILE
+              value: /run/secrets/token-signing-secret
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: runtime-secrets
+              mountPath: /run/secrets
+              readOnly: true
+            - name: temporary-state
+              mountPath: /tmp
+      volumes:
+        - name: runtime-secrets
+          secret:
+            secretName: samsarix-chat-runtime
+            defaultMode: 0440
+            items:
+              - key: postgres-url
+                path: postgres-url
+              - key: postgres-ca.pem
+                path: postgres-ca.pem
+              - key: operator-api-key
+                path: operator-api-key
+              - key: token-signing-secret
+                path: token-signing-secret
+        - name: temporary-state
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: samsarix-chat
+  labels:
+    app.kubernetes.io/name: samsarix-chat
+    app.kubernetes.io/component: engine
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: samsarix-chat
+      app.kubernetes.io/component: engine
