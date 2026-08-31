@@ -377,6 +377,26 @@ test("a failed application send reports uncertainty and reconnects without repla
   assert.deepEqual(sockets[1].sent, [{ type: "ping" }]);
 });
 
+test("a late failure from an old send cannot tear down a listener-created connection", async (t) => {
+  const { session, sockets } = setup(t);
+  observe(session.connect());
+  await flush();
+  activate(sockets[0]);
+  let newer;
+  sockets[0].send = () => {
+    session.close();
+    newer = observe(session.connect());
+    throw new Error("old send failed after reconnect");
+  };
+  assert.throws(() => session.sendMessage("Maybe sent"), /old send failed/);
+  await flush();
+  assert.equal(newer.state, "pending");
+  assert.equal(sockets.length, 2);
+  activate(sockets[1]);
+  await flush();
+  assert.equal(newer.state, "resolved");
+});
+
 for (const sequence of [[HISTORY], [READY, READY], [READY, HISTORY, HISTORY]]) {
   test(`out-of-order or duplicate handshake is terminal: ${sequence.map((event) => event.type)}`, async (t) => {
     const { session, sockets } = setup(t);

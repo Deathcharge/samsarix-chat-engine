@@ -337,11 +337,12 @@ export class RoomSession {
     if (this.currentState !== "connected" || this.socket?.readyState !== OPEN) {
       throw new SamsarixConnectionError("Room session is not connected");
     }
+    const generation = this.generation;
     try {
       this.socket.send(JSON.stringify(payload));
     } catch (error) {
       const failure = asConnectionError(error);
-      this.failAttempt(this.generation, failure, 4000);
+      this.failAttempt(generation, failure, 4000);
       // Delivery is ambiguous. Recover the connection, never replay a write.
       throw failure;
     }
