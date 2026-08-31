@@ -359,6 +359,24 @@ test("a failed authentication send closes the attempt instead of stranding it", 
   assert.equal(session.state, "reconnecting");
 });
 
+test("a failed application send reports uncertainty and reconnects without replaying it", async (t) => {
+  const { session, sockets, tick } = setup(t);
+  observe(session.connect());
+  await flush();
+  activate(sockets[0]);
+  sockets[0].send = () => {
+    throw new Error("transport write failed");
+  };
+  assert.throws(
+    () => session.sendMessage("Maybe sent", "retry-id"),
+    /transport write failed/,
+  );
+  assert.equal(session.state, "reconnecting");
+  await tick(10);
+  activate(sockets[1]);
+  assert.deepEqual(sockets[1].sent, [{ type: "ping" }]);
+});
+
 for (const sequence of [[HISTORY], [READY, READY], [READY, HISTORY, HISTORY]]) {
   test(`out-of-order or duplicate handshake is terminal: ${sequence.map((event) => event.type)}`, async (t) => {
     const { session, sockets } = setup(t);

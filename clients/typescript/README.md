@@ -91,6 +91,8 @@ One `handshakeTimeoutMs` deadline covers each attempt from credential lookup thr
 
 A `connect()` promise belongs to its current/next attempt and rejects on that attempt's failure even if automatic retries continue; observe state changes and handle promise rejection. Concurrent callers share the same pending promise. `close()` cancels owned timers, rejects pending connection work and detaches callbacks before requesting transport closure. Listener-driven close/reconnect does not leave stale timers or settle a newer promise.
 
+A synchronous application-send failure throws `SamsarixConnectionError` and starts bounded connection recovery. It does not prove the message was uncommitted, and the SDK never automatically replays it. Reconcile history and use the same `client_message_id` or HTTP idempotency key when deliberately retrying a write.
+
 ```ts
 const session = client.roomSession("general", {
   handshakeTimeoutMs: 10_000,
