@@ -254,6 +254,12 @@ def test_fault_scope_does_not_excuse_unrelated_healthy_stream_loss() -> None:
     assert Member(world, 1, "load-1", "reader-c").uninterrupted()
 
 
+def test_count_fault_limit_admits_its_population_before_injected_lag() -> None:
+    assert World(Profile(scenario="count")).effective["POSTGRES_RELAY_MAX_PENDING_EVENTS"] == "100"
+    large = World(Profile(scenario="count", clients_per_room=32))
+    assert large.effective["POSTGRES_RELAY_MAX_PENDING_EVENTS"] == "256"
+
+
 def test_deleted_message_may_scrub_unread_prior_event_content_only() -> None:
     world = World(Profile())
     world.sent = {(0, version): 1 for version in range(3)}

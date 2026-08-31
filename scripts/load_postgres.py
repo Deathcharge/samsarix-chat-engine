@@ -104,12 +104,16 @@ class World:
 
     def settings(self) -> dict[str, str]:
         p = self.profile
+        # Count-fault profiles must first admit their own presence burst. Two
+        # events per subscriber leaves room for a simultaneous leave/rejoin;
+        # the paused writer stream still crosses this bounded test threshold.
+        count_fault_limit = max(100, p.rate * 5, p.rooms * p.clients_per_room * 2)
         return {
             "POSTGRES_MAX_POOL_SIZE": "10",
             "POSTGRES_LEASE_SECONDS": "3" if p.scenario == "retained-gap" else "120",
             "POSTGRES_RELAY_POLL": "0.05",
             "POSTGRES_MAINTENANCE_INTERVAL": "0.1",
-            "POSTGRES_RELAY_MAX_PENDING_EVENTS": str(max(100, p.rate * 5)) if p.scenario == "count" else "10000",
+            "POSTGRES_RELAY_MAX_PENDING_EVENTS": str(count_fault_limit) if p.scenario == "count" else "10000",
             "POSTGRES_RELAY_MAX_EVENT_AGE": "3" if p.scenario == "age" else "3600",
             "POSTGRES_MAX_REALTIME_EVENTS": "100" if p.scenario == "retained-gap" else "100000",
             "MAX_CONNECTIONS": str(p.rooms * p.clients_per_room),
