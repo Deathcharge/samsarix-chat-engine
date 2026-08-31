@@ -4,6 +4,10 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 
 ## Unreleased
 
+### Maintenance
+
+- Update disposable PostgreSQL CI services from 18.4 to 18.6 after reviewing the official security/bug-fix release. Historical load measurements retain their actual server version; production database upgrades and release-note-specific cleanup remain operator responsibilities.
+
 ### Added
 
 - Checkout-only PostgreSQL load/recovery tooling with bounded open arrivals, create/edit/delete fan-out, acknowledged-event coverage, final history convergence, room isolation, resource/latency reporting and live count/age/natural-gap fault profiles. Disposable CI jobs preserve failed as well as successful measurements; a manual workflow supports longer probes. It rejects unsafe targets and environment routing overrides, never publishes telemetry, and does not imply production capacity or change the supported SQLite alpha / PostgreSQL preview boundary. See [the workload contract and evidence](docs/POSTGRES_LOAD.md).
