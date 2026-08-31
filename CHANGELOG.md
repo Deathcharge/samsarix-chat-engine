@@ -6,6 +6,7 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 
 ### Maintenance
 
+- Keep SQLite-only test collection working without the optional PostgreSQL driver; the load-harness module explicitly skips in that environment. Add a clean `.[test]` CI job that asserts driver absence and runs the applicable suite, alongside the existing full-driver/live PostgreSQL jobs.
 - Update disposable PostgreSQL CI services from 18.4 to 18.6 after reviewing the official security/bug-fix release. Historical load measurements retain their actual server version; production database upgrades and release-note-specific cleanup remain operator responsibilities.
 
 ### Added
