@@ -248,22 +248,24 @@ def test_lagged_member_reconnects_with_history_while_healthy_replica_keeps_servi
                     with pytest.raises(WebSocketDisconnect) as closed:
                         stale.receive_json()
                     assert closed.value.code == 1012
-                    assert lagging.get("/readyz").status_code == 503
-                    assert writer.get("/readyz").status_code == 200
-                    with lagging.websocket_connect("/v1/rooms/room/ws", headers=member("Bob")) as denied:
-                        assert denied.receive_json()["code"] == "storage_unavailable"
-                        with pytest.raises(WebSocketDisconnect) as rejected:
-                            denied.receive_json()
-                        assert rejected.value.code == 1012
-                    departed = healthy.receive_json()
-                    assert departed == {"type": "presence.left", "username": "Bob", "active_connections": 1}
-                    messages.append(post("Healthy while recovery is paused"))
-                    lagging.portal.call(recovery_resume.set)
-                    lagging.portal.call(wait_ready)
-                    assert runtime.relay._generation != original_generation
+                # TestClient acknowledges the peer close when its context exits;
+                # complete that handshake before expecting server-side cleanup.
+                assert lagging.get("/readyz").status_code == 503
+                assert writer.get("/readyz").status_code == 200
+                with lagging.websocket_connect("/v1/rooms/room/ws", headers=member("Bob")) as denied:
+                    assert denied.receive_json()["code"] == "storage_unavailable"
+                    with pytest.raises(WebSocketDisconnect) as rejected:
+                        denied.receive_json()
+                    assert rejected.value.code == 1012
+                departed = healthy.receive_json()
+                assert departed == {"type": "presence.left", "username": "Bob", "active_connections": 1}
+                messages.append(post("Healthy while recovery is paused"))
+                lagging.portal.call(recovery_resume.set)
+                lagging.portal.call(wait_ready)
+                assert runtime.relay._generation != original_generation
                 with lagging.websocket_connect("/v1/rooms/room/ws", headers=member("Bob")) as restored:
                     history = ready(restored)
-                    assert history["messages"] == messages
+                    assert history["items"] == messages
                     assert healthy.receive_json()["type"] == "presence.joined"
                     marker = post("Live after resynchronization")
                     assert restored.receive_json()["message"] == marker
