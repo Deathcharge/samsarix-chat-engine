@@ -25,6 +25,7 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 
 ### Changed
 
+- Buffer room broadcasts during registered WebSocket initialization instead of dropping them. Flush immutable event snapshots after ready/history in local arrival order, with per-socket event/byte limits, a shared byte budget, and a deadline for the whole flush. Overflow or failed/slow synchronization closes 1013; cancellation and every detachment path release the buffer. Embedded `ConnectionManager` callers may tune `max_pending_events`, `max_pending_bytes`, and `max_total_pending_bytes`; application defaults are 64, 262144, and 8388608 respectively. This is bounded handoff, not durable per-client delivery or exactly-once replay.
 - `ConnectionManager.send()` now returns false for unknown or detached sockets, `close()` is a no-op for them, and duplicate active registration is rejected. Embedders must register an accepted socket before using manager-owned send/close; pre-admission protocol frames remain the caller's responsibility.
 - `ConnectionManager.close()` returns the detached `(room_id, username)` to the winning closer, or `None` for an already-detached socket, allowing one-owner finalization without losing departure metadata.
 - `ConnectionManager.close(..., event=...)` atomically owns a final notification and physical close, avoiding duplicate lifecycle frames when heartbeat and relay closers race.

@@ -117,6 +117,7 @@ async def test_pending_connection_receives_initial_frames_before_broadcasts() ->
     assert pending.sent == [
         {"type": "ready"},
         {"type": "history"},
+        {"type": "presence.joined"},
         {"type": "message.created"},
     ]
 

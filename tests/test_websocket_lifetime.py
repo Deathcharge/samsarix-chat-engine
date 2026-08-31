@@ -375,3 +375,58 @@ async def test_heartbeat_distinguishes_room_lifecycle_from_storage_and_lease_fai
     assert application.state.connections.active_connections == 0
     assert runtime.reservations == set()
     runtime.release_connection.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["history", "ready", "activation"])
+async def test_handshake_does_not_drop_events_after_history_snapshot(socket_app, monkeypatch, phase):
+    application, runtime = socket_app
+    manager = application.state.connections
+    store = application.state.store
+    websocket, sent, incoming, endpoint = _socket(application)
+    events = [
+        {"type": "message.created", "message": {"id": "during-handshake", "content": "original"}},
+        {"type": "message.updated", "message": {"id": "during-handshake", "content": "edited"}},
+        {"type": "message.deleted", "message": {"id": "during-handshake", "content": ""}},
+    ]
+
+    async def broadcast():
+        for event in events:
+            await manager.broadcast("room", event)
+
+    if phase == "history":
+        original = store.list_messages
+
+        async def history(*args, **kwargs):
+            snapshot = await original(*args, **kwargs)
+            await broadcast()
+            return snapshot
+
+        monkeypatch.setattr(store, "list_messages", history)
+    elif phase == "ready":
+        original_send = manager.send
+
+        async def send(connection, event):
+            if event["type"] == "ready":
+                await broadcast()
+            return await original_send(connection, event)
+
+        monkeypatch.setattr(manager, "send", send)
+    else:
+        original_activate = manager.activate
+
+        async def activate(connection):
+            await broadcast()
+            return await original_activate(connection)
+
+        monkeypatch.setattr(manager, "activate", activate)
+
+    incoming.put_nowait({"type": "websocket.disconnect", "code": 1000})
+    await asyncio.wait_for(endpoint(websocket, "room", username=None), 5)
+    frames = [json.loads(item["text"]) for item in sent if item["type"] == "websocket.send"]
+    assert [event["type"] for event in frames[:2]] == ["ready", "history"]
+    assert frames[1]["items"] == []
+    assert frames[2:] == events
+    assert manager.active_connections == 0
+    if runtime is not None:
+        assert runtime.reservations == set()

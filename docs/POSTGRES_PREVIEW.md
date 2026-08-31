@@ -106,6 +106,12 @@ Additional live PostgreSQL application tests hold the archive relay behind an ex
 
 These controlled barriers run through real application handlers and PostgreSQL, not separate network subprocesses; the two-process normal moderation journey is separate evidence. They do not cover every combination of outage, failover, rapid archive/reopen, or delayed events arriving during a fresh handshake. Individual-socket delivery remains best effort; after any disconnect, clients reauthorize and reload current history rather than treating an error frame as durable state.
 
+## Initialization handoff
+
+Registered sockets now buffer room broadcasts while reading/sending initial history. Activation drains those snapshots before enabling live broadcasts; overflow or a flush exceeding one send-timeout interval closes 1013 for reconnect. The shared buffer budget also counts in-flight activation sends, preventing detachment from making their retained payload invisible to accounting. See the [protocol limits](API_REFERENCE.md#server-events). This queue is local and ephemeral, and is discarded on cancellation, moderation teardown, fencing, or disconnect.
+
+Controlled SQLite and PostgreSQL application tests pause a captured history snapshot, commit create/edit/delete operations through HTTP, wait for dispatch, and then verify that initial history plus queued mutations converges to current database rows, including tombstones. This is real-storage/ASGI evidence, not a network-process stall, load, or failover benchmark. Old relay events can overlap history and duplicates remain possible; no durable per-client cursor or end-of-catch-up marker is added. Presence counts are event-time snapshots and can predate the count in `ready`. Rapid archive/reopen ordering and suppression of obsolete delayed lifecycle/presence snapshots remain unverified release gates.
+
 ## Migration, backup, and rollback
 
 Startup takes a transaction-scoped advisory migration lock and advances the internal PostgreSQL schema to version 8. Newer unknown schemas fail closed. Before the first preview startup, take a provider-native physical/PITR backup or a tested logical backup that includes all `public.samsarix_*` tables and identity sequences.
