@@ -152,6 +152,8 @@ Controlled SQLite and PostgreSQL application tests pause a captured history snap
 
 Startup takes a transaction-scoped advisory migration lock and advances the internal PostgreSQL schema to version 8. Newer unknown schemas fail closed. Before the first preview startup, take a provider-native physical/PITR backup or a tested logical backup that includes all `public.samsarix_*` tables and identity sequences.
 
+The repository's disposable [logical restore rehearsal](POSTGRES_BACKUP.md) now creates a whole-database PostgreSQL 18 custom archive, restores it transactionally into a fresh `template0` database, verifies representative application state, and proves post-restore writes. Operators still own credentials, roles, encrypted off-host retention, WAL completeness, physical base backups, restore targets, RPO/RTO, old-primary fencing, and failover. A logical rehearsal is not PITR evidence.
+
 Rolling back to a binary that supports an older schema requires restoring its matching pre-upgrade database backup. Dropping the retention table or editing schema metadata is not a supported downgrade. PostgreSQL availability, TLS roots, least-privilege roles, patching, PITR, replication, failover, vacuuming, and capacity remain deployment-owner responsibilities.
 
 ## Known preview boundaries
