@@ -11,7 +11,10 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import httpx2 as httpx
 import pytest
@@ -31,13 +34,16 @@ def _unused_port() -> int:
 
 
 def _start_server(conninfo: str, instance_id: str, port: int) -> subprocess.Popen[str]:
-    environment = {key: value for key, value in os.environ.items() if not key.startswith("SAMSARIX_CHAT_")}
+    environment = {
+        key: value for key, value in os.environ.items() if not key.startswith(("SAMSARIX_CHAT_", "HELIX_CHAT_"))
+    }
     environment.update(
         {
             "SAMSARIX_CHAT_STORAGE": "postgres",
             "SAMSARIX_CHAT_POSTGRES_URL": conninfo,
             "SAMSARIX_CHAT_POSTGRES_INSTANCE_ID": instance_id,
             "SAMSARIX_CHAT_POSTGRES_MAX_POOL_SIZE": "4",
+            "SAMSARIX_CHAT_POSTGRES_POOL_TIMEOUT": "1",
             "SAMSARIX_CHAT_POSTGRES_LEASE_SECONDS": "3",
             "SAMSARIX_CHAT_POSTGRES_RELAY_POLL": "0.05",
             "SAMSARIX_CHAT_POSTGRES_MAINTENANCE_INTERVAL": "0.1",
@@ -64,6 +70,90 @@ def _start_server(conninfo: str, instance_id: str, port: int) -> subprocess.Pope
         stderr=subprocess.STDOUT,
         text=True,
     )
+
+
+class DatabaseProxy:
+    """Test-only TCP cut for one replica, never a database administration action."""
+
+    def __init__(self, host: str, port: int) -> None:
+        self.host = host
+        self.port = port
+        self.enabled = True
+        self.writers: set[asyncio.StreamWriter] = set()
+        self.tasks: set[asyncio.Task[None]] = set()
+
+    def accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.create_task(self.forward(reader, writer))
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+    def cut(self) -> None:
+        self.enabled = False
+        for writer in tuple(self.writers):
+            writer.transport.abort()
+
+    async def forward(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writers = [writer]
+        copies: list[asyncio.Task[None]] = []
+        self.writers.add(writer)
+        try:
+            if not self.enabled:
+                return
+            upstream_reader, upstream_writer = await asyncio.wait_for(
+                asyncio.open_connection(self.host, self.port), timeout=2
+            )
+            writers.append(upstream_writer)
+            self.writers.add(upstream_writer)
+            if not self.enabled:
+                return
+
+            async def copy(source: asyncio.StreamReader, destination: asyncio.StreamWriter) -> None:
+                while chunk := await source.read(65_536):
+                    destination.write(chunk)
+                    await destination.drain()
+
+            copies = [
+                asyncio.create_task(copy(reader, upstream_writer)),
+                asyncio.create_task(copy(upstream_reader, writer)),
+            ]
+            await asyncio.wait(copies, return_when=asyncio.FIRST_COMPLETED)
+        except (OSError, asyncio.TimeoutError):
+            pass
+        finally:
+            for task in copies:
+                task.cancel()
+            await asyncio.gather(*copies, return_exceptions=True)
+            for stream in writers:
+                self.writers.discard(stream)
+                stream.close()
+                with suppress(OSError, asyncio.TimeoutError):
+                    await asyncio.wait_for(stream.wait_closed(), timeout=2)
+
+
+@asynccontextmanager
+async def _database_proxy(conninfo: str) -> AsyncIterator[tuple[DatabaseProxy, str]]:
+    parsed = urlsplit(conninfo)
+    if (
+        parsed.scheme not in {"postgres", "postgresql"}
+        or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+        or {"host", "hostaddr", "port"}.intersection(parse_qs(parsed.query))
+    ):
+        pytest.skip("network interruption test requires a single loopback PostgreSQL URL without host overrides")
+    proxy = DatabaseProxy(parsed.hostname, parsed.port or 5432)
+    server = await asyncio.start_server(proxy.accept, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    userinfo = parsed.netloc.rpartition("@")[0]
+    netloc = f"{userinfo}@127.0.0.1:{port}" if userinfo else f"127.0.0.1:{port}"
+    try:
+        yield proxy, parsed._replace(netloc=netloc).geturl()
+    finally:
+        server.close()
+        await server.wait_closed()
+        proxy.cut()
+        tasks = tuple(proxy.tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _stop_server(process: subprocess.Popen[str]) -> None:
@@ -176,3 +266,93 @@ async def test_two_uvicorn_processes_reap_crashed_leases_and_restart(
     finally:
         for process in reversed(processes):
             _stop_server(process)
+
+
+@pytest.mark.asyncio
+async def test_database_network_cut_fences_clients_and_recovers_without_process_restart(
+    clean_postgres_database: str,
+) -> None:
+    """Cut only replica A's database sockets; replica B must continue serving."""
+
+    processes: list[subprocess.Popen[str]] = []
+    headers = {"X-API-Key": _OPERATOR_KEY}
+    async with _database_proxy(clean_postgres_database) as (proxy, proxied_url):
+        try:
+            first_port = _unused_port()
+            first = _start_server(proxied_url, "network-first", first_port)
+            processes.append(first)
+            second_port = _unused_port()
+            second = _start_server(clean_postgres_database, "network-second", second_port)
+            processes.append(second)
+            first_url = f"http://127.0.0.1:{first_port}"
+            second_url = f"http://127.0.0.1:{second_port}"
+            first_ws = f"ws://127.0.0.1:{first_port}/v1/rooms/network-room/ws?username=Alice"
+            second_ws = f"ws://127.0.0.1:{second_port}/v1/rooms/network-room/ws?username=Bob"
+            async with httpx.AsyncClient(headers=headers, timeout=5, trust_env=False) as client:
+                await asyncio.gather(_wait_ready(client, first_url, first), _wait_ready(client, second_url, second))
+                assert (
+                    await client.post(f"{second_url}/v1/rooms", json={"id": "network-room", "name": "Network"})
+                ).status_code == 201
+                async with websockets.connect(
+                    second_ws, additional_headers=headers, open_timeout=5, close_timeout=1
+                ) as bob:
+                    assert json.loads(await asyncio.wait_for(bob.recv(), 5))["type"] == "ready"
+                    assert json.loads(await asyncio.wait_for(bob.recv(), 5))["type"] == "history"
+                    async with websockets.connect(
+                        first_ws, additional_headers=headers, open_timeout=5, close_timeout=1
+                    ) as alice:
+                        assert json.loads(await asyncio.wait_for(alice.recv(), 5))["type"] == "ready"
+                        assert json.loads(await asyncio.wait_for(alice.recv(), 5))["type"] == "history"
+                        await _receive_type(bob, "presence.joined", username="Alice")
+                        await bob.send(json.dumps({"type": "message", "content": "before interruption"}))
+                        before = await _receive_type(alice, "message.created")
+                        assert (await _receive_type(bob, "message.created"))["message"]["id"] == before["message"]["id"]
+
+                        proxy.cut()
+                        await asyncio.wait_for(alice.wait_closed(), timeout=10)
+                        assert alice.close_code == 1012
+                        assert first.poll() is None, "database interruption must not kill the application process"
+                        assert (await client.get(f"{first_url}/healthz")).status_code == 200
+                        unavailable = await client.get(f"{first_url}/readyz")
+                        assert unavailable.status_code == 503
+                        assert unavailable.json() == {"status": "not_ready"}
+                        assert (await client.get(f"{second_url}/readyz")).status_code == 200
+                        left = await _receive_type(bob, "presence.left", username="Alice")
+                        assert left["active_connections"] == 1
+
+                        rejected = await client.post(
+                            f"{first_url}/v1/rooms/network-room/messages",
+                            json={"sender": "Alice", "content": "must not commit"},
+                        )
+                        assert rejected.status_code == 503
+                        assert rejected.json() == {
+                            "error": {
+                                "code": "storage_unavailable",
+                                "message": "Chat storage is temporarily unavailable",
+                            }
+                        }
+                        await bob.send(json.dumps({"type": "message", "content": "during interruption"}))
+                        during = await _receive_type(bob, "message.created")
+                        proxy.enabled = True
+                        await _wait_ready(client, first_url, first)
+
+                    async with websockets.connect(
+                        first_ws, additional_headers=headers, open_timeout=5, close_timeout=1
+                    ) as recovered:
+                        assert json.loads(await asyncio.wait_for(recovered.recv(), 5))["type"] == "ready"
+                        history = json.loads(await asyncio.wait_for(recovered.recv(), 5))
+                        assert history["type"] == "history"
+                        assert {item["id"] for item in history["items"]} == {
+                            before["message"]["id"],
+                            during["message"]["id"],
+                        }
+                        await _receive_type(bob, "presence.joined", username="Alice")
+                        await recovered.send(json.dumps({"type": "message", "content": "after recovery"}))
+                        after = await _receive_type(recovered, "message.created")
+                        assert (await _receive_type(bob, "message.created"))["message"]["id"] == after["message"]["id"]
+                        assert (await client.get(f"{first_url}/v1/stats")).json() == {"active_connections": 2}
+        finally:
+            # The proxy must keep forwarding while graceful process shutdown releases database leases.
+            proxy.enabled = True
+            for process in reversed(processes):
+                await asyncio.to_thread(_stop_server, process)

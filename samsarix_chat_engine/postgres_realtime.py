@@ -103,15 +103,31 @@ class PostgresRealtimeRelay:
         self._cursor: int | None = None
         self._generation: UUID | None = None
         self._next_heartbeat = 0.0
+        self._lease_deadline = 0.0
         self._stop = asyncio.Event()
         self._fenced = False
         self._fence_required = False
         self._gap_recovery_required = False
 
+    @property
+    def ready(self) -> bool:
+        """Require a locally unexpired claim and no pending socket fence or recovery."""
+
+        return (
+            self._cursor is not None
+            and self._generation is not None
+            and not self._fenced
+            and not self._fence_required
+            and not self._gap_recovery_required
+            and not self._stop.is_set()
+            and asyncio.get_running_loop().time() < self._lease_deadline
+        )
+
     async def initialize(self) -> int:
         """Register or renew this process cursor and return its acknowledged sequence."""
 
         self._stop.clear()
+        started = asyncio.get_running_loop().time()
         registration = await self.foundation.claim_instance(
             self.instance_id,
             lease_seconds=self.lease_seconds,
@@ -119,6 +135,7 @@ class PostgresRealtimeRelay:
         )
         self._generation = registration.generation
         self._cursor = registration.last_sequence
+        self._lease_deadline = started + self.lease_seconds
         self._next_heartbeat = asyncio.get_running_loop().time() + self.lease_seconds / 3
         self._fenced = False
         self._fence_required = False
@@ -157,11 +174,13 @@ class PostgresRealtimeRelay:
             raise RuntimeError("realtime relay is not initialized")
         if self._generation is None:
             raise RuntimeError("realtime relay generation is not initialized")
+        started = asyncio.get_running_loop().time()
         await self.foundation.heartbeat_claimed_instance(
             self.instance_id,
             generation=self._generation,
             lease_seconds=self.lease_seconds,
         )
+        self._lease_deadline = started + self.lease_seconds
         self._next_heartbeat = asyncio.get_running_loop().time() + self.lease_seconds / 3
 
     async def run(self) -> None:
@@ -175,6 +194,7 @@ class PostgresRealtimeRelay:
                 if self._gap_recovery_required:
                     if self._generation is None:
                         raise RuntimeError("realtime relay generation is not initialized")
+                    started = asyncio.get_running_loop().time()
                     registration = await self.foundation.recover_claimed_instance_after_gap(
                         self.instance_id,
                         generation=self._generation,
@@ -182,6 +202,7 @@ class PostgresRealtimeRelay:
                     )
                     self._generation = registration.generation
                     self._cursor = registration.last_sequence
+                    self._lease_deadline = started + self.lease_seconds
                     self._next_heartbeat = asyncio.get_running_loop().time() + self.lease_seconds / 3
                     self._gap_recovery_required = False
                     self._fenced = False
