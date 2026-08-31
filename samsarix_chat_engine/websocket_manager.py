@@ -46,7 +46,7 @@ class ConnectionManager:
         broadcast_ready: bool = True,
         admission_check: Callable[[], bool] | None = None,
     ) -> bool:
-        """Register an already-accepted socket, returning false at capacity."""
+        """Register an accepted socket; reject duplicates, failed guards, or capacity."""
 
         async with self._lock:
             if websocket in self._metadata:
