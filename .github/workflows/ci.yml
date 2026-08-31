@@ -13,6 +13,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  postgres-load:
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [steady, count, age, retained-gap]
+    uses: ./.github/workflows/postgres-load.yml
+    with:
+      scenario: ${{ matrix.scenario }}
+      duration: 180
+      rate: 20
+      clients_per_room: 8
+
   test:
     strategy:
       fail-fast: false
