@@ -34,6 +34,7 @@ class RecordingTarget:
         self.fail_close_all_once = fail_close_all_once
         self.broadcasted = asyncio.Event()
         self.fenced = asyncio.Event()
+        self.event_sequences: list[int | None] = []
 
     async def broadcast(
         self,
@@ -41,11 +42,13 @@ class RecordingTarget:
         event: dict[str, Any],
         *,
         exclude_connection_id: str | None = None,
+        event_sequence: int | None = None,
     ) -> None:
         self.broadcast_attempts += 1
         if self.broadcast_attempts == self.fail_on_broadcast_number:
             raise RuntimeError("local dispatch failed")
         self.broadcasts.append((room_id, event, exclude_connection_id))
+        self.event_sequences.append(event_sequence)
         self.broadcasted.set()
 
     async def close_room(
@@ -55,8 +58,10 @@ class RecordingTarget:
         *,
         code: int = 4409,
         reason: str = "Room archived",
+        event_sequence: int | None = None,
     ) -> None:
         self.closed_rooms.append((room_id, event, code, reason))
+        self.event_sequences.append(event_sequence)
 
     async def close_member(
         self,
@@ -66,8 +71,10 @@ class RecordingTarget:
         *,
         code: int = 4403,
         reason: str = "Room access revoked",
+        event_sequence: int | None = None,
     ) -> int:
         self.closed_members.append((room_id, subject, event, code, reason))
+        self.event_sequences.append(event_sequence)
         return 1
 
     async def close_all(self) -> None:
@@ -137,6 +144,7 @@ async def test_two_relays_receive_each_committed_public_event_once(clean_postgre
             assert [event[1]["type"] for event in target.broadcasts] == ["message.created", "room.frozen"]
             assert [(room_id, subject) for room_id, subject, *_rest in target.closed_members] == [("general", "alice")]
             assert [event[1]["type"] for event in target.closed_rooms] == ["room.archived"]
+            assert target.event_sequences == list(range(archived_sequence - 3, archived_sequence + 1))
         assert await first_foundation.register_instance("relay-first", lease_seconds=30) > archived_sequence
         assert await second_foundation.register_instance("relay-second", lease_seconds=30) > archived_sequence
     finally:
@@ -389,6 +397,7 @@ async def test_presence_and_typing_dispatch_exclude_origin_without_leaking_inter
         ("general", {"type": "typing.started", "username": "alice", "expires_in": 8}, "socket-a"),
         ("general", {"type": "presence.left", "username": "alice", "active_connections": 1}, "socket-a"),
     ]
+    assert target.event_sequences == [1, 2]
 
 
 @pytest.mark.asyncio

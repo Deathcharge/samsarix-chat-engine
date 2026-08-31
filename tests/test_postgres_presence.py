@@ -39,14 +39,14 @@ async def test_join_and_owned_release_emit_exact_room_counts(clean_postgres_data
             max_connections=5,
             max_connections_per_room=5,
         )
-        assert await registry.try_acquire(
+        first = await registry.try_acquire(
             connection_id="socket-a",
             instance_id="node-a",
             room_id="general",
             username="alice",
             subject="alice",
         )
-        assert await registry.try_acquire(
+        second = await registry.try_acquire(
             connection_id="socket-b",
             instance_id="node-b",
             room_id="general",
@@ -65,6 +65,8 @@ async def test_join_and_owned_release_emit_exact_room_counts(clean_postgres_data
         assert [event.payload["active_connections"] for event in events] == [1, 2, 1]
         assert [event.payload["username"] for event in events] == ["alice", "bob", "alice"]
         assert events[0].payload["origin_connection_id"] == "socket-a"
+        assert first is not None and first.admission_sequence == events[0].sequence
+        assert second is not None and second.admission_sequence == events[1].sequence
     finally:
         await store.close()
 

@@ -209,6 +209,7 @@ class PostgresApplicationRuntime:
                 subject,
                 connection_id=connection_id,
                 broadcast_ready=False,
+                after_sequence=lease.admission_sequence,
                 admission_check=admission_check,
             )
             if not registered and not admission_check():

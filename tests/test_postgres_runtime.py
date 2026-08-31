@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
@@ -13,7 +14,7 @@ import pytest
 
 pytest.importorskip("psycopg")
 
-from samsarix_chat_engine.postgres import PostgresUnavailableError  # noqa: E402
+from samsarix_chat_engine.postgres import PostgresUnavailableError, RealtimeEvent  # noqa: E402
 from samsarix_chat_engine.postgres_realtime import PostgresRealtimeRelay  # noqa: E402
 from samsarix_chat_engine.postgres_runtime import PostgresApplicationRuntime  # noqa: E402
 from samsarix_chat_engine.websocket_manager import ConnectionManager  # noqa: E402
@@ -104,7 +105,7 @@ async def _admission_runtime() -> tuple[PostgresApplicationRuntime, ConnectionMa
     runtime.instance_id = "admission-test"
     runtime.relay = PostgresRealtimeRelay(foundation, manager, instance_id=runtime.instance_id)
     runtime.connections = SimpleNamespace(
-        try_acquire=AsyncMock(return_value=SimpleNamespace(instance_generation=generation)),
+        try_acquire=AsyncMock(return_value=SimpleNamespace(instance_generation=generation, admission_sequence=20)),
         release=AsyncMock(return_value=True),
     )
     await runtime.relay.initialize()
@@ -213,7 +214,7 @@ async def test_admission_capacity_rejection_releases_only_acquired_reservations(
 @pytest.mark.asyncio
 async def test_admission_rejects_a_reservation_owned_by_another_database_generation() -> None:
     runtime, manager = await _admission_runtime()
-    runtime.connections.try_acquire.return_value = SimpleNamespace(instance_generation=uuid4())
+    runtime.connections.try_acquire.return_value = SimpleNamespace(instance_generation=uuid4(), admission_sequence=20)
     with pytest.raises(PostgresUnavailableError):
         await runtime.admit_connection(
             manager, Mock(), connection_id="socket", room_id="room", username="A", subject=None
@@ -308,3 +309,60 @@ async def test_known_duplicate_reservation_error_does_not_release_existing_owner
             manager, Mock(), connection_id="existing-socket", room_id="room", username="A", subject=None
         )
     runtime.connections.release.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "room.archived",
+        "member.moderation.updated",
+        "presence.joined",
+        "presence.left",
+        "room.frozen",
+        "room.unfrozen",
+        "message.created",
+        "message.updated",
+        "message.deleted",
+        "typing.started",
+        "typing.stopped",
+    ],
+)
+@pytest.mark.parametrize("sequence", [10, 20, 21])
+async def test_relay_events_respect_the_connection_admission_boundary(kind, sequence):
+    runtime, manager = await _admission_runtime()
+    runtime.connections.try_acquire.return_value.admission_sequence = 20
+    websocket = Mock(send_json=AsyncMock(), close=AsyncMock())
+    assert await runtime.admit_connection(
+        manager, websocket, connection_id="new-socket", room_id="room", username="Alice", subject="alice"
+    )
+    assert await manager.activate(websocket)
+    if kind == "member.moderation.updated":
+        payload = {
+            "type": kind,
+            "moderation": {
+                "room_id": "room",
+                "subject": "alice",
+                "muted_until": None,
+                "banned_until": "2100-01-01T00:00:00+00:00",
+                "updated_at": "2026-08-31T00:00:00+00:00",
+            },
+        }
+    else:
+        payload = {"type": kind, "room": {"id": "room"}, "username": "Old peer", "active_connections": 1}
+    event = RealtimeEvent(
+        sequence=sequence, room_id="room", event_type=kind, payload=payload, created_at=datetime.now(timezone.utc)
+    )
+    await runtime.relay._dispatch(event)
+    if sequence <= 20:
+        websocket.send_json.assert_not_awaited()
+        websocket.close.assert_not_awaited()
+        assert manager.active_connections == 1
+    else:
+        websocket.send_json.assert_awaited_once()
+        if kind in {"room.archived", "member.moderation.updated"}:
+            websocket.close.assert_awaited_once()
+            assert manager.active_connections == 0
+        else:
+            websocket.close.assert_not_awaited()
+            assert manager.active_connections == 1

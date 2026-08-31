@@ -47,6 +47,7 @@ class ConnectionMetadata:
     connection_id: str | None
     operation_lock: asyncio.Lock
     broadcast_ready: bool
+    after_sequence: int | None = None
     pending: deque[_PendingEvent] = field(default_factory=deque)
     pending_bytes: int = 0
     inflight: _PendingEvent | None = None
@@ -90,10 +91,12 @@ class ConnectionManager:
         *,
         connection_id: str | None = None,
         broadcast_ready: bool = True,
+        after_sequence: int | None = None,
         admission_check: Callable[[], bool] | None = None,
     ) -> bool:
         """Register an accepted socket; reject duplicates, failed guards, or capacity."""
 
+        _validate_sequence(after_sequence)
         async with self._lock:
             if websocket in self._metadata:
                 return False
@@ -112,6 +115,7 @@ class ConnectionManager:
                 connection_id,
                 asyncio.Lock(),
                 broadcast_ready,
+                after_sequence,
             )
             return True
 
@@ -216,9 +220,11 @@ class ConnectionManager:
         *,
         exclude: WebSocket | None = None,
         exclude_connection_id: str | None = None,
+        event_sequence: int | None = None,
     ) -> None:
         """Send to active peers; queue bounded snapshots for initializing peers."""
 
+        _validate_sequence(event_sequence)
         recipients: list[tuple[WebSocket, asyncio.Lock]] = []
         overflow: list[tuple[WebSocket, asyncio.Lock]] = []
         buffered: _PendingEvent | None = None
@@ -226,6 +232,8 @@ class ConnectionManager:
         async with self._lock:
             for connection in tuple(self._rooms.get(room_id, ())):
                 metadata = self._metadata[connection]
+                if not _accepts_sequence(metadata, event_sequence):
+                    continue
                 if connection is exclude or (
                     exclude_connection_id is not None and metadata.connection_id == exclude_connection_id
                 ):
@@ -291,10 +299,12 @@ class ConnectionManager:
         *,
         code: int = 4409,
         reason: str = "Room archived",
+        event_sequence: int | None = None,
     ) -> None:
         """Notify, remove, and deterministically close every socket in one room."""
 
-        connections = await self._detach_room_connections(room_id)
+        _validate_sequence(event_sequence)
+        connections = await self._detach_room_connections(room_id, event_sequence=event_sequence)
         if connections:
             await asyncio.gather(
                 *(
@@ -311,10 +321,12 @@ class ConnectionManager:
         *,
         code: int = 4403,
         reason: str = "Room access revoked",
+        event_sequence: int | None = None,
     ) -> int:
         """Notify and close every socket for one authenticated room subject."""
 
-        connections = await self._detach_room_connections(room_id, subject=subject)
+        _validate_sequence(event_sequence)
+        connections = await self._detach_room_connections(room_id, subject=subject, event_sequence=event_sequence)
         if connections:
             await asyncio.gather(
                 *(
@@ -329,6 +341,7 @@ class ConnectionManager:
         room_id: str,
         *,
         subject: str | None = None,
+        event_sequence: int | None = None,
     ) -> tuple[tuple[WebSocket, asyncio.Lock], ...]:
         """Atomically detach all room sockets or only those for one subject."""
 
@@ -339,7 +352,8 @@ class ConnectionManager:
             connections = tuple(
                 (connection, self._metadata[connection].operation_lock)
                 for connection in room_connections
-                if subject is None or self._metadata[connection].subject == subject
+                if (subject is None or self._metadata[connection].subject == subject)
+                and _accepts_sequence(self._metadata[connection], event_sequence)
             )
             for connection, _operation_lock in connections:
                 metadata = self._metadata.pop(connection)
@@ -410,3 +424,12 @@ class ConnectionManager:
 
     def room_connections(self, room_id: str) -> int:
         return len(self._rooms.get(room_id, ()))
+
+
+def _validate_sequence(sequence: int | None) -> None:
+    if sequence is not None and (type(sequence) is not int or sequence < 0):
+        raise ValueError("event sequence must be a nonnegative integer or None")
+
+
+def _accepts_sequence(metadata: ConnectionMetadata, event_sequence: int | None) -> bool:
+    return event_sequence is None or metadata.after_sequence is None or event_sequence > metadata.after_sequence
