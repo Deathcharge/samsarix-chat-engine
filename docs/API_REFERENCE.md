@@ -242,7 +242,7 @@ Live events are:
 - `message.created`: contains `message` and `idempotent_replay`.
 - `message.updated`: contains the committed current `message`.
 - `message.deleted`: contains the committed message tombstone.
-- `presence.joined` / `presence.left`: contains `username` and the current room connection count; best effort only.
+- `presence.joined` / `presence.left`: contains `username` and the room connection count when the event was produced; best effort only. Queued or delayed events can predate the count in `ready`, so their counts are not fresh measurements at receipt and are never an authorization input.
 - `typing.started`: contains `username` and `expires_in`; sent to other connections only when a user transitions to typing.
 - `typing.stopped`: contains `username`; sent after an explicit stop, successful publish, disconnect, or server timeout.
 - `pong`: response to an application-level ping command.

@@ -82,6 +82,11 @@ def test_two_app_instances_share_http_websocket_presence_typing_and_messages(
                 bob.send_json({"type": "message", "content": "Across processes", "client_message_id": "cross-1"})
                 alice_message = alice.receive_json()
                 bob_message = bob.receive_json()
+                if bob_message["type"] == "presence.joined":
+                    # Initialization buffering can retain Alice's older join while
+                    # this replica catches up. Counts are event-time snapshots.
+                    assert bob_message == {"type": "presence.joined", "username": "Alice", "active_connections": 1}
+                    bob_message = bob.receive_json()
                 assert alice_message["type"] == "message.created"
                 assert alice_message == bob_message
                 assert alice_message["message"]["content"] == "Across processes"

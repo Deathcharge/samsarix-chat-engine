@@ -153,6 +153,7 @@ class ConnectionManager:
                     metadata.inflight = None
                     metadata.pending_bytes -= event.size
                     self._pending_bytes -= event.size
+                    del event
 
     async def unregister(self, websocket: WebSocket) -> tuple[str, str] | None:
         """Remove a socket and return its room/user metadata once."""
@@ -236,7 +237,7 @@ class ConnectionManager:
                     try:
                         payload = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
                         buffered = _PendingEvent(payload, len(payload.encode("utf-8")))
-                    except (TypeError, ValueError, UnicodeError):
+                    except (TypeError, ValueError, UnicodeError, RecursionError):
                         invalid_payload = True
                 if (
                     buffered is None

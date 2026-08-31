@@ -217,6 +217,21 @@ async def test_unserializable_pending_broadcast_fails_closed(value):
     assert connections._pending_bytes == 0
 
 
+@pytest.mark.asyncio
+async def test_excessively_nested_embedded_event_fails_closed():
+    connections = manager()
+    target = Socket()
+    await connections.register(socket(target), "room", "A", broadcast_ready=False)
+    value = None
+    # Python 3.14's C encoder can exceed the interpreter recursion limit;
+    # this depth also exercises its separate C-stack guard on Windows.
+    for _ in range(20_000):
+        value = [value]
+    await connections.broadcast("room", {"type": "nested", "value": value})
+    assert target.closed[0][0] == 1013
+    assert connections._pending_bytes == 0
+
+
 @pytest.mark.parametrize("name", ["max_pending_events", "max_pending_bytes", "max_total_pending_bytes"])
 @pytest.mark.parametrize("value", [0, -1, True, 0.5])
 def test_buffer_limits_reject_unbounded_or_ambiguous_values(name, value):
