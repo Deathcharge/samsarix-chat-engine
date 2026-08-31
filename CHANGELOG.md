@@ -6,6 +6,7 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 
 ### Added
 
+- PostgreSQL live-relay backlog limits: `SAMSARIX_CHAT_POSTGRES_RELAY_MAX_PENDING_EVENTS` (default 10000) and `SAMSARIX_CHAT_POSTGRES_RELAY_MAX_EVENT_AGE` (default 30 seconds). A pre-batch count/age violation fails readiness and fences local sockets with 1012 before rotating the claim to the committed head; reconnecting clients reload history. Recovery retries preserve one UUID/cursor after an ambiguous reply and cannot overwrite another owner. The application uses this retry-safe recovery for retained gaps too. Limits do not promise a maximum delivery delay or hard disk bound.
 - Accepted PostgreSQL multi-instance architecture and explicit cross-process correctness, recovery, capacity, moderation, webhook, migration, and failure-test gates for v0.13.
 - Storage-neutral `ChatStorage` protocol between application/webhook orchestration and the existing SQLite backend.
 - Optional `postgres` installation extra and an internal PostgreSQL foundation with advisory-lock schema initialization, a transaction-coupled ordered realtime event log, and durable per-instance cursors.
