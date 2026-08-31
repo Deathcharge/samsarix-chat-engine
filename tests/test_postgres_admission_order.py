@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from samsarix_chat_engine import Settings, create_app
+from samsarix_chat_engine.models import MemberModerationUpdate
 
 pytestmark = pytest.mark.postgres
 
@@ -188,5 +189,46 @@ def test_older_presence_replay_is_excluded_but_newer_join_reaches_existing_peer(
                     }
                     newer.send_json({"type": "ping"})
                     assert newer.receive_json() == {"type": "pong"}
+        finally:
+            client.portal.call(resume.set)
+
+
+def test_ban_committed_before_admission_is_still_rejected_without_relay_help(clean_postgres_database, monkeypatch):
+    application = _app(clean_postgres_database, "admission-authorization-recheck")
+    with TestClient(application) as client:
+        assert (
+            client.post("/v1/rooms", headers={"X-API-Key": _KEY}, json={"id": "room", "name": "Room"}).status_code
+            == 201
+        )
+        runtime = application.state.postgres_runtime
+        acquire = runtime.connections.try_acquire
+        paused, resume = _pause_event(application, monkeypatch, "member.moderation.updated")
+
+        async def ban_before_acquisition(**kwargs):
+            # The initial authorization check has passed. This ban predates
+            # the join event and will be excluded by the new relay floor.
+            await runtime.store.set_member_moderation(
+                "room", "alice", MemberModerationUpdate(banned_for_seconds=300), actor="operator"
+            )
+            return await acquire(**kwargs)
+
+        async def lease_rows():
+            async with runtime.store.foundation.transaction() as connection:
+                cursor = await connection.execute("SELECT COUNT(*) FROM public.samsarix_connection_leases")
+                return (await cursor.fetchone())[0]
+
+        monkeypatch.setattr(runtime.connections, "try_acquire", ban_before_acquisition)
+        try:
+            with client.websocket_connect("/v1/rooms/room/ws", headers=_member_headers(application)) as websocket:
+                error = websocket.receive_json()
+                assert error["type"] == "error"
+                assert error["code"] == "room_banned"
+                with pytest.raises(WebSocketDisconnect) as closed:
+                    websocket.receive_json()
+                assert closed.value.code == 4403
+            assert paused.wait(5), "ban relay did not reach barrier"
+            assert application.state.connections.active_connections == 0
+            assert client.portal.call(lease_rows) == 0
+            assert client.get("/readyz").status_code == 200
         finally:
             client.portal.call(resume.set)
