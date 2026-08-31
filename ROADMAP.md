@@ -107,12 +107,12 @@ This makes the supported topology repeatable without implying that a container m
 - [x] prove a killed webhook worker's live claim is recovered by a separate surviving process after natural database lease expiry, retaining signed ID/body, while deletion-before-reclaim cancels pending payloads;
 - [x] enforce a total webhook network-attempt deadline, interrupt owned TCP/TLS sockets on stop/cancellation, and bound unresolved native DNS to one daemon job without blocking process exit; storage and whole-process shutdown retain separate budgets;
 - [x] verify kernel-paused process count/age lag and natural expiry/pruned-gap recovery through lifecycle changes, tombstoned history, bounded signed-member reconnect and healthy-peer continuity;
-- [ ] prove measured live-lag and combined lifecycle/outage/reconnect-storm behavior before stronger reconnect-delivery claims;
+- [x] prove measured live-lag and combined lifecycle/outage/reconnect-storm behavior before stronger reconnect-delivery claims;
 - [ ] prove kernel-level packet blackholes and database failover against real network processes;
-- [ ] run sustained load/soak and reconnect-storm tests and publish measured limits;
+- [ ] run sustained controlled-host load/soak tests and publish owner-environment capacity limits; the checked reconnect-storm profile remains a bounded three-minute shared-runner measurement;
 - [x] verify a hardened Kubernetes preview derives each replica's stable instance ID from its StatefulSet Pod name and rejects duplicate live ownership;
 - [x] execute the checked two-replica manifest in pinned disposable kind, with TLS-verified PostgreSQL, cross-replica HTTP/WebSocket delivery, exact live identities, and same-version Pod replacement;
-- [ ] validate separate-process live-lag and retained-gap recovery under measured traffic;
+- [x] validate separate-process live-lag and retained-gap recovery under measured traffic;
 - [x] exercise and publish a PostgreSQL-native logical dump into a fresh database, application-level restore verification, post-restore writes, and rollback runbook;
 - [x] exercise a verified physical base backup, archived-WAL replay to a named point, recovered-timeline application checks, post-recovery writes, and application-role fencing on a disposable CI cluster;
 - [ ] prove external old-primary process/network fencing, routing cutover, database failover and failback on controlled infrastructure;
