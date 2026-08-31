@@ -8,12 +8,12 @@ import type {
   Credential,
   RoomEvent,
   RoomSessionOptions,
-  WebSocketCloseEventLike,
   WebSocketFactory,
   WebSocketLike,
 } from "./types.js";
 
 const OPEN = 1;
+const MAX_TIMER_MS = 2_147_483_647;
 const TERMINAL_CLOSE_CODES = new Set([1000, 1002, 1008, 4401, 4403, 4404, 4409]);
 const EVENT_TYPES = new Set([
   "auth.required",
@@ -43,6 +43,7 @@ interface ReconnectPolicy {
   maxDelayMs: number;
   maxAttempts: number;
   jitter: number;
+  stableConnectionMs: number;
 }
 
 export class RoomSession {
@@ -50,6 +51,7 @@ export class RoomSession {
   private readonly client: SamsarixChatClient;
   private readonly username?: string;
   private readonly reconnect: ReconnectPolicy;
+  private readonly handshakeTimeoutMs: number;
   private readonly onListenerError: (error: unknown) => void;
   private readonly eventListeners = new Set<EventListener>();
   private readonly stateListeners = new Set<StateListener>();
@@ -58,6 +60,9 @@ export class RoomSession {
   private resolveConnect: (() => void) | undefined;
   private rejectConnect: ((error: Error) => void) | undefined;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  private handshakeTimer: ReturnType<typeof setTimeout> | undefined;
+  private stableTimer: ReturnType<typeof setTimeout> | undefined;
+  private phase: "opening" | "ready" | "history" | "active" = "opening";
   private generation = 0;
   private attempts = 0;
   private manuallyClosed = false;
@@ -74,6 +79,7 @@ export class RoomSession {
       this.username = options.username;
     }
     this.reconnect = reconnectPolicy(options.reconnect);
+    this.handshakeTimeoutMs = boundedDuration(options.handshakeTimeoutMs ?? 10_000, "handshakeTimeoutMs");
     this.onListenerError = options.onListenerError ?? (() => undefined);
   }
 
@@ -89,32 +95,36 @@ export class RoomSession {
       return this.connectPromise;
     }
     this.manuallyClosed = false;
-    this.connectPromise = new Promise<void>((resolve, reject) => {
+    const promise = new Promise<void>((resolve, reject) => {
       this.resolveConnect = resolve;
       this.rejectConnect = reject;
     });
+    this.connectPromise = promise;
     if (this.currentState !== "reconnecting") {
       this.attempts = 0;
       void this.openSocket(false);
     }
-    return this.connectPromise;
+    // A synchronous state listener may close or reconnect during openSocket.
+    return promise;
   }
 
   close(code = 1000, reason = "Client closed"): void {
+    if (!Number.isInteger(code) || (code !== 1000 && (code < 3000 || code > 4999))) {
+      throw new RangeError("close code must be 1000 or an integer between 3000 and 4999");
+    }
+    if (new TextEncoder().encode(reason).byteLength > 123) {
+      throw new RangeError("close reason must not exceed 123 UTF-8 bytes");
+    }
     this.manuallyClosed = true;
-    this.generation += 1;
     if (this.reconnectTimer !== undefined) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = undefined;
     }
     const error = new SamsarixConnectionError(reason, code);
+    const socket = this.detachAttempt();
     this.rejectPending(error);
-    const socket = this.socket;
-    this.socket = undefined;
-    if (socket !== undefined && socket.readyState <= OPEN) {
-      socket.close(code, reason);
-    }
     this.setState("closed");
+    closeTransport(socket, code, reason);
   }
 
   sendMessage(content: string, clientMessageId?: string): void {
@@ -155,100 +165,154 @@ export class RoomSession {
 
   private async openSocket(reconnecting: boolean): Promise<void> {
     const generation = ++this.generation;
+    this.phase = "opening";
+    this.maxMessageChars = undefined;
+    this.handshakeTimer = setTimeout(() => {
+      this.failAttempt(generation, new SamsarixConnectionError("WebSocket handshake timed out", 4008), 4008);
+    }, this.handshakeTimeoutMs);
     this.setState(reconnecting ? "reconnecting" : "connecting");
+    if (!this.isCurrent(generation)) return;
     try {
       const credential = await this.client.credential();
-      if (generation !== this.generation || this.manuallyClosed) {
-        return;
-      }
+      if (!this.isCurrent(generation)) return;
       let url: string;
       try {
         url = websocketUrl(this.client.baseUrl, this.roomId, credential, this.username);
       } catch (error) {
-        this.rejectPending(asConnectionError(error));
-        this.setState("closed");
+        this.failAttempt(generation, asConnectionError(error), 4000, false);
         return;
       }
       const factory = this.client.webSocketFactory ?? defaultWebSocketFactory;
       const socket = factory(url);
+      if (!this.isCurrent(generation)) {
+        closeTransport(socket, 1000, "Connection cancelled");
+        return;
+      }
       this.socket = socket;
       socket.onopen = () => undefined;
       socket.onmessage = (event) => {
-        if (generation === this.generation) {
-          this.handleMessage(socket, credential, event.data);
+        if (this.isCurrent(generation)) {
+          try {
+            this.handleMessage(generation, socket, credential, event.data);
+          } catch (error) {
+            this.failAttempt(generation, asConnectionError(error), 4000);
+          }
         }
       };
       socket.onerror = () => {
-        if (generation === this.generation && this.currentState !== "connected") {
-          this.rejectPending(new SamsarixConnectionError("WebSocket connection failed"));
-        }
+        this.failAttempt(generation, new SamsarixConnectionError("WebSocket connection failed"), 4000);
       };
       socket.onclose = (event) => {
-        if (generation === this.generation) {
-          this.handleClose(event);
-        }
+        this.failAttempt(
+          generation,
+          new SamsarixConnectionError(event.reason || "WebSocket closed", event.code),
+          4000,
+          !TERMINAL_CLOSE_CODES.has(event.code),
+        );
       };
     } catch (error) {
-      if (generation !== this.generation) {
-        return;
-      }
-      const connectionError = asConnectionError(error);
-      this.rejectPending(connectionError);
-      this.scheduleReconnect(1006);
+      this.failAttempt(generation, asConnectionError(error), 4000);
     }
   }
 
-  private handleMessage(socket: WebSocketLike, credential: Credential, data: unknown): void {
+  private handleMessage(generation: number, socket: WebSocketLike, credential: Credential, data: unknown): void {
     if (typeof data !== "string") {
-      socket.close(1002, "JSON text events required");
+      this.protocolError(generation, "JSON text events required");
       return;
     }
     let parsed: unknown;
     try {
       parsed = JSON.parse(data);
     } catch {
-      socket.close(1002, "Invalid JSON event");
+      this.protocolError(generation, "Invalid JSON event");
       return;
     }
     if (!isRoomEvent(parsed)) {
-      socket.close(1002, "Invalid event envelope");
+      this.protocolError(generation, "Invalid event envelope");
       return;
     }
     const event = parsed;
     if (event.type === "auth.required") {
+      if (this.phase !== "opening") {
+        this.protocolError(generation, "Unexpected authentication challenge");
+        return;
+      }
       socket.send(
         JSON.stringify("token" in credential ? { type: "auth", token: credential.token } : { type: "auth", api_key: credential.apiKey }),
       );
     } else if (event.type === "ready") {
-      this.attempts = 0;
+      if (this.phase !== "opening") {
+        this.protocolError(generation, "Unexpected ready event");
+        return;
+      }
+      this.phase = "ready";
       this.maxMessageChars = event.max_message_chars;
-      this.setState("connected");
-      this.resolveConnect?.();
+    } else if (event.type === "history") {
+      if (this.phase !== "ready") {
+        this.protocolError(generation, "Unexpected history event");
+        return;
+      }
+      this.phase = "history";
+    } else if (event.type === "pong" && this.phase === "history") {
+      this.phase = "active";
+      clearTimeout(this.handshakeTimer);
+      this.handshakeTimer = undefined;
+      this.stableTimer = setTimeout(() => {
+        if (!this.isCurrent(generation)) return;
+        this.stableTimer = undefined;
+        if (this.phase === "active" && socket.readyState === OPEN) {
+          this.attempts = 0;
+        }
+      }, this.reconnect.stableConnectionMs);
+      const resolve = this.resolveConnect;
       this.clearPending();
+      resolve?.();
+      this.setState("connected");
     }
     for (const listener of this.eventListeners) {
+      if (!this.isCurrent(generation)) return;
       this.notifyListener(() => listener(event));
     }
+    if (event.type === "history" && this.isCurrent(generation)) {
+      // The server enters its receive loop only after flushing the initial
+      // history handoff. Its reply confirms that activation, not durable replay.
+      socket.send(JSON.stringify({ type: "ping" }));
+    }
   }
 
-  private handleClose(event: WebSocketCloseEventLike): void {
+  private isCurrent(generation: number): boolean {
+    return generation === this.generation && !this.manuallyClosed;
+  }
+
+  private detachAttempt(): WebSocketLike | undefined {
+    this.generation += 1;
+    clearTimeout(this.handshakeTimer);
+    clearTimeout(this.stableTimer);
+    this.handshakeTimer = undefined;
+    this.stableTimer = undefined;
+    const socket = this.socket;
     this.socket = undefined;
-    if (this.manuallyClosed) {
-      this.setState("closed");
-      return;
+    if (socket !== undefined) {
+      socket.onopen = socket.onmessage = socket.onerror = socket.onclose = null;
     }
-    if (this.currentState !== "connected") {
-      this.rejectPending(new SamsarixConnectionError(event.reason || "WebSocket closed before ready", event.code));
-    }
-    if (TERMINAL_CLOSE_CODES.has(event.code)) {
-      this.setState("closed");
-      return;
-    }
-    this.scheduleReconnect(event.code);
+    return socket;
   }
 
-  private scheduleReconnect(closeCode: number): void {
-    if (!this.reconnect.enabled || this.attempts >= this.reconnect.maxAttempts || TERMINAL_CLOSE_CODES.has(closeCode)) {
+  private protocolError(generation: number, message: string): void {
+    // Browser close() rejects wire code 1002; keep it as the local error code.
+    this.failAttempt(generation, new SamsarixConnectionError(message, 1002), 4002, false);
+  }
+
+  private failAttempt(generation: number, error: SamsarixConnectionError, wireCode: number, retry = true): void {
+    if (!this.isCurrent(generation)) return;
+    const socket = this.detachAttempt();
+    this.rejectPending(error);
+    this.scheduleReconnect(retry);
+    closeTransport(socket, wireCode, "Client connection ended");
+  }
+
+  private scheduleReconnect(retry: boolean): void {
+    if (!retry || !this.reconnect.enabled || this.attempts >= this.reconnect.maxAttempts) {
       this.setState("closed");
       return;
     }
@@ -258,19 +322,30 @@ export class RoomSession {
       this.reconnect.initialDelayMs * 2 ** (this.attempts - 1),
     );
     const jitter = baseDelay * this.reconnect.jitter * (Math.random() * 2 - 1);
-    const delay = Math.max(0, Math.round(baseDelay + jitter));
-    this.setState("reconnecting");
+    const delay = Math.min(this.reconnect.maxDelayMs, Math.max(0, Math.round(baseDelay + jitter)));
+    const generation = this.generation;
     this.reconnectTimer = setTimeout(() => {
+      if (!this.isCurrent(generation)) return;
       this.reconnectTimer = undefined;
       void this.openSocket(true);
     }, delay);
+    // Publish only after installing the timer so listener-driven close can cancel it.
+    this.setState("reconnecting");
   }
 
   private send(payload: Record<string, unknown>): void {
     if (this.currentState !== "connected" || this.socket?.readyState !== OPEN) {
       throw new SamsarixConnectionError("Room session is not connected");
     }
-    this.socket.send(JSON.stringify(payload));
+    const generation = this.generation;
+    try {
+      this.socket.send(JSON.stringify(payload));
+    } catch (error) {
+      const failure = asConnectionError(error);
+      this.failAttempt(generation, failure, 4000);
+      // Delivery is ambiguous. Recover the connection, never replay a write.
+      throw failure;
+    }
   }
 
   private setState(state: ConnectionState): void {
@@ -278,7 +353,9 @@ export class RoomSession {
       return;
     }
     this.currentState = state;
+    const generation = this.generation;
     for (const listener of this.stateListeners) {
+      if (this.currentState !== state || this.generation !== generation) return;
       this.notifyListener(() => listener(state));
     }
   }
@@ -441,12 +518,14 @@ function reconnectPolicy(options: RoomSessionOptions["reconnect"]): ReconnectPol
     maxDelayMs: options?.maxDelayMs ?? 5_000,
     maxAttempts: options?.maxAttempts ?? 8,
     jitter: options?.jitter ?? 0.2,
+    stableConnectionMs: boundedDuration(options?.stableConnectionMs ?? 10_000, "stableConnectionMs"),
   };
-  if (!Number.isFinite(policy.initialDelayMs) || policy.initialDelayMs < 0) {
-    throw new RangeError("initialDelayMs must be a non-negative finite number");
+  if (typeof policy.enabled !== "boolean") throw new TypeError("reconnect.enabled must be a boolean");
+  if (!Number.isInteger(policy.initialDelayMs) || policy.initialDelayMs < 0 || policy.initialDelayMs > MAX_TIMER_MS) {
+    throw new RangeError(`initialDelayMs must be an integer between 0 and ${MAX_TIMER_MS}`);
   }
-  if (!Number.isFinite(policy.maxDelayMs) || policy.maxDelayMs < policy.initialDelayMs) {
-    throw new RangeError("maxDelayMs must be finite and at least initialDelayMs");
+  if (!Number.isInteger(policy.maxDelayMs) || policy.maxDelayMs < policy.initialDelayMs || policy.maxDelayMs > MAX_TIMER_MS) {
+    throw new RangeError(`maxDelayMs must be an integer at least initialDelayMs and no greater than ${MAX_TIMER_MS}`);
   }
   if (!Number.isInteger(policy.maxAttempts) || policy.maxAttempts < 0 || policy.maxAttempts > 100) {
     throw new RangeError("maxAttempts must be an integer between 0 and 100");
@@ -455,6 +534,24 @@ function reconnectPolicy(options: RoomSessionOptions["reconnect"]): ReconnectPol
     throw new RangeError("jitter must be between 0 and 1");
   }
   return policy;
+}
+
+function boundedDuration(value: number, name: string): number {
+  if (!Number.isInteger(value) || value < 1 || value > 300_000) {
+    throw new RangeError(`${name} must be an integer between 1 and 300000 milliseconds`);
+  }
+  return value;
+}
+
+function closeTransport(socket: WebSocketLike | undefined, code: number, reason: string): void {
+  if (socket !== undefined && socket.readyState <= OPEN) {
+    try {
+      socket.close(code, reason);
+    } catch {
+      // Local ownership/timers are already invalidated; a broken injected
+      // transport must not revive the session or prevent promise settlement.
+    }
+  }
 }
 
 function asConnectionError(error: unknown): SamsarixConnectionError {

@@ -166,10 +166,14 @@ export interface ReconnectOptions {
   maxDelayMs?: number;
   maxAttempts?: number;
   jitter?: number;
+  /** Reset the retry budget only after an activated connection stays open this long. Default 10000 ms. */
+  stableConnectionMs?: number;
 }
 
 export interface RoomSessionOptions {
   username?: string;
+  /** Deadline per attempt, including credentials, ready/history and activation pong. Default 10000 ms. */
+  handshakeTimeoutMs?: number;
   reconnect?: ReconnectOptions;
   onListenerError?: (error: unknown) => void;
 }

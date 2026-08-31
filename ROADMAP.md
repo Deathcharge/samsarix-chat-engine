@@ -102,6 +102,7 @@ This makes the supported topology repeatable without implying that a container m
 - [x] fence pre-admission relay events using the committed join sequence, with delayed archive/reopen, room recreation, ban/unban, freeze/unfreeze and presence acceptance;
 - [x] make current-schema startup inspection-only, retain serialized transactional upgrades, enforce exact readiness compatibility and close cancelled startup pools; live lock/rollback/replica tests gate acceptance;
 - [x] implement configurable pre-batch count/age lag fencing, retry-safe generation/cursor recovery, and controlled signed-member two-application history/fan-out acceptance;
+- [x] bound SDK connection attempts, wait for initial history/activation before publishing, retain retry budgets across flapping connections, and verify native-WebSocket reconnect/history/resumed delivery;
 - [ ] prove measured live-lag and combined lifecycle/outage/reconnect-storm behavior before stronger reconnect-delivery claims;
 - [ ] prove kernel-level packet blackholes, database failover, and notification-listener interruption against real network processes;
 - [ ] run sustained load/soak and reconnect-storm tests and publish measured limits;
