@@ -99,7 +99,8 @@ This makes the supported topology repeatable without implying that a container m
 - [x] finalize interrupted authenticated handshakes, shield cleanup from repeated cancellation, and verify physical PostgreSQL lease release/reconnect after initialization failure;
 - [x] distinguish archive/deletion from storage failures during admission and renewal, including reaped reservations and a deliberately delayed archive relay;
 - [x] replace dropped post-registration initialization broadcasts with bounded ready/history-to-live buffering and fail-closed overflow/deadline handling;
-- [ ] test rapid archive/reopen, obsolete lifecycle/presence snapshots from delayed relays, and live-lag fencing before stronger reconnect-delivery claims;
+- [x] fence pre-admission relay events using the committed join sequence, with delayed archive/reopen, room recreation, ban/unban, freeze/unfreeze and presence acceptance;
+- [ ] prove live-lag fencing and combined lifecycle/outage/reconnect-storm behavior before stronger reconnect-delivery claims;
 - [ ] prove kernel-level packet blackholes, database failover, and notification-listener interruption against real network processes;
 - [ ] run sustained load/soak and reconnect-storm tests and publish measured limits;
 - [ ] verify deployment manifests assign a unique stable instance ID to every replica and reject duplicate live ownership;

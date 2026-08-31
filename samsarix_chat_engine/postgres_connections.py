@@ -51,6 +51,7 @@ class ConnectionLease:
     subject: str | None
     lease_expires_at: datetime
     created_at: datetime
+    admission_sequence: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,7 +207,7 @@ class PostgresConnectionRegistry:
             row = await cursor.fetchone()
             if row is not None:
                 active_connections = await _room_active_count(connection, room_id)
-                await self._append_presence(
+                admission_sequence = await self._append_presence(
                     connection,
                     active=True,
                     connection_id=connection_id,
@@ -216,7 +217,7 @@ class PostgresConnectionRegistry:
                 )
         if row is None:
             raise InstanceLeaseError("instance lease expired before connection reservation")
-        return _lease_from_row(row)
+        return _lease_from_row(row, admission_sequence=admission_sequence)
 
     async def renew(self, *, connection_id: str, instance_id: str, room_id: str) -> datetime:
         """Extend one live connection only while its owner and room remain usable."""
@@ -515,8 +516,9 @@ def _room_snapshot(row: tuple[Any, ...]) -> Room:
     )
 
 
-def _lease_from_row(row: tuple[Any, ...]) -> ConnectionLease:
+def _lease_from_row(row: tuple[Any, ...], *, admission_sequence: int) -> ConnectionLease:
     return ConnectionLease(
+        admission_sequence=admission_sequence,
         connection_id=str(row[0]),
         instance_id=str(row[1]),
         instance_generation=cast(UUID, row[2]),

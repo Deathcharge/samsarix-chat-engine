@@ -61,16 +61,16 @@ def _exercise_snapshot_gap(settings, monkeypatch):
                 initial = websocket.receive_json()
                 assert initial["type"] == "history"
                 assert initial["items"] == [original_message.json()]
-                # The PostgreSQL relay can also replay the original create after
-                # registration. Merge by ID; never assume history/live are disjoint.
+                # The original create predates admission and is excluded. Only
+                # the three mutations committed during the pause can follow.
                 merged = {item["id"]: item for item in initial["items"]}
                 seen = []
-                while "message.deleted" not in seen:
+                for _ in range(3):
                     event = websocket.receive_json()
                     assert event["type"] in {"message.created", "message.updated", "message.deleted"}
                     merged[event["message"]["id"]] = event["message"]
                     seen.append(event["type"])
-                assert seen[-3:] == ["message.created", "message.updated", "message.deleted"]
+                assert seen == ["message.created", "message.updated", "message.deleted"]
                 monkeypatch.setattr(store, "list_messages", history)
                 durable = client.get("/v1/rooms/room/messages", headers=headers).json()["items"]
                 assert merged == {item["id"]: item for item in durable}

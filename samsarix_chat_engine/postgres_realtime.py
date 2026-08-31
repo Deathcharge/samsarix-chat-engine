@@ -49,6 +49,7 @@ class RealtimeTarget(Protocol):
         event: dict[str, Any],
         *,
         exclude_connection_id: str | None = None,
+        event_sequence: int | None = None,
     ) -> None: ...
 
     async def close_room(
@@ -58,6 +59,7 @@ class RealtimeTarget(Protocol):
         *,
         code: int = 4409,
         reason: str = "Room archived",
+        event_sequence: int | None = None,
     ) -> None: ...
 
     async def close_member(
@@ -68,6 +70,7 @@ class RealtimeTarget(Protocol):
         *,
         code: int = 4403,
         reason: str = "Room access revoked",
+        event_sequence: int | None = None,
     ) -> int: ...
 
     async def close_all(self) -> None: ...
@@ -285,10 +288,11 @@ class PostgresRealtimeRelay:
                 event.room_id,
                 payload,
                 exclude_connection_id=(str(origin_connection_id) if origin_connection_id is not None else None),
+                event_sequence=event.sequence,
             )
             return
         if event.event_type == "room.archived":
-            await self.target.close_room(event.room_id, event.payload)
+            await self.target.close_room(event.room_id, event.payload, event_sequence=event.sequence)
             return
         if event.event_type != "member.moderation.updated":
             return
@@ -321,6 +325,7 @@ class PostgresRealtimeRelay:
                 "subject": moderation.subject,
                 "banned_until": moderation.banned_until.isoformat(),
             },
+            event_sequence=event.sequence,
         )
 
 
