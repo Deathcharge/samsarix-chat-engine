@@ -75,7 +75,7 @@ python examples/02_websocket_chat.py
 
 See [Getting started](docs/GETTING_STARTED.md) for authentication and browser examples, [Conversation controls](docs/CONVERSATION_CONTROLS.md) for moderation workflows, and [Data lifecycle operations](docs/OPERATIONS.md) for export, deletion, retention, backup, and restore.
 
-The development branch also contains a guarded, unreleased PostgreSQL multi-instance mode. It is fully wired through the application and CI now rehearses a native logical dump into a fresh database plus application-level restore verification. Physical point-in-time recovery, database failover, controlled-host capacity, and owner deployment acceptance remain open gates. See [PostgreSQL multi-instance preview](docs/POSTGRES_PREVIEW.md) and [PostgreSQL recovery contract](docs/POSTGRES_BACKUP.md); SQLite remains the default and the supported v0.12 deployment.
+The development branch also contains a guarded, unreleased PostgreSQL multi-instance mode. It is fully wired through the application, and CI rehearses both a native logical dump into a fresh database and physical base-backup/WAL recovery to a named point with application-level verification. Provider failover, external old-primary fencing/cutover, controlled-host capacity, and owner deployment acceptance remain open gates. See [PostgreSQL multi-instance preview](docs/POSTGRES_PREVIEW.md) and [PostgreSQL recovery contract](docs/POSTGRES_BACKUP.md); SQLite remains the default and the supported v0.12 deployment.
 
 PostgreSQL same-version startup inspects schema metadata without replaying DDL against live replicas. Actual schema upgrades still require drained/stopped old replicas and a PostgreSQL-native backup/rollback plan; mixed-version rolling upgrades are not supported.
 

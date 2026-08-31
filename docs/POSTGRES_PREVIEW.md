@@ -2,7 +2,7 @@
 
 Status: **guarded, unreleased v0.13 preview**.
 
-The repository's development branch can run the complete HTTP and WebSocket application against PostgreSQL. SQLite remains the default and the v0.12 supported topology remains one process. CI now exercises two real Uvicorn processes and crash-lease recovery, but do not describe the preview as production-supported until the remaining interruption, reconnect, load/soak, backup, and rollback gates in the [multi-instance architecture](MULTI_INSTANCE_ARCHITECTURE.md) are published.
+The repository's development branch can run the complete HTTP and WebSocket application against PostgreSQL. SQLite remains the default and the v0.12 supported topology remains one process. CI now exercises two real Uvicorn processes, crash-lease recovery, logical restore, and disposable physical PITR, but do not describe the preview as production-supported until the remaining interruption, reconnect, load/soak, provider-failover, and deployment-acceptance gates in the [multi-instance architecture](MULTI_INSTANCE_ARCHITECTURE.md) are published.
 
 ## What the preview wires
 
@@ -152,7 +152,7 @@ Controlled SQLite and PostgreSQL application tests pause a captured history snap
 
 Startup takes a transaction-scoped advisory migration lock and advances the internal PostgreSQL schema to version 8. Newer unknown schemas fail closed. Before the first preview startup, take a provider-native physical/PITR backup or a tested logical backup that includes all `public.samsarix_*` tables and identity sequences.
 
-The repository's disposable [logical restore rehearsal](POSTGRES_BACKUP.md) now creates a whole-database PostgreSQL 18 custom archive, restores it transactionally into a fresh `template0` database, verifies representative application state, and proves post-restore writes. Operators still own credentials, roles, encrypted off-host retention, WAL completeness, physical base backups, restore targets, RPO/RTO, old-primary fencing, and failover. A logical rehearsal is not PITR evidence.
+The repository's disposable [recovery rehearsals](POSTGRES_BACKUP.md) now cover two distinct paths. The logical path creates a whole-database PostgreSQL 18 custom archive, restores it transactionally into a fresh `template0` database, verifies representative application state, and proves post-restore writes. The physical path verifies a manifest-backed base backup, replays archived WAL to a named restore point, excludes a later divergent write, promotes a new timeline, fences the old primary from its application role, and proves application reads/writes on the recovered cluster. Operators still own protected credentials, encrypted off-host retention, archive completeness monitoring, external process/network fencing, routing cutover, provider failover/failback, and measured RPO/RTO. A single-host disposable rehearsal does not prove those deployment properties.
 
 Rolling back to a binary that supports an older schema requires restoring its matching pre-upgrade database backup. Dropping the retention table or editing schema metadata is not a supported downgrade. PostgreSQL availability, TLS roots, least-privilege roles, patching, PITR, replication, failover, vacuuming, and capacity remain deployment-owner responsibilities.
 
