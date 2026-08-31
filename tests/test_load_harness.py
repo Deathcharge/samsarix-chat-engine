@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from scripts.load_metrics import Profile, arrivals, distribution, merge_message, validate_target
-from scripts.load_postgres import CheckFailed, Member, World, content_for, main
+from scripts.load_postgres import CheckFailed, Member, World, content_for, direct_socket_options, main
 
 
 @pytest.mark.parametrize(
@@ -219,6 +219,66 @@ async def test_fenced_socket_cannot_hide_obsolete_lifecycle_frames() -> None:
 
     with pytest.raises(CheckFailed, match="obsolete_frame_after_resume"):
         await member.consume(frames())
+
+
+def test_final_state_alone_does_not_hide_missing_intermediate_events() -> None:
+    world = World(Profile())
+    world.acknowledged = {(0, 0), (0, 1), (0, 2)}
+    member = Member(world, 1, "load-0", "reader")
+    member.state = {"message-0": message(2)}
+    member.observed.update({(0, 0): 1, (0, 2): 1})
+    assert member.uninterrupted() and not member.complete_stream()
+    member.observed[0, 1] = 1
+    assert member.complete_stream()
+    member.observed[0, 1] = 2
+    assert not member.complete_stream()
+
+
+def test_fault_scope_does_not_excuse_unrelated_healthy_stream_loss() -> None:
+    world = World(Profile(scenario="retained-gap"))
+    assert not Member(world, 0, "load-1", "reader-a").uninterrupted()
+    assert not Member(world, 1, "load-0", "reader-b").uninterrupted()
+    assert Member(world, 1, "load-1", "reader-c").uninterrupted()
+
+
+def test_deleted_message_may_scrub_unread_prior_event_content_only() -> None:
+    world = World(Profile())
+    world.sent = {(0, version): 1 for version in range(3)}
+    member = Member(world, 0, "load-0", "reader")
+    for version in range(3):
+        member.apply({**message(version), "content": ""}, live=True)
+    assert member.frames["scrubbed_prior_versions"] == 2
+    assert member.observed == {(0, 0): 1, (0, 1): 1, (0, 2): 1}
+    assert member.state["message-0"] == message(2)
+    with pytest.raises(CheckFailed, match="incorrect_message_content"):
+        world.check_message({**message(), "content": ""}, "load-0")
+    del world.sent[0, 2]
+    with pytest.raises(CheckFailed, match="incorrect_message_content"):
+        member.apply({**message(), "content": ""}, live=True)
+
+
+def test_redaction_overlap_does_not_resurrect_content_or_hide_other_conflicts() -> None:
+    state: dict[str, dict[str, Any]] = {}
+    merge_message(state, message())
+    scrubbed = {**message(), "content": ""}
+    assert merge_message(state, scrubbed, allow_redaction=True) == "redaction_overlap"
+    assert merge_message(state, message(), allow_redaction=True) == "redaction_overlap"
+    assert state["message-0"]["content"] == ""
+    with pytest.raises(ValueError, match="conflicting"):
+        merge_message(state, {**scrubbed, "sender": "imposter"}, allow_redaction=True)
+
+
+def test_loopback_socket_disables_proxy_without_breaking_older_websockets(monkeypatch: pytest.MonkeyPatch) -> None:
+    def modern(uri, *, proxy=True, **kwargs):
+        pass
+
+    def legacy(uri, **kwargs):
+        pass
+
+    monkeypatch.setattr("scripts.load_postgres.connect", modern)
+    assert direct_socket_options() == {"proxy": None}
+    monkeypatch.setattr("scripts.load_postgres.connect", legacy)
+    assert direct_socket_options() == {}
 
 
 @pytest.mark.parametrize(

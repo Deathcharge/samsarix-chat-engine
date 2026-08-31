@@ -142,7 +142,7 @@ async def arrivals(
         await asyncio.gather(*remaining, return_exceptions=True)
 
 
-def merge_message(state: dict[str, dict[str, Any]], message: dict[str, Any]) -> str:
+def merge_message(state: dict[str, dict[str, Any]], message: dict[str, Any], *, allow_redaction: bool = False) -> str:
     """Reconcile the harness's one-edit/one-delete messages across history overlap."""
     previous = state.get(message["id"])
     version = lambda item: 2 if item["deleted_at"] else 1 if item["edited_at"] else 0  # noqa: E731
@@ -152,5 +152,12 @@ def merge_message(state: dict[str, dict[str, Any]], message: dict[str, Any]) -> 
     if version(message) < version(previous):
         return "older"
     if previous != message:
+        if (
+            allow_redaction
+            and (previous["content"] == "" or message["content"] == "")
+            and {**previous, "content": ""} == {**message, "content": ""}
+        ):
+            state[message["id"]] = {**message, "content": ""}
+            return "redaction_overlap"
         raise ValueError("same message version has conflicting state")
     return "duplicate"

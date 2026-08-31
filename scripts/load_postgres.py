@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import math
 import os
@@ -61,6 +62,11 @@ def content_for(index: int, version: int, size: int) -> str:
     return prefix + "x" * (size - len(prefix))
 
 
+def direct_socket_options() -> dict[str, Any]:
+    # websockets 15+ discovers environment proxies; 13/14 have no proxy option.
+    return {"proxy": None} if "proxy" in inspect.signature(connect).parameters else {}
+
+
 def memory_sample(pid: int) -> dict[str, int]:
     # smaps_rollup avoids the documented inaccuracy of status VmRSS/VmHWM.
     # PSS and RSS are sampled, not lifetime peaks; shared RSS can be double-counted.
@@ -88,6 +94,7 @@ class World:
         self.latencies: dict[str, list[float]] = defaultdict(list)
         self.sent: dict[tuple[int, int], float] = {}
         self.confirmed: dict[int, int] = {}
+        self.acknowledged: set[tuple[int, int]] = set()
         self.ids: dict[int, str] = {}
         self.samples: list[dict[str, Any]] = []
         self.timeline: list[dict[str, Any]] = []
@@ -130,7 +137,7 @@ class World:
         self.phase = phase
         self.timeline.append({"phase": phase, "elapsed_s": round(time.monotonic() - self.started, 6)})
 
-    def check_message(self, message: dict[str, Any], room: str) -> tuple[int, int]:
+    def check_message(self, message: dict[str, Any], room: str, *, live: bool = False) -> tuple[int, int]:
         require(message["room_id"] == room, "cross_room_message")
         identifier = message["client_message_id"]
         require(isinstance(identifier, str) and identifier.startswith("load-"), "unexpected_message_identity")
@@ -138,8 +145,10 @@ class World:
         version = 2 if message["deleted_at"] else 1 if message["edited_at"] else 0
         require((index, version) in self.sent, "unsent_message_version")
         require(room_for(index, self.profile.rooms) == room, "cross_room_identity")
+        scrubbed = live and version < 2 and message["content"] == "" and (index, 2) in self.sent
         require(
-            message["content"] == content_for(index, version, self.profile.message_bytes), "incorrect_message_content"
+            scrubbed or message["content"] == content_for(index, version, self.profile.message_bytes),
+            "incorrect_message_content",
         )
         require(message["sender"] == f"writer-{index % self.profile.rooms}", "incorrect_message_author")
         require(self.ids.get(index, message["id"]) == message["id"], "duplicate_persisted_identity")
@@ -183,6 +192,7 @@ class World:
         if version != 2:
             self.check_message(response.json(), room)
         self.confirmed[index] = version
+        self.acknowledged.add((index, version))
         self.counts[f"http_{method}_accepted"] += 1
         self.latencies[f"http_{method}_{phase}_accepted_ms"].append((time.monotonic() - started) * 1000)
         return True
@@ -326,6 +336,10 @@ class World:
             require(time.monotonic() < deadline, "live_state_did_not_match_authoritative_history")
             await asyncio.sleep(0.05)
         self.counts["converged_clients"] = len(self.members)
+        require(
+            all(member.complete_stream() for member in self.members if member.uninterrupted()),
+            "live_event_missing_or_duplicated",
+        )
         for member in self.members:
             other_room = room_for(int(member.room[5:]) + 1, self.profile.rooms)
             response = await http.get(
@@ -409,6 +423,9 @@ class World:
                     "connections": member.connections,
                     "fences": member.fences,
                     "frames": dict(member.frames),
+                    "expected_acknowledged_live_versions": len(member.expected_live()),
+                    "missing_acknowledged_live_versions": len(member.expected_live() - member.observed.keys()),
+                    "duplicate_live_versions": sum(max(0, count - 1) for count in member.observed.values()),
                 }
                 for member in self.members
             ],
@@ -428,16 +445,29 @@ class Member:
         self.world, self.replica, self.room, self.subject = world, replica, room, subject
         self.state: dict[str, dict[str, Any]] = {}
         self.frames: Counter[str] = Counter()
+        self.observed: Counter[tuple[int, int]] = Counter()
         self.ready = False
         self.connections = 0
         self.fences = 0
         self.allow_reconnect = False
         self.expect_fence = False
 
+    def expected_live(self) -> set[tuple[int, int]]:
+        return {key for key in self.world.acknowledged if room_for(key[0], self.world.profile.rooms) == self.room}
+
+    def uninterrupted(self) -> bool:
+        return self.world.profile.scenario == "steady" or (self.replica == 1 and self.room != "load-0")
+
+    def complete_stream(self) -> bool:
+        return self.expected_live().issubset(self.observed) and all(count == 1 for count in self.observed.values())
+
     def apply(self, message: dict[str, Any], *, live: bool) -> None:
-        index, version = self.world.check_message(message, self.room)
-        outcome = merge_message(self.state, message)
+        index, version = self.world.check_message(message, self.room, live=live)
+        outcome = merge_message(self.state, message, allow_redaction=(index, 2) in self.world.sent)
         if live:
+            if version < 2 and message["content"] == "":
+                self.frames["scrubbed_prior_versions"] += 1
+            self.observed[index, version] += 1
             self.frames[f"v{version}_{outcome}"] += 1
             if outcome == "new":
                 self.world.latencies[f"delivery_replica{self.replica}_{self.world.phase}_ms"].append(
@@ -479,6 +509,7 @@ class Member:
                     close_timeout=1,
                     ping_interval=None,
                     max_queue=64,
+                    **direct_socket_options(),
                 ) as socket:
                     ready = json.loads(await asyncio.wait_for(socket.recv(), 10))
                     if ready["type"] == "error" and self.allow_reconnect:
