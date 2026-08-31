@@ -154,6 +154,17 @@ async def _assert_fenced_without_obsolete_frames(connection: Any) -> None:
     pytest.fail("stale client was not fenced within bounded frames")
 
 
+async def _expect_message(connection: Any, message_id: str, *, allow_presence: bool = False) -> None:
+    deadline = time.monotonic() + 5
+    for _ in range(32):
+        event = json.loads(await asyncio.wait_for(connection.recv(), max(0.01, deadline - time.monotonic())))
+        if allow_presence and event["type"].startswith("presence."):
+            continue
+        assert event["type"] == "message.created" and event["message"]["id"] == message_id, event
+        return
+    pytest.fail("live sentinel not received within bounded frames")
+
+
 @pytest.mark.timeout(120)
 @pytest.mark.parametrize("fault", ["count", "age", "retained-gap"])
 async def test_paused_replica_fences_obsolete_state_and_recovers_signed_members(
@@ -237,7 +248,7 @@ async def test_paused_replica_fences_obsolete_state_and_recovers_signed_members(
                         headers=_member("Observer", "unrelated"),
                         json={"content": "healthy while peer is stopped"},
                     )
-                    assert (await _receive_type(healthy, "message.created"))["message"]["id"] == alive["id"]
+                    await _expect_message(healthy, alive["id"])
                     assert (await client.get(f"{base}/readyz")).status_code == 200
                     expected = (await request("GET", "shared/messages", headers=_member("Bob")))["items"]
                     by_id = {item["id"]: item for item in expected}
@@ -261,32 +272,49 @@ async def test_paused_replica_fences_obsolete_state_and_recovers_signed_members(
                     # real periodic maintenance after natural lease expiry.
                 await _assert_fenced_without_obsolete_frames(stale)
                 assert processes[0].poll() is None
-                await _wait_ready(client, f"http://127.0.0.1:{ports[0]}", processes[0])
-                recovered = await _snapshot(observer, _NAMES[0])
-                assert recovered.live and recovered.generation != original.generation
-                assert recovered.cursor > original.cursor
                 reason = (
                     f"lag exceeded its {fault} limit"
                     if fault != "retained-gap"
                     else "retained PostgreSQL event-log gap"
                 )
-                deadline = time.monotonic() + 5
-                while reason not in processes[0].output_tail():
+                deadline = time.monotonic() + 10
+                while True:
+                    recovered = await _snapshot(observer, _NAMES[0])
+                    if (
+                        reason in processes[0].output_tail()
+                        and recovered.live
+                        and recovered.generation != original.generation
+                        and recovered.cursor > original.cursor
+                    ):
+                        break
                     assert time.monotonic() < deadline, processes[0].output_tail()
                     await asyncio.sleep(0.02)
+                await _wait_ready(client, f"http://127.0.0.1:{ports[0]}", processes[0])
                 await _wait_connection_count(client, ports[1], 1)
-                cursor = await observer.execute(
-                    "SELECT count(*) FROM public.samsarix_connection_leases WHERE instance_id = %s", (_NAMES[0],)
-                )
-                assert (await cursor.fetchone())[0] == 0
-                async with AsyncExitStack() as members:
-                    joined = await asyncio.gather(
-                        *(
-                            members.enter_async_context(_socket(ports[0], subject))
-                            for subject in ("Alice", "Agent", "Reader")
-                        ),
-                        members.enter_async_context(_socket(ports[1], "Bob")),
+                deadline = time.monotonic() + 5
+                while True:
+                    cursor = await observer.execute(
+                        "SELECT count(*) FROM public.samsarix_connection_leases WHERE instance_id = %s", (_NAMES[0],)
                     )
+                    if (await cursor.fetchone())[0] == 0:
+                        break
+                    assert time.monotonic() < deadline, "old physical connection leases were not cleaned up"
+                    await asyncio.sleep(0.02)
+                async with AsyncExitStack() as members:
+                    connections = [(ports[0], subject) for subject in ("Alice", "Agent", "Reader")]
+                    connections.append((ports[1], "Bob"))
+                    joining = [
+                        asyncio.create_task(members.enter_async_context(_socket(port, subject)))
+                        for port, subject in connections
+                    ]
+                    try:
+                        joined = await asyncio.gather(*joining)
+                    finally:
+                        # Finish/cancel every enter before the stack exits, even
+                        # if one handshake fails while the others are pending.
+                        for task in joining:
+                            task.cancel()
+                        await asyncio.gather(*joining, return_exceptions=True)
                     assert all(history["items"] == expected for _, history in joined)
                     current = await request("GET", "shared", headers=_member("Bob"))
                     assert current["archived_at"] is None and current["frozen_at"] is None
@@ -298,7 +326,7 @@ async def test_paused_replica_fences_obsolete_state_and_recovers_signed_members(
                         json={"content": "after recovery"},
                     )
                     for connection, _ in joined:
-                        assert (await _receive_type(connection, "message.created"))["message"]["id"] == after["id"]
+                        await _expect_message(connection, after["id"], allow_presence=True)
                     await _wait_connection_count(client, ports[0], 5)
                     denied = await client.get(f"{base}/v1/rooms/unrelated/messages", headers=_member("Alice"))
                     assert denied.status_code == 403
@@ -309,7 +337,7 @@ async def test_paused_replica_fences_obsolete_state_and_recovers_signed_members(
                         headers=_member("Observer", "unrelated"),
                         json={"content": "healthy through peer recovery"},
                     )
-                    assert (await _receive_type(healthy, "message.created"))["message"]["id"] == sentinel["id"]
+                    await _expect_message(healthy, sentinel["id"])
             await _wait_connection_count(client, ports[1], 0)
     finally:
         for process in reversed(processes):
