@@ -111,6 +111,7 @@ This makes the supported topology repeatable without implying that a container m
 - [ ] prove kernel-level packet blackholes and database failover against real network processes;
 - [ ] run sustained load/soak and reconnect-storm tests and publish measured limits;
 - [x] verify a hardened Kubernetes preview derives each replica's stable instance ID from its StatefulSet Pod name and rejects duplicate live ownership;
+- [x] execute the checked two-replica manifest in pinned disposable kind, with TLS-verified PostgreSQL, cross-replica HTTP/WebSocket delivery, exact live identities, and same-version Pod replacement;
 - [ ] validate separate-process live-lag and retained-gap recovery under measured traffic;
 - [x] exercise and publish a PostgreSQL-native logical dump into a fresh database, application-level restore verification, post-restore writes, and rollback runbook;
 - [x] exercise a verified physical base backup, archived-WAL replay to a named point, recovered-timeline application checks, post-recovery writes, and application-role fencing on a disposable CI cluster;
