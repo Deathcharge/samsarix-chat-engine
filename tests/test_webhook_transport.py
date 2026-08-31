@@ -17,6 +17,47 @@ from samsarix_chat_engine.webhook_transport import AttemptBudget, BoundedTranspo
 from tests.test_webhook_deadlines import _event
 
 
+@pytest.mark.timeout(10)
+async def test_cancellation_keeps_descriptor_owned_until_transport_io_unwinds() -> None:
+    transport: BoundedTransport[int] = BoundedTransport()
+    entered, release = threading.Event(), threading.Event()
+    owned, peer = socket.socketpair()
+    descriptor = owned.fileno()
+    threads = []
+
+    def blocked(budget: AttemptBudget) -> int:
+        threads.append(threading.current_thread())
+        budget.bind(owned)
+        entered.set()
+        assert release.wait(5)
+        return 204
+
+    task = asyncio.create_task(transport.run(blocked, timeout=10))
+    try:
+        await _event(entered)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        peer.settimeout(1)
+        assert peer.recv(1) == b"", "cancellation must interrupt the TCP peer"
+        assert owned.fileno() == descriptor, "do not recycle a descriptor still used by native I/O"
+        release.set()
+        await asyncio.to_thread(threads[0].join, 0.05)
+        for _ in range(100):
+            if owned.fileno() == -1:
+                break
+            await asyncio.sleep(0.01)
+        assert owned.fileno() == -1, "the transport owner must close after its I/O exits"
+    finally:
+        release.set()
+        transport.close()
+        await asyncio.gather(task, return_exceptions=True)
+        if threads:
+            await asyncio.to_thread(threads[0].join, 2)
+        owned.close()
+        peer.close()
+
+
 @pytest.mark.parametrize("timeout", [True, False, 0, -1, float("nan"), float("inf"), 30.01])
 def test_invalid_budget_rejected(timeout: float) -> None:
     with pytest.raises(ValueError, match="webhook timeout"):
