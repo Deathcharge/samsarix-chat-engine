@@ -32,12 +32,28 @@ async def _event(event: threading.Event) -> None:
     pytest.fail("transport barrier was not reached")
 
 
-async def _completed(task: asyncio.Task[Any], timeout: float = 0.8) -> Any:
+async def _completed(task: asyncio.Future[Any], timeout: float = 0.8) -> Any:
     # wait_for cancels the task at its own timeout; a cancellation-suppressing
     # implementation could then return and incorrectly make the test pass.
     done, _ = await asyncio.wait({task}, timeout=timeout)
     assert task in done, "attempt did not finish without test-driven cancellation"
     return await task
+
+
+def _watch_transport(monkeypatch: pytest.MonkeyPatch, dispatcher: WebhookDispatcher) -> asyncio.Future[None]:
+    """Observe the real transport exit without timing the following storage write."""
+    finished: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    original_run = dispatcher._transport.run
+
+    async def run(*args: Any, **kwargs: Any) -> WebhookAttemptResult:
+        try:
+            return await original_run(*args, **kwargs)
+        finally:
+            if not finished.done():
+                finished.set_result(None)
+
+    monkeypatch.setattr(dispatcher._transport, "run", run)
+    return finished
 
 
 @asynccontextmanager
@@ -69,7 +85,9 @@ async def _dispatcher(
 
 @pytest.mark.timeout(10)
 @pytest.mark.parametrize("finish", ["deadline", "cancel", "stop"])
-async def test_slow_headers_hit_total_deadline_and_close_peer(tmp_path: Path, finish: str) -> None:
+async def test_slow_headers_hit_total_deadline_and_close_peer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, finish: str
+) -> None:
     arrived = asyncio.Event()
     closed = asyncio.Event()
     tasks: set[asyncio.Task[None]] = set()
@@ -114,8 +132,13 @@ async def test_slow_headers_hit_total_deadline_and_close_peer(tmp_path: Path, fi
     port = server.sockets[0].getsockname()[1]
     try:
         async with _dispatcher(
-            tmp_path, url=f"http://127.0.0.1:{port}/events", timeout=0.15 if finish == "deadline" else 10
+            # Allow thread/socket startup on loaded Windows runners while the
+            # peer keeps every individual read active at 0.03-second intervals.
+            tmp_path,
+            url=f"http://127.0.0.1:{port}/events",
+            timeout=0.5 if finish == "deadline" else 10,
         ) as (dispatcher, store):
+            transport_finished = _watch_transport(monkeypatch, dispatcher)
             task = asyncio.create_task(dispatcher.process_due_once())
             try:
                 await asyncio.wait_for(arrived.wait(), 2)
@@ -127,7 +150,9 @@ async def test_slow_headers_hit_total_deadline_and_close_peer(tmp_path: Path, fi
                     dispatcher.stop()
                     assert not await _completed(task)
                 else:
-                    assert await _completed(task)
+                    await _completed(transport_finished)
+                    await asyncio.wait_for(closed.wait(), 1)
+                    assert await _completed(task, timeout=3)
                 await asyncio.wait_for(closed.wait(), 1)
                 pending, _ = await store.list_webhook_deliveries(status="pending")
                 attempted = [item for item in pending if item.attempt_count]
@@ -189,6 +214,7 @@ async def test_blocked_dns_is_bounded_and_cannot_send_late(
             await original_record(*args, **kwargs)
 
         monkeypatch.setattr(store, "record_webhook_attempt", record)
+        transport_finished = _watch_transport(monkeypatch, dispatcher)
         task = asyncio.create_task(dispatcher.run() if finish == "stop" else dispatcher.process_due_once())
         try:
             await _event(entered)
@@ -200,7 +226,10 @@ async def test_blocked_dns_is_bounded_and_cannot_send_late(
                 dispatcher.stop()
                 await _completed(task)
             else:
-                assert await _completed(task)
+                await _completed(transport_finished)
+                # The 0.15-second network deadline does not include SQLite
+                # outcome persistence. Keep a separate bounded storage wait.
+                assert await _completed(task, timeout=3)
             # Do not take more claims or start more DNS work while the old native
             # resolver still owns the sole transport slot.
             for _ in range(5):
@@ -237,10 +266,12 @@ async def test_late_success_cannot_overwrite_timeout_or_spawn_more_work(
 
     monkeypatch.setattr("samsarix_chat_engine.webhooks._send_request", send)
     async with _dispatcher(tmp_path) as (dispatcher, store):
+        transport_finished = _watch_transport(monkeypatch, dispatcher)
         task = asyncio.create_task(dispatcher.process_due_once())
         try:
             await _event(entered)
-            assert await _completed(task)
+            await _completed(transport_finished)
+            assert await _completed(task, timeout=3)
             assert not await dispatcher.process_due_once()
             assert len(calls) == 1
             release.set()
@@ -455,6 +486,7 @@ async def test_real_tls_preserves_verification_pinning_and_deadline(
             dispatcher,
             store,
         ):
+            transport_finished = _watch_transport(monkeypatch, dispatcher)
             task = asyncio.create_task(dispatcher.process_due_once())
             if mode in {"cancel-headers", "stop-headers"}:
                 await asyncio.wait_for(arrived.wait(), 2)
@@ -466,6 +498,9 @@ async def test_real_tls_preserves_verification_pinning_and_deadline(
                     dispatcher.stop()
                     assert not await _completed(task)
             else:
+                if mode in {"slow-headers", "stalled-handshake"}:
+                    await asyncio.wait_for(arrived.wait(), 2)
+                    await _completed(transport_finished)
                 assert await _completed(task, timeout=3)
             assert resolved == ["localhost"]
             if mode == "valid":
