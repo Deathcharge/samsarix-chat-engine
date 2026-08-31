@@ -20,6 +20,8 @@ from email.utils import parsedate_to_datetime
 from urllib.parse import quote, urlparse
 
 from .store import ChatStorage, PendingWebhook, WebhookDeliveryNotFoundError
+from .webhook_transport import AttemptBudget, BoundedTransport, PinnedHTTPConnection
+from .webhook_transport import PinnedHTTPSConnection as _PinnedHTTPSConnection
 
 logger = logging.getLogger(__name__)
 _RETRY_SCHEDULE_SECONDS = (5.0, 300.0, 1_800.0, 7_200.0, 18_000.0, 36_000.0, 50_400.0, 72_000.0)
@@ -37,21 +39,6 @@ class _ResolvedWebhookTarget:
     port: int
     path: str
     host_header: str
-
-
-class _PinnedHTTPSConnection(http.client.HTTPConnection):
-    """Connect to one validated address while retaining the hostname for TLS verification."""
-
-    def __init__(self, hostname: str, address: str, port: int, timeout: float) -> None:
-        super().__init__(address, port, timeout=timeout)
-        self._server_hostname = hostname
-        self._ssl_context = ssl.create_default_context()
-
-    def connect(self) -> None:
-        super().connect()
-        if self.sock is None:
-            raise ConnectionError("HTTPS connection did not create a socket")
-        self.sock = self._ssl_context.wrap_socket(self.sock, server_hostname=self._server_hostname)
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,35 +147,65 @@ def _send_request(
     timeout: float,
     attempted_at: datetime,
     allow_private_targets: bool,
+    budget: AttemptBudget | None = None,
 ) -> WebhookAttemptResult:
     """Send one non-redirecting request using the platform TLS trust store."""
 
+    owned = budget is None
+    budget = budget or AttemptBudget(timeout)
     try:
+        return _send_budgeted_request(
+            url=url,
+            delivery=delivery,
+            secrets=secrets,
+            timeout=timeout,
+            attempted_at=attempted_at,
+            allow_private_targets=allow_private_targets,
+            budget=budget,
+        )
+    finally:
+        if owned:
+            budget.cancel()
+
+
+def _send_budgeted_request(
+    *,
+    url: str,
+    delivery: PendingWebhook,
+    secrets: tuple[bytes, ...],
+    timeout: float,
+    attempted_at: datetime,
+    allow_private_targets: bool,
+    budget: AttemptBudget,
+) -> WebhookAttemptResult:
+    connection: http.client.HTTPConnection | None = None
+    try:
+        budget.remaining()
         target = _resolve_target(url, allow_private_targets=allow_private_targets)
-    except WebhookTargetError as exc:
-        return WebhookAttemptResult(status_code=None, error=str(exc))
-    timestamp = int(attempted_at.timestamp())
-    headers = {
-        "Content-Type": "application/json",
-        "Host": target.host_header,
-        "User-Agent": "Samsarix-Chat-Webhook/0.9",
-        "webhook-id": delivery.delivery.id,
-        "webhook-timestamp": str(timestamp),
-        "webhook-signature": sign_webhook(delivery.delivery.id, timestamp, delivery.payload, secrets),
-    }
-    connection: http.client.HTTPConnection
-    if target.scheme == "https":
-        connection = _PinnedHTTPSConnection(target.hostname, target.address, target.port, timeout)
-    else:
-        connection = http.client.HTTPConnection(target.address, target.port, timeout=timeout)
-    try:
+        budget.remaining()
+        timestamp = int(attempted_at.timestamp())
+        headers = {
+            "Content-Type": "application/json",
+            "Host": target.host_header,
+            "User-Agent": "Samsarix-Chat-Webhook/0.9",
+            "webhook-id": delivery.delivery.id,
+            "webhook-timestamp": str(timestamp),
+            "webhook-signature": sign_webhook(delivery.delivery.id, timestamp, delivery.payload, secrets),
+        }
+        if target.scheme == "https":
+            connection = _PinnedHTTPSConnection(target.hostname, target.address, target.port, timeout, budget=budget)
+        else:
+            connection = PinnedHTTPConnection(target.address, target.port, timeout, budget=budget)
+        budget.remaining()
         connection.request("POST", target.path, body=delivery.payload, headers=headers)
+        budget.remaining()
         response = connection.getresponse()
         try:
             status = response.status
             retry_after = response.getheader("Retry-After")
         finally:
             response.close()
+        budget.remaining()
         if 200 <= status < 300:
             return WebhookAttemptResult(status_code=status, error=None)
         now = datetime.now(timezone.utc)
@@ -197,6 +214,8 @@ def _send_request(
             error=f"http_status_{status}",
             retry_after_seconds=_retry_after_seconds(retry_after, now),
         )
+    except WebhookTargetError as exc:
+        return WebhookAttemptResult(status_code=None, error=str(exc))
     except TimeoutError:
         return WebhookAttemptResult(status_code=None, error="timeout")
     except ssl.SSLError:
@@ -204,7 +223,8 @@ def _send_request(
     except (ConnectionError, http.client.HTTPException, OSError):
         return WebhookAttemptResult(status_code=None, error="connection_error")
     finally:
-        connection.close()
+        if connection is not None:
+            connection.close()
 
 
 class WebhookDispatcher:
@@ -230,6 +250,9 @@ class WebhookDispatcher:
         self.poll_interval = poll_interval
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
+        AttemptBudget(timeout)  # Validate direct embeddings as well as Settings-driven creation.
+        self._transport: BoundedTransport[WebhookAttemptResult] = BoundedTransport()
+        self._iteration_lock = asyncio.Lock()
 
     def wake(self) -> None:
         """Prompt the worker after a new commit or operator replay."""
@@ -241,16 +264,25 @@ class WebhookDispatcher:
 
         self._stop.set()
         self._wake.set()
+        self._transport.close()
 
     async def run(self) -> None:
         """Deliver due rows until application shutdown without dropping the worker on one failure."""
 
+        try:
+            await self._run_loop()
+        finally:
+            self.stop()
+
+    async def _run_loop(self) -> None:
         while not self._stop.is_set():
             try:
                 processed = await self.process_due_once()
             except Exception:  # noqa: BLE001 - worker isolation; details go to operator logs
                 logger.exception("Webhook worker iteration failed")
                 processed = False
+            if self._stop.is_set():
+                break
             if processed:
                 continue
             self._wake.clear()
@@ -262,19 +294,37 @@ class WebhookDispatcher:
     async def process_due_once(self, *, now: datetime | None = None) -> bool:
         """Attempt one due delivery and return whether a row was processed."""
 
+        async with self._iteration_lock:
+            return await self._process_due_once(now=now)
+
+    async def _process_due_once(self, *, now: datetime | None = None) -> bool:
+        if self._stop.is_set() or not self._transport.available:
+            return False
         attempted_at = now or datetime.now(timezone.utc)
         pending = await self.store.next_webhook_delivery(attempted_at)
         if pending is None or self._stop.is_set():
             return False
-        result = await asyncio.to_thread(
-            _send_request,
-            url=self.url,
-            delivery=pending,
-            secrets=self.secrets,
-            timeout=self.timeout,
-            attempted_at=attempted_at,
-            allow_private_targets=self.allow_private_targets,
-        )
+        try:
+            result = await self._transport.run(
+                lambda budget: _send_request(
+                    url=self.url,
+                    delivery=pending,
+                    secrets=self.secrets,
+                    timeout=self.timeout,
+                    attempted_at=attempted_at,
+                    allow_private_targets=self.allow_private_targets,
+                    budget=budget,
+                ),
+                timeout=self.timeout,
+            )
+        except asyncio.TimeoutError:
+            result = WebhookAttemptResult(status_code=None, error="timeout")
+        except asyncio.CancelledError:
+            if self._stop.is_set():
+                return False
+            raise
+        if self._stop.is_set():
+            return False
         attempt_number = pending.delivery.attempt_count + 1
         terminal = not result.delivered and (attempt_number >= self.max_attempts or result.status_code == 410)
         next_attempt_at = None
