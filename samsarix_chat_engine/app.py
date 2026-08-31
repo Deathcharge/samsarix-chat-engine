@@ -438,6 +438,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             min_pool_size=resolved.postgres_min_pool_size,
             max_pool_size=resolved.postgres_max_pool_size,
             pool_timeout_seconds=resolved.postgres_pool_timeout_seconds,
+            operation_timeout_seconds=resolved.postgres_operation_timeout_seconds,
             lease_seconds=resolved.postgres_lease_seconds,
             relay_poll_interval_seconds=resolved.postgres_relay_poll_seconds,
             maintenance_interval_seconds=resolved.postgres_maintenance_interval_seconds,

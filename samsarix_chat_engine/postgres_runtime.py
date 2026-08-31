@@ -52,6 +52,7 @@ class PostgresApplicationRuntime:
         min_pool_size: int = 1,
         max_pool_size: int = 10,
         pool_timeout_seconds: float = 10.0,
+        operation_timeout_seconds: float = 10.0,
         lease_seconds: int = 30,
         relay_poll_interval_seconds: float = 0.25,
         maintenance_interval_seconds: float = 1.0,
@@ -80,6 +81,7 @@ class PostgresApplicationRuntime:
             min_pool_size=min_pool_size,
             max_pool_size=max_pool_size,
             pool_timeout_seconds=pool_timeout_seconds,
+            operation_timeout_seconds=operation_timeout_seconds,
         )
         foundation = self.store.foundation
         self.connections = PostgresConnectionRegistry(

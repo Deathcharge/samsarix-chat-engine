@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -20,6 +21,7 @@ from uuid import UUID
 
 import psycopg
 from psycopg import AsyncConnection
+from psycopg.conninfo import conninfo_to_dict
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
@@ -98,21 +100,34 @@ class PostgresFoundation:
         min_pool_size: int = 1,
         max_pool_size: int = 5,
         pool_timeout_seconds: float = 10.0,
+        operation_timeout_seconds: float = 10.0,
     ) -> None:
         if not conninfo.strip():
             raise ValueError("PostgreSQL connection information is required")
         if min_pool_size < 0 or max_pool_size < 1 or min_pool_size > max_pool_size:
             raise ValueError("invalid PostgreSQL pool bounds")
-        if pool_timeout_seconds <= 0:
+        if not math.isfinite(pool_timeout_seconds) or pool_timeout_seconds <= 0:
             raise ValueError("PostgreSQL pool timeout must be positive")
+        if not math.isfinite(operation_timeout_seconds) or not 0.1 <= operation_timeout_seconds <= 300:
+            raise ValueError("PostgreSQL operation timeout must be between 0.1 and 300 seconds")
+        try:
+            existing_options = conninfo_to_dict(conninfo).get("options", "")
+        except psycopg.ProgrammingError:
+            raise ValueError("invalid PostgreSQL connection information") from None
+        timeout_ms = math.ceil(operation_timeout_seconds * 1_000)
+        options = (
+            f"{existing_options} -c statement_timeout={timeout_ms} -c idle_in_transaction_session_timeout={timeout_ms}"
+        ).strip()
         self._pool = AsyncConnectionPool(
             conninfo=conninfo,
+            kwargs={"connect_timeout": max(2, math.ceil(pool_timeout_seconds)), "options": options},
             min_size=min_pool_size,
             max_size=max_pool_size,
             timeout=pool_timeout_seconds,
             open=False,
         )
         self._pool_timeout_seconds = pool_timeout_seconds
+        self._operation_timeout_seconds = operation_timeout_seconds
         self._lifecycle_lock = asyncio.Lock()
         self._opened = False
 
@@ -156,7 +171,7 @@ class PostgresFoundation:
 
         self._require_open()
         try:
-            async with self._pool.connection() as connection:
+            async with self._timed_connection() as connection:
                 async with connection.transaction():
                     await connection.execute("SET LOCAL search_path = pg_catalog, public")
                     yield connection
@@ -164,6 +179,43 @@ class PostgresFoundation:
             raise PostgresUnavailableError("PostgreSQL storage is unavailable") from None
         except psycopg.DatabaseError as exc:
             raise PostgresFoundationError(_safe_database_error("operation", exc)) from None
+
+    @asynccontextmanager
+    async def _timed_connection(self) -> AsyncIterator[AsyncConnection[tuple[Any, ...]]]:
+        """Bound checked-out work including transaction commit/rollback, discarding a stalled session."""
+
+        async with self._pool.connection() as connection:
+            owner = asyncio.current_task()
+            if owner is None:  # pragma: no cover - async context managers require a task
+                raise RuntimeError("PostgreSQL operations require an asyncio task")
+            cancelling = getattr(owner, "cancelling", lambda: 0)
+            cancellation_count = cancelling()
+            expired = False
+
+            def expire() -> None:
+                nonlocal expired
+                expired = True
+                # Close before cancelling the waiter: Psycopg's normal cancellation
+                # tries a second network request and then drains the original socket.
+                # Neither can provide a deadline on a silently stalled connection.
+                connection.pgconn.finish()
+                owner.cancel()
+
+            deadline = asyncio.get_running_loop().call_later(self._operation_timeout_seconds, expire)
+            try:
+                yield connection
+                if expired:
+                    raise PostgresUnavailableError("PostgreSQL operation timed out")
+            except asyncio.CancelledError:
+                # Do not convert an additional caller cancellation into availability.
+                if expired and cancelling() <= cancellation_count + 1:
+                    raise PostgresUnavailableError("PostgreSQL operation timed out") from None
+                raise
+            finally:
+                deadline.cancel()
+                uncancel = getattr(owner, "uncancel", None)
+                if expired and uncancel is not None:
+                    uncancel()
 
     async def schema_version(self) -> int:
         """Return the initialized PostgreSQL schema version."""
@@ -740,7 +792,7 @@ class PostgresFoundation:
         return int(row[0])
 
     async def _initialize_schema(self) -> None:
-        async with self._pool.connection() as connection:
+        async with self._timed_connection() as connection:
             async with connection.transaction():
                 await connection.execute("SET LOCAL search_path = pg_catalog, public")
                 await connection.execute("SELECT pg_advisory_xact_lock(%s)", (POSTGRES_MIGRATION_LOCK_ID,))

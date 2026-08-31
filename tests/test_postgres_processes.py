@@ -59,7 +59,9 @@ class LoggedServer(subprocess.Popen[str]):
             return "".join(self._output)[-4_000:]
 
 
-def _start_server(conninfo: str, instance_id: str, port: int, *, pool_timeout: float = 10) -> LoggedServer:
+def _start_server(
+    conninfo: str, instance_id: str, port: int, *, pool_timeout: float = 10, operation_timeout: float = 10
+) -> LoggedServer:
     environment = {
         key: value for key, value in os.environ.items() if not key.startswith(("SAMSARIX_CHAT_", "HELIX_CHAT_"))
     }
@@ -70,6 +72,7 @@ def _start_server(conninfo: str, instance_id: str, port: int, *, pool_timeout: f
             "SAMSARIX_CHAT_POSTGRES_INSTANCE_ID": instance_id,
             "SAMSARIX_CHAT_POSTGRES_MAX_POOL_SIZE": "4",
             "SAMSARIX_CHAT_POSTGRES_POOL_TIMEOUT": str(pool_timeout),
+            "SAMSARIX_CHAT_POSTGRES_OPERATION_TIMEOUT": str(operation_timeout),
             "SAMSARIX_CHAT_POSTGRES_LEASE_SECONDS": "3",
             "SAMSARIX_CHAT_POSTGRES_RELAY_POLL": "0.05",
             "SAMSARIX_CHAT_POSTGRES_MAINTENANCE_INTERVAL": "0.1",
@@ -102,6 +105,8 @@ class DatabaseProxy:
         self.host = host
         self.port = port
         self.enabled = True
+        self.forwarding = asyncio.Event()
+        self.forwarding.set()
         self.writers: set[asyncio.StreamWriter] = set()
         self.tasks: set[asyncio.Task[None]] = set()
 
@@ -132,6 +137,7 @@ class DatabaseProxy:
 
             async def copy(source: asyncio.StreamReader, destination: asyncio.StreamWriter) -> None:
                 while chunk := await source.read(65_536):
+                    await self.forwarding.wait()
                     destination.write(chunk)
                     await destination.drain()
 
@@ -292,8 +298,10 @@ async def test_two_uvicorn_processes_reap_crashed_leases_and_restart(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["reset", "stall"])
 async def test_database_network_cut_fences_clients_and_recovers_without_process_restart(
     clean_postgres_database: str,
+    fault: str,
 ) -> None:
     """Cut only replica A's database sockets; replica B must continue serving."""
 
@@ -302,7 +310,7 @@ async def test_database_network_cut_fences_clients_and_recovers_without_process_
     async with _database_proxy(clean_postgres_database) as (proxy, proxied_url):
         try:
             first_port = _unused_port()
-            first = _start_server(proxied_url, "network-first", first_port, pool_timeout=1)
+            first = _start_server(proxied_url, "network-first", first_port, pool_timeout=1, operation_timeout=2)
             processes.append(first)
             second_port = _unused_port()
             second = _start_server(clean_postgres_database, "network-second", second_port)
@@ -331,7 +339,11 @@ async def test_database_network_cut_fences_clients_and_recovers_without_process_
                         before = await _receive_type(alice, "message.created")
                         assert (await _receive_type(bob, "message.created"))["message"]["id"] == before["message"]["id"]
 
-                        proxy.cut()
+                        if fault == "reset":
+                            proxy.cut()
+                        else:
+                            # Keep TCP open but stop forwarding either direction, including new handshakes.
+                            proxy.forwarding.clear()
                         await asyncio.wait_for(alice.wait_closed(), timeout=10)
                         assert alice.close_code == 1012
                         assert first.poll() is None, "database interruption must not kill the application process"
@@ -357,6 +369,7 @@ async def test_database_network_cut_fences_clients_and_recovers_without_process_
                         await bob.send(json.dumps({"type": "message", "content": "during interruption"}))
                         during = await _receive_type(bob, "message.created")
                         proxy.enabled = True
+                        proxy.forwarding.set()
                         await _wait_ready(client, first_url, first)
 
                     async with websockets.connect(
@@ -377,6 +390,7 @@ async def test_database_network_cut_fences_clients_and_recovers_without_process_
         finally:
             # The proxy must keep forwarding while graceful process shutdown releases database leases.
             proxy.enabled = True
+            proxy.forwarding.set()
             for process in reversed(processes):
                 await asyncio.to_thread(_stop_server, process)
 
