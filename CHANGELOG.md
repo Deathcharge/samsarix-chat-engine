@@ -21,6 +21,11 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 - A PostgreSQL preview deployment guide covering protected URL files, mandatory remote `verify-full` TLS, unique replica identities, pool/lease/retention bounds, migration, backup/rollback ownership, and remaining release gates.
 - A real-network acceptance test that launches two independent Uvicorn processes, verifies cross-process HTTP/WebSocket delivery, kills one replica, observes lease-derived presence/capacity convergence, restarts its stable identity after expiry, and reloads durable history.
 - A real two-process database connection-reset/refusal test with independent healthy-peer progress, unavailable-write rejection, explicit client reconnect/history recovery, and resumed fan-out without an application restart.
+- Real two-process moderation acceptance with signed room-scoped members: freeze/unfreeze, mute/unmute, ban/unban and reconnect denial, archive/reopen with retained history, and unrelated-room isolation.
+
+### Changed
+
+- `ConnectionManager.send()` now returns false for unknown or detached sockets, `close()` is a no-op for them, and duplicate active registration is rejected. Embedders must register an accepted socket before using manager-owned send/close; pre-admission protocol frames remain the caller's responsibility.
 
 ### Security and operations
 
@@ -42,6 +47,7 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 - Process acceptance tests drain child diagnostics concurrently into a bounded tail and limit accelerated pool timeouts to the interrupted replica.
 - Configurable PostgreSQL operation deadlines cover checked-out transactions and startup migrations, discard stalled sessions before cancellation cleanup, and complement finite connection/statement/idle-transaction limits. Timeout responses explicitly do not promise rollback of an ambiguously acknowledged write.
 - PostgreSQL fault acceptance now includes a silent bidirectional application-traffic stall over open TCP connections, healthy-peer progress, and recovery without an application restart. Database-independent deadline tests run across the Python/OS matrix.
+- Socket teardown detaches membership before physical close and rejects queued stale broadcast snapshots and late sends. A send already in progress can finish before the serialized close. Failed sends now attempt a bounded physical close with code 1013 instead of only forgetting the socket.
 - The asymmetric-authentication, test, and development dependency ranges now require `cryptography>=50,<51`, excluding the `cryptography>=44.0.0,<50.0.0` range affected by `PYSEC-2026-3552`.
 
 ## 0.12.0 — 2026-08-02

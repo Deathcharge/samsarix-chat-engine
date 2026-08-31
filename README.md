@@ -205,6 +205,7 @@ HTTP / WebSocket clients
 - Search is room-authorized, current-state Unicode-normalized substring matching over at most the configured retained messages for that room; it is not global, fuzzy, or externally indexed.
 - Typing signals are transition-only, separately rate-limited, automatically expired, and never persisted or audited.
 - WebSocket delivery and presence events are best-effort/at-most-once. Reconnecting clients recover the last 50 messages and can page older history over HTTP.
+- Embedded `ConnectionManager` callers register accepted sockets before sending or closing through the manager. Unknown/detached sockets reject sends and ignore duplicate closes; teardown drops queued sends, while a send already in progress may finish before close. Pre-admission frames use the socket directly.
 - SQLite remains one-process only. The guarded PostgreSQL preview uses database-owned cursors, connection leases, rate buckets, typing state, presence, and an ordered event log across replicas; it is not a supported scale claim until the published acceptance gates pass.
 - Retention always applies configured count caps and can additionally apply an operator-selected maximum age.
 

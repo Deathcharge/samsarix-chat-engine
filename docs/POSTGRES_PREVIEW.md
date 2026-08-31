@@ -92,6 +92,14 @@ A timed-out write has an **unknown outcome** if PostgreSQL committed before its 
 
 The design follows Psycopg's [pool timeout contract](https://www.psycopg.org/psycopg3/docs/api/pool.html) and [async cancellation caveats](https://www.psycopg.org/psycopg3/docs/advanced/async.html#interrupting-async-operations), plus PostgreSQL's [statement and idle-transaction timeout guidance](https://www.postgresql.org/docs/current/runtime-config-client.html). Python 3.11+ can preserve an overlapping caller cancellation separately from the deadline; Python 3.10 lacks that cancellation-count API, so the overlapping-cancellation discrimination test is explicitly skipped there.
 
+## Moderation and socket teardown
+
+CI runs two independent Uvicorn processes with short-lived, signed, room-scoped member identities and a separate operator key. The acceptance journey proves freeze/unfreeze and mute/unmute enforcement over HTTP and WebSocket, member rejection at administrative endpoints, ban eviction on both replicas with code 4403, reconnect denial until unban, and archive eviction with code 4409 followed by reopen/history recovery. A same-subject socket in an unrelated room stays connected and writable; unaffected peers remain connected.
+
+Authoritative database checks govern reads and mutations; remote socket notifications arrive asynchronously through the polling relay. A successful administrative HTTP response is not an acknowledgement that every remote socket has physically closed. On local teardown, the manager first detaches matching sockets so late direct sends and queued broadcast snapshots cannot bypass the close. A send already in progress may finish before the close operation. Unavailable sends trigger a bounded close attempt with code 1013; a broken transport may prevent the peer observing that code.
+
+These tests cover the normal moderation relay path, not every interleaving with an overlapping database outage, connection admission, or lease renewal. Individual-socket delivery remains best effort; after any disconnect, clients reauthorize and reload current history rather than treating an error frame as durable state.
+
 ## Migration, backup, and rollback
 
 Startup takes a transaction-scoped advisory migration lock and advances the internal PostgreSQL schema to version 8. Newer unknown schemas fail closed. Before the first preview startup, take a provider-native physical/PITR backup or a tested logical backup that includes all `public.samsarix_*` tables and identity sequences.
