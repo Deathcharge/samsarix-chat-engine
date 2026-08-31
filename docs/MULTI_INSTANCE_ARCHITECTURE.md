@@ -60,7 +60,7 @@ PostgreSQL-backed deployments require all of the following:
 - **Moderation teardown:** room archive and member-ban events reach every instance, which closes matching local sockets deterministically.
 - **Webhook work:** implemented outbox workers claim due rows with an expiring owner lease using row locks and `SKIP LOCKED`. Only the current unexpired owner can acknowledge a claim. A crashed claim becomes eligible for redelivery with its stable ID; receivers still deduplicate that ID.
 - **Maintenance leadership:** advisory locks elect one retention, stale-lease, and event-pruning worker at a time. Losing leadership is harmless and retryable.
-- **Readiness:** readiness covers pool acquisition, schema compatibility, and event-cursor health. Liveness never depends on PostgreSQL.
+- **Readiness:** readiness covers pool acquisition, schema compatibility, running coordination tasks, and a locally unexpired event-cursor claim without pending fencing/recovery. Socket admission checks that same relay-health guard. Liveness never depends on PostgreSQL.
 
 ## Event retention and backpressure
 
@@ -87,7 +87,7 @@ v0.13 cannot claim multi-instance support until CI proves:
 - migration concurrency is serialized and newer schemas fail closed;
 - crashed connection leases expire and presence converges (a killed real Uvicorn process now emits the expected lease-derived leave/count on its surviving peer, then restarts under the same stable ID after expiry);
 - an event-log gap fences the lagging instance and clients recover through history (the storage/relay contract is implemented; the real-client recovery gate remains);
-- sustained load and forced database/network interruptions have measured, published outcomes;
+- sustained load and forced database/network interruptions have measured, published outcomes (CI now proves one replica's TCP reset/refusal, healthy-peer progress, explicit reconnect/history recovery, and resumed fan-out without application restart; blackholed connections, database failover, and sustained load remain);
 - SQLite single-instance behavior, package installation, Windows support, and rollback documentation remain green.
 
 ## Primary references

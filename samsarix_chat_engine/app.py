@@ -1179,12 +1179,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return
         connection_id = f"socket-{uuid.uuid4().hex}"
         if postgres_runtime is not None:
-            lease = await postgres_runtime.acquire_connection(
-                connection_id=connection_id,
-                room_id=room_id,
-                username=username,
-                subject=principal.subject,
-            )
+            try:
+                lease = await postgres_runtime.acquire_connection(
+                    connection_id=connection_id,
+                    room_id=room_id,
+                    username=username,
+                    subject=principal.subject,
+                )
+            except PostgresFoundationError:
+                await websocket.send_json(
+                    _event("error", code="storage_unavailable", message="Chat storage is temporarily unavailable")
+                )
+                await websocket.close(code=1012, reason="Storage unavailable")
+                return
             admitted = lease is not None
         else:
             admitted = True

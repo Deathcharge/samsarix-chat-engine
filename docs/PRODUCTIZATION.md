@@ -1,8 +1,18 @@
 # Productization record
 
-Last updated: 2026-08-02
+Last updated: 2026-08-31
+
+## Current v0.13 engineering status
+
+The supported v0.12 product remains the single-process SQLite backend described below. The guarded PostgreSQL preview now wires authoritative storage, leased coordination, rate controls, presence/typing, and the durable relay through the application. Merged PRs #23 (`9960ec9`) and #24 (`4c15537`) established the application runtime and real Uvicorn crash/restart test. The older baseline and release results below are historical evidence, not a claim that v0.13 has completed its release gates.
+
+The next P1 slice tests a database connection reset/refusal for one live replica while another remains available. It adds a local TCP fault proxy (test-only; no infrastructure mutation), explicit reconnect/history recovery checks, relay-claim readiness/admission checks, and best-effort lease cleanup that cannot skip pool closure. The reference test uses a three-second lease and one-second pool timeout; silently blackholed connections, database failover, live-lag fencing, load/soak, cross-process moderation/quotas/webhooks, deployment manifests, and verified PostgreSQL-native backup/PITR/rollback remain local engineering gates. See [preview operations](POSTGRES_PREVIEW.md) and the authoritative [release checklist](MULTI_INSTANCE_ARCHITECTURE.md#release-acceptance-gates).
+
+2026-08-31 baseline: clean `main...origin/main` at `4c15537`, no open PRs, and no local PostgreSQL or Docker executable. Local verification of the network-recovery implementation: `ruff check .`, `ruff format`, `mypy samsarix_chat_engine`, and `git diff --check` pass; `pytest -q -m "not postgres" --timeout=60` passes **148 tests**, with 56 deselected. The three deterministic runtime failure tests pass without a database. Both process tests skip locally because `SAMSARIX_TEST_POSTGRES_URL` is unset; PR #25's dedicated PostgreSQL and full quality jobs are the live verification gates. This slice changes no database schema (PostgreSQL 8 / SQLite 5), no production infrastructure, and no paid-service dependency.
 
 ## Repository assessment
+
+PR #25 verification follow-up: the live PostgreSQL and full quality jobs passed (204 tests, 88.21% branch-inclusive coverage). A Python 3.14 matrix run exposed an existing test teardown race: leaving the Starlette socket context cancels its ASGI task before the orderly `presence.left` broadcast necessarily completes. The two-client test now explicitly disconnects Bob and observes his departure before context teardown, retaining the event assertions. The six WebSocket tests, 20 fresh-process repetitions of that disconnect scenario, and the full 148-test local non-PostgreSQL suite pass. Final-head CI remains the merge gate; these local repetitions do not substitute for Linux verification.
 
 The repository was extracted from `helix-unified` in commit `007ec96` and then received generic tests, templates, license, and README changes. At audit start it had three implementation modules but no `__init__.py`. Two modules imported `apps.backend.*` directly; on this workstation those imports silently resolved to `C:\Users\Andrew\Helix\helix-unified`, taking about 23 seconds and hiding the undeclared private-repository dependency. In an independent environment the modules were not usable.
 

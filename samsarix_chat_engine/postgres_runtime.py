@@ -9,6 +9,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 
+from .postgres import PostgresFoundationError, PostgresUnavailableError
 from .postgres_connections import ConnectionCounts, ConnectionLease, PostgresConnectionRegistry
 from .postgres_rate_limits import PostgresRateLimiter
 from .postgres_realtime import PostgresRealtimeRelay, RealtimeTarget
@@ -138,8 +139,12 @@ class PostgresApplicationRuntime:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._relay_task = None
         self._maintenance_task = None
-        await self.relay.release()
-        await self.store.close()
+        try:
+            await self.relay.release()
+        except PostgresFoundationError as exc:
+            logger.warning("PostgreSQL instance release deferred to lease expiry: %s", type(exc).__name__)
+        finally:
+            await self.store.close()
 
     async def check_ready(self) -> bool:
         """Require usable storage and both process coordination loops."""
@@ -148,7 +153,9 @@ class PostgresApplicationRuntime:
             return False
         if self._maintenance_task is None or self._maintenance_task.done():
             return False
-        return await self.store.check_ready()
+        if not self.relay.ready:
+            return False
+        return await self.store.check_ready() and self.relay.ready
 
     async def acquire_connection(
         self,
@@ -158,6 +165,8 @@ class PostgresApplicationRuntime:
         username: str,
         subject: str | None,
     ) -> ConnectionLease | None:
+        if not self.relay.ready:
+            raise PostgresUnavailableError("PostgreSQL realtime is temporarily unavailable")
         return await self.connections.try_acquire(
             connection_id=connection_id,
             instance_id=self.instance_id,
@@ -170,7 +179,11 @@ class PostgresApplicationRuntime:
         await self.connections.renew(connection_id=connection_id, instance_id=self.instance_id)
 
     async def release_connection(self, connection_id: str) -> bool:
-        return await self.connections.release(connection_id=connection_id, instance_id=self.instance_id)
+        try:
+            return await self.connections.release(connection_id=connection_id, instance_id=self.instance_id)
+        except PostgresFoundationError as exc:
+            logger.warning("PostgreSQL socket release deferred to lease expiry: %s", type(exc).__name__)
+            return False
 
     async def connection_counts(self, room_id: str) -> ConnectionCounts:
         return await self.connections.counts(room_id=room_id)
