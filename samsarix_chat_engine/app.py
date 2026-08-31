@@ -13,6 +13,7 @@ import uuid
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol
 from urllib.parse import urlparse
@@ -88,7 +89,7 @@ from .store import (
     normalize_search_query,
 )
 from .webhooks import WebhookDispatcher
-from .websocket_manager import ConnectionManager
+from .websocket_manager import ConnectionManager, _finish_connection_cleanup
 
 logger = logging.getLogger(__name__)
 _WS_COMMAND: TypeAdapter[WebSocketMessage | WebSocketPing | WebSocketTyping] = TypeAdapter(
@@ -108,6 +109,21 @@ class APIError(Exception):
         self.code = code
         self.message = message
         self.headers = headers or {}
+
+
+@dataclass
+class _SocketSession:
+    """Ownership transferred from admission to one request's finalizer."""
+
+    connection_id: str
+    registered: bool = False
+    initialized: bool = False
+    typing_active: bool = False
+    tasks: set[asyncio.Task[None]] = field(default_factory=set)
+
+    def track(self, task: asyncio.Task[None]) -> None:
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
 
 
 class MessageRateLimiter:
@@ -611,8 +627,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             content=_error_payload("storage_unavailable", "Chat storage is temporarily unavailable"),
         )
 
+    storage_errors: tuple[type[Exception], ...] = (sqlite3.Error,)
     if postgres_runtime is not None:
         from .postgres import PostgresFoundationError
+
+        storage_errors += (PostgresFoundationError,)
 
         @application.exception_handler(PostgresFoundationError)
         async def handle_postgres_error(_request: Request, exc: PostgresFoundationError) -> JSONResponse:
@@ -1157,6 +1176,66 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await websocket.close(code=1008, reason="Username required")
             return
 
+        session = _SocketSession(connection_id=f"socket-{uuid.uuid4().hex}")
+        close_code, close_reason = 1012, "Service restarting"
+
+        async def cleanup() -> None:
+            tasks = tuple(session.tasks)
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            metadata = await manager.close(websocket, code=close_code, reason=close_reason)
+            if postgres_runtime is not None and session.registered:
+                await postgres_runtime.release_connection(session.connection_id)
+            elif postgres_runtime is None:
+                if session.typing_active:
+                    await manager.broadcast(room_id, _event("typing.stopped", username=username), exclude=websocket)
+                if metadata and session.initialized:
+                    await manager.broadcast(
+                        room_id,
+                        _event(
+                            "presence.left", username=username, active_connections=manager.room_connections(room_id)
+                        ),
+                    )
+
+        try:
+            await run_socket_session(websocket, room_id, username, principal, session)
+            close_code, close_reason = 1000, "Connection ended"
+        except WebSocketDisconnect:
+            close_code, close_reason = 1000, "Connection ended"
+        except storage_errors as exc:
+            logger.warning("WebSocket storage operation failed: %s", type(exc).__name__)
+            event = _event("error", code="storage_unavailable", message="Chat storage is temporarily unavailable")
+            if session.registered:
+                # Never fall back to a raw send after a concurrent manager-owned fence.
+                await manager.send(websocket, event)
+                await manager.close(websocket, code=1012, reason="Storage unavailable")
+            else:
+                try:
+                    await asyncio.wait_for(websocket.send_json(event), resolved.websocket_send_timeout_seconds)
+                except Exception:
+                    logger.debug("WebSocket storage-error notification was unavailable")
+                try:
+                    await asyncio.wait_for(
+                        websocket.close(code=1012, reason="Storage unavailable"),
+                        resolved.websocket_send_timeout_seconds,
+                    )
+                except Exception:
+                    logger.debug("WebSocket was already closed after storage failure")
+        except Exception:
+            close_code, close_reason = 1011, "Unexpected server error"
+            raise
+        finally:
+            await _finish_connection_cleanup(cleanup())
+
+    async def run_socket_session(
+        websocket: WebSocket,
+        room_id: str,
+        username: str,
+        principal: Principal,
+        session: _SocketSession,
+    ) -> None:
         room = await store.get_room(room_id)
         if room is None:
             await websocket.send_json(_event("error", code="room_not_found", message="Room not found"))
@@ -1178,25 +1257,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await websocket.send_json(_event("error", code="room_archived", message="Archived rooms are read-only"))
             await websocket.close(code=4409, reason="Room archived")
             return
-        connection_id = f"socket-{uuid.uuid4().hex}"
+        connection_id = session.connection_id
         if postgres_runtime is not None:
-            try:
-                registered = await postgres_runtime.admit_connection(
-                    manager,
-                    websocket,
-                    connection_id=connection_id,
-                    room_id=room_id,
-                    username=username,
-                    subject=principal.subject,
-                )
-            except PostgresFoundationError:
-                await websocket.send_json(
-                    _event("error", code="storage_unavailable", message="Chat storage is temporarily unavailable")
-                )
-                await websocket.close(code=1012, reason="Storage unavailable")
-                return
+            session.registered = await postgres_runtime.admit_connection(
+                manager,
+                websocket,
+                connection_id=connection_id,
+                room_id=room_id,
+                username=username,
+                subject=principal.subject,
+            )
         else:
-            registered = await manager.register(
+            session.registered = await manager.register(
                 websocket,
                 room_id,
                 username,
@@ -1204,7 +1276,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 connection_id=connection_id,
                 broadcast_ready=False,
             )
-        if not registered:
+        if not session.registered:
             await websocket.send_json(
                 _event("error", code="connection_capacity_reached", message="Connection capacity reached")
             )
@@ -1235,8 +1307,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 code=4404 if room is None else 4403 if banned else 4409,
                 reason=status_message,
             )
-            if postgres_runtime is not None:
-                await postgres_runtime.release_connection(connection_id)
             return
 
         history, next_before = await store.list_messages(room_id, limit=50)
@@ -1255,8 +1325,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ),
         )
         if not ready_sent:
-            if postgres_runtime is not None:
-                await postgres_runtime.release_connection(connection_id)
             return
         history_sent = await manager.send(
             websocket,
@@ -1267,9 +1335,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ),
         )
         if not history_sent or not await manager.activate(websocket):
-            if postgres_runtime is not None:
-                await postgres_runtime.release_connection(connection_id)
             return
+        session.initialized = True
         if postgres_runtime is None:
             await manager.broadcast(
                 room_id,
@@ -1277,10 +1344,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 exclude=websocket,
             )
 
-        typing_active = False
         typing_deadline = 0.0
         typing_task: asyncio.Task[None] | None = None
-        connection_heartbeat_task: asyncio.Task[None] | None = None
 
         async def maintain_connection_lease() -> None:
             if postgres_runtime is None:
@@ -1303,20 +1368,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     logger.debug("WebSocket was already closed after lease loss: %s", type(close_exc).__name__)
 
         if postgres_runtime is not None:
-            connection_heartbeat_task = asyncio.create_task(
-                maintain_connection_lease(),
-                name=f"samsarix-connection-{connection_id}",
+            session.track(
+                asyncio.create_task(
+                    maintain_connection_lease(),
+                    name=f"samsarix-connection-{connection_id}",
+                )
             )
 
         async def expire_typing() -> None:
-            nonlocal typing_active, typing_task
+            nonlocal typing_task
             try:
-                while typing_active:
+                while session.typing_active:
                     remaining = typing_deadline - time.monotonic()
                     if remaining > 0:
                         await asyncio.sleep(remaining)
                         continue
-                    typing_active = False
+                    session.typing_active = False
                     await manager.broadcast(
                         room_id,
                         _event("typing.stopped", username=username),
@@ -1328,15 +1395,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 typing_task = None
 
         async def set_typing(active: bool) -> None:
-            nonlocal typing_active, typing_deadline, typing_task
+            nonlocal typing_deadline, typing_task
             if postgres_runtime is not None:
                 await postgres_runtime.set_typing(connection_id, active)
-                typing_active = active
+                session.typing_active = active
                 return
             if active:
                 typing_deadline = time.monotonic() + resolved.typing_timeout_seconds
-                if not typing_active:
-                    typing_active = True
+                if not session.typing_active:
+                    session.typing_active = True
                     await manager.broadcast(
                         room_id,
                         _event("typing.started", username=username, expires_in=resolved.typing_timeout_seconds),
@@ -1344,8 +1411,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     )
                 if typing_task is None:
                     typing_task = asyncio.create_task(expire_typing())
-            elif typing_active:
-                typing_active = False
+                    session.track(typing_task)
+            elif session.typing_active:
+                session.typing_active = False
                 await manager.broadcast(
                     room_id,
                     _event("typing.stopped", username=username),
@@ -1512,23 +1580,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         await manager.broadcast(room_id, message_event)
                 else:
                     await manager.send(websocket, message_event)
-        except (WebSocketDisconnect, asyncio.CancelledError):
+        except WebSocketDisconnect:
             pass
-        finally:
-            if connection_heartbeat_task is not None:
-                connection_heartbeat_task.cancel()
-                await asyncio.gather(connection_heartbeat_task, return_exceptions=True)
-            if typing_task is not None:
-                typing_task.cancel()
-            if typing_active and postgres_runtime is None:
-                await manager.broadcast(room_id, _event("typing.stopped", username=username), exclude=websocket)
-            metadata = await manager.unregister(websocket)
-            if postgres_runtime is not None:
-                await postgres_runtime.release_connection(connection_id)
-            elif metadata:
-                await manager.broadcast(
-                    room_id,
-                    _event("presence.left", username=username, active_connections=manager.room_connections(room_id)),
-                )
 
     return application

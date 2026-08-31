@@ -16,6 +16,7 @@ from .postgres_rate_limits import PostgresRateLimiter
 from .postgres_realtime import PostgresRealtimeRelay, RealtimeTarget
 from .postgres_store import PostgresChatStore
 from .postgres_typing import PostgresTypingRegistry, TypingTransition
+from .websocket_manager import _finish_connection_cleanup
 
 if TYPE_CHECKING:
     from fastapi import WebSocket
@@ -180,21 +181,27 @@ class PostgresApplicationRuntime:
         token = self.relay.admission_token
         if token is None:
             raise PostgresUnavailableError("PostgreSQL realtime is temporarily unavailable")
-        lease = await self.connections.try_acquire(
-            connection_id=connection_id,
-            instance_id=self.instance_id,
-            room_id=room_id,
-            username=username,
-            subject=subject,
-        )
-        if lease is None:
-            return False
-
-        def admission_check() -> bool:
-            return self.relay.admission_token == token and lease.instance_generation == token[0]
-
         registered = False
+        reservation_possible = False
         try:
+            try:
+                lease = await self.connections.try_acquire(
+                    connection_id=connection_id,
+                    instance_id=self.instance_id,
+                    room_id=room_id,
+                    username=username,
+                    subject=subject,
+                )
+            except (PostgresUnavailableError, asyncio.CancelledError):
+                reservation_possible = True
+                raise
+            if lease is None:
+                return False
+            reservation_possible = True
+
+            def admission_check() -> bool:
+                return self.relay.admission_token == token and lease.instance_generation == token[0]
+
             registered = await manager.register(
                 websocket,
                 room_id,
@@ -208,8 +215,11 @@ class PostgresApplicationRuntime:
                 raise PostgresUnavailableError("PostgreSQL realtime is temporarily unavailable")
             return registered
         finally:
-            if not registered:
-                await self.release_connection(connection_id)
+            if not registered and reservation_possible:
+                # A cancelled/lost commit reply can leave a reservation even when
+                # try_acquire never returned it. Release is idempotent; expiry is
+                # the backstop when the database is still unavailable.
+                await _finish_connection_cleanup(self.release_connection(connection_id))
 
     async def renew_connection(self, connection_id: str) -> None:
         await self.connections.renew(connection_id=connection_id, instance_id=self.instance_id)
