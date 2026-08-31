@@ -100,6 +100,7 @@ This makes the supported topology repeatable without implying that a container m
 - [x] distinguish archive/deletion from storage failures during admission and renewal, including reaped reservations and a deliberately delayed archive relay;
 - [x] replace dropped post-registration initialization broadcasts with bounded ready/history-to-live buffering and fail-closed overflow/deadline handling;
 - [x] fence pre-admission relay events using the committed join sequence, with delayed archive/reopen, room recreation, ban/unban, freeze/unfreeze and presence acceptance;
+- [x] make current-schema startup inspection-only, retain serialized transactional upgrades, enforce exact readiness compatibility and close cancelled startup pools; live lock/rollback/replica tests gate acceptance;
 - [ ] prove live-lag fencing and combined lifecycle/outage/reconnect-storm behavior before stronger reconnect-delivery claims;
 - [ ] prove kernel-level packet blackholes, database failover, and notification-listener interruption against real network processes;
 - [ ] run sustained load/soak and reconnect-storm tests and publish measured limits;

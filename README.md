@@ -77,6 +77,8 @@ See [Getting started](docs/GETTING_STARTED.md) for authentication and browser ex
 
 The development branch also contains a guarded, unreleased PostgreSQL multi-instance mode. It is fully wired through the application but remains a preview until its subprocess, interruption, load/soak, backup, and rollback gates pass. See [PostgreSQL multi-instance preview](docs/POSTGRES_PREVIEW.md); SQLite remains the default and the supported v0.12 deployment.
 
+PostgreSQL same-version startup inspects schema metadata without replaying DDL against live replicas. Actual schema upgrades still require drained/stopped old replicas and a PostgreSQL-native backup/rollback plan; mixed-version rolling upgrades are not supported.
+
 The [application-workflow guide](docs/APPLICATION_WORKFLOWS.md) and runnable `examples/03_support_workflow.py` show a two-party support case with separate customer and agent identities. [Reliable application webhooks](docs/WEBHOOKS.md) covers receiver verification, retries, replay, rotation, and failure recovery.
 
 ## Container quick start

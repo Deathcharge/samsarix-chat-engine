@@ -150,7 +150,7 @@ class PostgresChatStore:
 
     async def check_ready(self) -> bool:
         try:
-            return await self.foundation.schema_version() >= POSTGRES_SCHEMA_VERSION
+            return await self.foundation.schema_version() == POSTGRES_SCHEMA_VERSION
         except PostgresFoundationError:
             return False
 
