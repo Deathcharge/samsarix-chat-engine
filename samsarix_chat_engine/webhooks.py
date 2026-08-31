@@ -165,7 +165,7 @@ def _send_request(
         )
     finally:
         if owned:
-            budget.cancel()
+            budget.finish()
 
 
 def _send_budgeted_request(
@@ -317,7 +317,7 @@ class WebhookDispatcher:
                 ),
                 timeout=self.timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             result = WebhookAttemptResult(status_code=None, error="timeout")
         except asyncio.CancelledError:
             if self._stop.is_set():

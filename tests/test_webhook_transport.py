@@ -73,6 +73,9 @@ def test_cancel_closes_owned_and_late_bound_sockets(expired: bool) -> None:
         budget.bind(owned)
         budget.cancel()
         budget.cancel()
+        assert owned.fileno() != -1 and peer.recv(1) == b""
+        budget.finish()
+        budget.finish()
         assert owned.fileno() == -1 and peer.recv(1) == b""
         if expired:
             budget = AttemptBudget(1)
@@ -117,6 +120,8 @@ def test_numeric_connect_has_no_second_dns_lookup(monkeypatch: pytest.MonkeyPatc
     connection = PinnedHTTPConnection(address, 8443, 1, budget=budget)
     connection.connect()
     budget.cancel()
+    assert operations == [(address, 8443)]
+    budget.finish()
     assert operations == [(address, 8443), "closed"]
 
 

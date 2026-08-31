@@ -100,6 +100,8 @@ Python cannot forcibly interrupt native DNS resolution. Each dispatcher therefor
 
 The default nine-attempt schedule starts immediately, then retries at approximately 5 seconds, 5 minutes, 30 minutes, 2 hours, 5 hours, 10 hours, 14 hours, and 20 hours, with deterministic ±20% jitter. Operators can configure 1–20 attempts. Attempts after the documented schedule are at roughly 24-hour intervals.
 
+Cancellation interrupts the connection with socket shutdown; the transport owner releases its descriptor only after native I/O unwinds. This prevents descriptor reuse while an older operation still owns it. The cancellation path does not manipulate OpenSSL state from another thread. Outstanding transport capacity remains occupied until owner cleanup completes.
+
 The PostgreSQL preview uses a database-clock 60-second claim lease. A crashed worker leaves its claim behind; another worker can reclaim the pending payload after expiry. The delivery ID and raw payload remain stable, while the retry has a fresh signing timestamp. An attempt sent before a crash but never recorded is absent from `attempt_count`, so that counter is not a count of all receiver requests or business effects. An old external request may outlive its database lease; exclusive live database ownership does not promise one physical request in flight. Durable receiver deduplication is required.
 
 Inspect delivery metadata:

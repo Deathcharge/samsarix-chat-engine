@@ -22,17 +22,21 @@ from typing import Any, Generic, TypeVar, cast
 T = TypeVar("T")
 
 
-def _close_socket(connection: socket.socket) -> None:
-    # close() alone may not interrupt another thread's socket.makefile() read.
+def _interrupt_socket(connection: socket.socket) -> None:
+    # Wake native I/O without releasing its descriptor or mutating SSLSocket's
+    # OpenSSL state from a different thread. Only the I/O owner may close it.
     try:
-        connection.shutdown(socket.SHUT_RDWR)
+        socket.socket.shutdown(connection, socket.SHUT_RDWR)
     except OSError:
         pass
-    finally:
-        try:
-            connection.close()
-        except OSError:
-            pass
+
+
+def _close_socket(connection: socket.socket) -> None:
+    _interrupt_socket(connection)
+    try:
+        connection.close()
+    except OSError:
+        pass
 
 
 class AttemptBudget:
@@ -64,6 +68,15 @@ class AttemptBudget:
             raise TimeoutError("webhook attempt deadline exceeded")
 
     def cancel(self) -> None:
+        with self._lock:
+            if self._cancelled:
+                return
+            self._cancelled = True
+            if self._socket is not None:
+                _interrupt_socket(self._socket)
+
+    def finish(self) -> None:
+        """Release the descriptor only after the transport owner exits native I/O."""
         with self._lock:
             self._cancelled = True
             connection, self._socket = self._socket, None
@@ -125,6 +138,13 @@ class PinnedHTTPConnection(http.client.HTTPConnection):
         self.sock.settimeout(self.budget.remaining())
         super().send(data)
 
+    def close(self) -> None:
+        # HTTPConnection can close automatically after parsing Connection: close.
+        # Defer descriptor release to budget.finish(), synchronized with cancel;
+        # super still resets protocol state and closes its response reader.
+        self.sock = None
+        super().close()
+
 
 class PinnedHTTPSConnection(PinnedHTTPConnection):
     def __init__(self, hostname: str, address: str, port: int, timeout: float, *, budget: AttemptBudget) -> None:
@@ -174,7 +194,7 @@ class BoundedTransport(Generic[T]):
 
     async def run(self, function: Callable[[AttemptBudget], T], *, timeout: float) -> T:
         loop = asyncio.get_running_loop()
-        work = _Work(AttemptBudget(timeout), function, loop, loop.create_future())
+        work: _Work[T] = _Work(AttemptBudget(timeout), function, loop, loop.create_future())
         with self._lock:
             if self._closed or self._active is not None:
                 raise RuntimeError("webhook transport is unavailable")
@@ -189,7 +209,12 @@ class BoundedTransport(Generic[T]):
                     raise
             self._queue.put_nowait(work)
         try:
-            return await asyncio.wait_for(work.future, work.budget.remaining())
+            # wait() neither waits for native cancellation nor suppresses caller
+            # cancellation when completion races it on older Python versions.
+            done, _ = await asyncio.wait({work.future}, timeout=work.budget.remaining())
+            if not done:
+                raise TimeoutError("webhook attempt deadline exceeded")
+            return work.future.result()
         finally:
             work.budget.cancel()
             work.future.cancel()
@@ -225,7 +250,7 @@ class BoundedTransport(Generic[T]):
             except BaseException as exc:
                 error = exc
             finally:
-                work.budget.cancel()
+                work.budget.finish()
                 with self._lock:
                     self._active = None
                     closed = self._closed
