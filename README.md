@@ -101,6 +101,8 @@ The profile publishes only to host loopback, runs as UID/GID 10001, mounts `/dat
 
 The framework-neutral [`@samsarix/chat-client`](clients/typescript/README.md) source ships in `clients/typescript`. It wraps authenticated HTTP operations and browser-safe first-message WebSocket authentication, emits generated declarations, refreshes credentials on reconnect, and applies bounded exponential backoff without runtime dependencies. The package is verified and packable but is not yet published to npm.
 
+SDK 0.4.0 waits for initial history and a post-history activation reply before `connect()` resolves. Attempts have a configurable deadline; retry budgets reset only after a stable activated connection, not merely `ready`. See the [migration and recovery contract](clients/typescript/README.md#reconnect-behavior), including browser-legal close codes and caller-owned history reconciliation.
+
 ## WebSocket protocol
 
 Connect to:

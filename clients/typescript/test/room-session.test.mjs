@@ -37,6 +37,12 @@ class FakeSocket {
     this.onmessage?.({ data });
   }
 
+  completeHandshake() {
+    this.readyState = 1;
+    this.receive({ type: "history", items: [], next_before: null });
+    this.receive({ type: "pong" });
+  }
+
   send(data) {
     this.sent.push(JSON.parse(data));
   }
@@ -93,6 +99,7 @@ test("browser authentication, typed events, publish, ping, and close", async () 
     active_connections: 1,
     max_message_chars: 10,
   });
+  sockets[0].completeHandshake();
   await connected;
 
   session.sendMessage("hello", "client-1");
@@ -102,7 +109,7 @@ test("browser authentication, typed events, publish, ping, and close", async () 
   assert.throws(() => session.sendMessage(" "), TypeError);
   assert.throws(() => session.sendMessage("more than ten"), RangeError);
   assert.throws(() => session.sendMessage("hello", "x".repeat(129)), RangeError);
-  assert.deepEqual(sockets[0].sent.slice(1), [
+  assert.deepEqual(sockets[0].sent.slice(2), [
     { type: "message", content: "hello", client_message_id: "client-1" },
     { type: "ping" },
     { type: "typing", active: true },
@@ -139,6 +146,7 @@ test("unexpected loss refreshes credentials and reconnects with bounded state", 
   await waitFor(() => sockets.length === 1);
   sockets[0].receive({ type: "auth.required", message: "authenticate" });
   sockets[0].receive({ type: "ready", room: ROOM, username: "user", active_connections: 1, max_message_chars: 4000 });
+  sockets[0].completeHandshake();
   await connected;
 
   sockets[0].serverClose(1006, "network loss");
@@ -147,6 +155,7 @@ test("unexpected loss refreshes credentials and reconnects with bounded state", 
   sockets[1].receive({ type: "auth.required", message: "authenticate" });
   assert.deepEqual(sockets[1].sent[0], { type: "auth", token: "token-2" });
   sockets[1].receive({ type: "ready", room: ROOM, username: "user", active_connections: 1, max_message_chars: 4000 });
+  sockets[1].completeHandshake();
   await reconnected;
 
   assert.equal(credentialCalls, 2);
@@ -205,6 +214,7 @@ test("API-key sessions require username and authenticate without URL credentials
   sockets[0].receive({ type: "auth.required", message: "authenticate" });
   assert.deepEqual(sockets[0].sent[0], { type: "auth", api_key: "operator-secret" });
   sockets[0].receive({ type: "ready", room: ROOM, username: "Operator", active_connections: 1, max_message_chars: 4000 });
+  sockets[0].completeHandshake();
   await connected;
   session.close();
 
@@ -237,7 +247,7 @@ test("invalid server frames close with protocol error and disconnected sends fai
   await waitFor(() => sockets.length === 1);
   sockets[0].receiveRaw("not-json");
   await assert.rejects(connected, SamsarixConnectionError);
-  assert.deepEqual(sockets[0].closes[0], [1002, "Invalid JSON event"]);
+  assert.deepEqual(sockets[0].closes[0], [4002, "Client connection ended"]);
 });
 
 test("malformed event envelopes close cleanly with a protocol error", async () => {
@@ -257,7 +267,7 @@ test("malformed event envelopes close cleanly with a protocol error", async () =
   await waitFor(() => sockets.length === 1);
   sockets[0].receiveRaw("null");
   await assert.rejects(connected, SamsarixConnectionError);
-  assert.deepEqual(sockets[0].closes[0], [1002, "Invalid event envelope"]);
+  assert.deepEqual(sockets[0].closes[0], [4002, "Client connection ended"]);
 });
 
 test("known event types must include their required payload", async () => {
@@ -277,7 +287,7 @@ test("known event types must include their required payload", async () => {
   await waitFor(() => sockets.length === 1);
   sockets[0].receive({ type: "message.created" });
   await assert.rejects(connected, SamsarixConnectionError);
-  assert.deepEqual(sockets[0].closes[0], [1002, "Invalid event envelope"]);
+  assert.deepEqual(sockets[0].closes[0], [4002, "Client connection ended"]);
 });
 
 test("typing events are validated and delivered as typed events", async () => {
@@ -298,6 +308,7 @@ test("typing events are validated and delivered as typed events", async () => {
   const connected = session.connect();
   await waitFor(() => sockets.length === 1);
   sockets[0].receive({ type: "ready", room: ROOM, username: "user", active_connections: 1, max_message_chars: 4000 });
+  sockets[0].completeHandshake();
   await connected;
   sockets[0].receive({ type: "typing.started", username: "other", expires_in: 8 });
   sockets[0].receive({ type: "typing.stopped", username: "other" });
@@ -367,9 +378,10 @@ test("consumer callback failures are reported without disrupting state", async (
   const connected = session.connect();
   await waitFor(() => sockets.length === 1);
   sockets[0].receive({ type: "ready", room: ROOM, username: "user", active_connections: 1, max_message_chars: 4000 });
+  sockets[0].completeHandshake();
   await connected;
 
   assert.equal(session.state, "connected");
-  assert.equal(reported.length, 4);
+  assert.equal(reported.length, 6);
   session.close();
 });
