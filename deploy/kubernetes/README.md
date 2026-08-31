@@ -54,13 +54,24 @@ The verifier requires the StatefulSet identity to come from `metadata.name`, req
 Wait for both Pods and exercise the service from inside the cluster:
 
 ```bash
-kubectl rollout status statefulset/samsarix-chat
+kubectl wait --for=condition=Ready \
+  --selector=app.kubernetes.io/name=samsarix-chat,app.kubernetes.io/component=engine \
+  pod \
+  --timeout=180s
 kubectl get pods -l app.kubernetes.io/name=samsarix-chat
 kubectl port-forward service/samsarix-chat 8000:80
 curl http://127.0.0.1:8000/readyz
 ```
 
 The ClusterIP Service sends new connections only to ready Pods. WebSocket clients must reconnect and reload authoritative history after any disconnect; individual socket delivery remains best effort.
+
+## Live repository acceptance
+
+The reusable `.github/workflows/kubernetes-preview.yml` workflow executes this manifest in a disposable pinned kind cluster on every pull request and main update. It builds and imports the current repository image, creates a short-lived CA and hostname certificate, provisions the CI-only digest-pinned PostgreSQL manifest in `acceptance/postgres.yaml`, and creates all credentials as files before constructing Kubernetes Secrets.
+
+Acceptance requires both StatefulSet Pods to become ready, PostgreSQL to report the exact live identities `samsarix-chat-0` and `samsarix-chat-1`, an HTTP room created through one Pod to be visible through the other, and one signed member's WebSocket message to reach a signed member on the other Pod with the same durable ID. The workflow then deletes ordinal zero normally, waits for its same-version replacement, and proves the stable identity and room survived. `scripts/smoke_kubernetes_preview.py` permits only explicit loopback origins so the checkout-only probe cannot be redirected to a remote service.
+
+This closes the repository's live manifest-execution gate. The acceptance database is ephemeral and single-node; it is not an example for operating PostgreSQL and does not exercise an ingress, NetworkPolicy, certificate rotation, node loss, persistent volumes, external fencing, database failover/failback, registry publication, capacity, or an owner's environment.
 
 ## Boundaries
 

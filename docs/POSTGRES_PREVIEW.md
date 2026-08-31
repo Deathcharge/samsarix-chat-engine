@@ -2,7 +2,7 @@
 
 Status: **guarded, unreleased v0.13 preview**.
 
-The repository's development branch can run the complete HTTP and WebSocket application against PostgreSQL. SQLite remains the default and the v0.12 supported topology remains one process. CI now exercises two real Uvicorn processes, crash-lease recovery, logical restore, and disposable physical PITR, but do not describe the preview as production-supported until the remaining interruption, reconnect, load/soak, provider-failover, and deployment-acceptance gates in the [multi-instance architecture](MULTI_INSTANCE_ARCHITECTURE.md) are published.
+The repository's development branch can run the complete HTTP and WebSocket application against PostgreSQL. SQLite remains the default and the v0.12 supported topology remains one process. CI now exercises two real Uvicorn processes, crash-lease recovery, logical restore, disposable physical PITR, and a pinned single-node Kubernetes deployment. Do not describe the preview as production-supported until the remaining interruption, reconnect, load/soak, provider-failover, and owner-environment acceptance gates in the [multi-instance architecture](MULTI_INSTANCE_ARCHITECTURE.md) are published.
 
 ## What the preview wires
 
@@ -154,6 +154,10 @@ The checked [Kubernetes PostgreSQL preview](../deploy/kubernetes/README.md) runs
 
 The database claim remains authoritative. A real-process PostgreSQL test starts one service, attempts to start another with the same live identity, requires the duplicate to exit without exposing credentials, proves the original owner remains ready and writable, then gracefully replaces it under the same stable identity and reads the committed room. The manifest and runtime therefore fail closed on a common identity-collision error; they do not detect or fence an old process that can no longer reach the shared database.
 
+The reusable Kubernetes acceptance workflow goes beyond structural inspection. It downloads checksum-pinned kind v0.32.0 and kubectl v1.36.1, creates a digest-pinned Kubernetes v1.36.1 single-node cluster, builds and imports the repository image, and provisions a digest-pinned disposable PostgreSQL 18.6 server. A one-run CA signs the internal `postgres.default.svc.cluster.local` identity; the application URL requires `sslmode=verify-full` and reads that CA, the URL, operator key and test signing key from mounted Secret files. Acceptance requires both ready Pods, the exact two live database identities, room creation through one Pod and retrieval through the other, matching signed-member `message.created` events across separate Pod forwards, then deletion/recreation of ordinal zero with its identity and durable room intact.
+
+The provider manifest under `deploy/kubernetes/acceptance` and its credentials are CI-only. It is ephemeral, single-node, and intentionally does not model a database operator, persistent volumes, failover, external old-primary fencing, availability zones, ingress, NetworkPolicy, certificate rotation, registry publication, production credentials, or owner infrastructure. Passing this workflow proves that the checked application manifest executes as documented; it is not a production availability or capacity claim.
+
 This choice follows Kubernetes' documented [StatefulSet identity](https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/) rather than a random per-start UUID or a shared Deployment environment value. Kubernetes also warns that [forced StatefulSet Pod deletion](https://kubernetes.io/docs/tasks/run-application/force-delete-stateful-set-pod/) can violate at-most-one identity assumptions. Externally fence an uncertain old Pod/node before replacement. The PodDisruptionBudget only influences voluntary disruptions; it is not STONITH, a database failover mechanism, or an availability guarantee.
 
 ## Migration, backup, and rollback
@@ -169,7 +173,7 @@ Rolling back to a binary that supports an older schema requires restoring its ma
 - Two-process normal delivery, kill/lease-expiry/restart, kernel-paused count/age lag and natural retained-gap recovery, database TCP reset/refusal, and silent bidirectional database-traffic stalls with explicit reconnect/history recovery run in CI. Kernel-level packet blackholes, database failover, reconnect storms, and sustained load/soak evidence remain pending. If a notification listener is introduced, its loss/reconnect behavior will require additional tests; polling is the current implementation.
 - Live-lag checks fence before the next over-limit batch; in-flight dispatch, interrupted storage, and lease expiry can still delay retention. Hard disk/latency bounds and measured overload/reconnect-storm recovery are not claimed.
 - Polling, rather than `LISTEN`/`NOTIFY`, currently determines normal fan-out latency.
-- The bundled Compose profile is still the supported SQLite single-replica example and does not provision PostgreSQL. The Kubernetes preview requires an external TLS-verified database and omits ingress, NetworkPolicy, certificate automation and database operation.
+- The bundled Compose profile is still the supported SQLite single-replica example and does not provision PostgreSQL. The Kubernetes preview requires an external TLS-verified database and omits ingress, NetworkPolicy, certificate automation and database operation. Its CI-only disposable provider is acceptance scaffolding, not an operator template.
 - Presence and WebSocket delivery remain best effort at the individual socket boundary. Reconnecting clients reload authoritative history over HTTP.
 
 Report preview issues without credentials or message content to support@samsarix.com. Private security reports follow [SECURITY.md](../SECURITY.md).

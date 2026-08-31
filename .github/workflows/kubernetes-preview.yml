@@ -1,0 +1,222 @@
+name: Kubernetes preview acceptance
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  KIND_VERSION: v0.32.0
+  KIND_SHA256: 50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54
+  KIND_NODE_IMAGE: kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
+  KUBECTL_VERSION: v1.36.1
+  KUBECTL_SHA256: 629d3f410e09bf49b64ae7079f7f0bda1191efed311f7d37fdbab0ad5b0ec2b7
+  SAMSARIX_KUBERNETES_ACCEPTANCE_API_KEY: kubernetes-ci-operator-key-123456
+  SAMSARIX_KUBERNETES_ACCEPTANCE_TOKEN_SECRET: kubernetes-ci-token-signing-secret-32-bytes
+  SAMSARIX_KUBERNETES_ACCEPTANCE_POSTGRES_PASSWORD: kubernetes-ci-postgres-password
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Install the acceptance client
+        run: python -m pip install -e ".[postgres,test]"
+      - name: Install pinned kind and kubectl clients
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools_directory="$RUNNER_TEMP/samsarix-kubernetes-tools"
+          install -d -m 0755 "$tools_directory"
+
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --output "$tools_directory/kind" \
+            "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          printf '%s  %s\n' "$KIND_SHA256" "$tools_directory/kind" | sha256sum --check
+          chmod 0755 "$tools_directory/kind"
+
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --output "$tools_directory/kubectl" \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          printf '%s  %s\n' "$KUBECTL_SHA256" "$tools_directory/kubectl" | sha256sum --check
+          chmod 0755 "$tools_directory/kubectl"
+          printf '%s\n' "$tools_directory" >> "$GITHUB_PATH"
+      - name: Create the pinned disposable cluster
+        shell: bash
+        run: kind create cluster --name samsarix --image "$KIND_NODE_IMAGE" --wait 120s
+      - name: Build and import the reviewed application image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --pull --tag samsarix-chat-engine:0.12.0 .
+          kind load docker-image samsarix-chat-engine:0.12.0 --name samsarix
+      - name: Create disposable TLS and file-backed runtime secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          secret_directory="$RUNNER_TEMP/samsarix-kubernetes-secrets"
+          install -d -m 0700 "$secret_directory"
+
+          openssl req -x509 -newkey rsa:2048 -sha256 -days 1 -nodes \
+            -keyout "$secret_directory/ca.key" \
+            -out "$secret_directory/ca.crt" \
+            -subj '/CN=Samsarix Kubernetes acceptance CA'
+          openssl req -newkey rsa:2048 -sha256 -nodes \
+            -keyout "$secret_directory/server.key" \
+            -out "$secret_directory/server.csr" \
+            -subj '/CN=postgres.default.svc.cluster.local' \
+            -addext 'subjectAltName=DNS:postgres,DNS:postgres.default,DNS:postgres.default.svc,DNS:postgres.default.svc.cluster.local'
+          openssl x509 -req -sha256 -days 1 \
+            -in "$secret_directory/server.csr" \
+            -CA "$secret_directory/ca.crt" \
+            -CAkey "$secret_directory/ca.key" \
+            -CAcreateserial \
+            -copy_extensions copy \
+            -out "$secret_directory/server.crt"
+          openssl verify -CAfile "$secret_directory/ca.crt" "$secret_directory/server.crt"
+
+          printf '%s' "$SAMSARIX_KUBERNETES_ACCEPTANCE_POSTGRES_PASSWORD" \
+            > "$secret_directory/postgres-password"
+          printf '%s' \
+            "postgresql://samsarix:${SAMSARIX_KUBERNETES_ACCEPTANCE_POSTGRES_PASSWORD}@postgres.default.svc.cluster.local:5432/samsarix?sslmode=verify-full&sslrootcert=/run/secrets/postgres-ca.pem" \
+            > "$secret_directory/postgres-url"
+          cp "$secret_directory/ca.crt" "$secret_directory/postgres-ca.pem"
+          printf '%s' "$SAMSARIX_KUBERNETES_ACCEPTANCE_API_KEY" \
+            > "$secret_directory/operator-api-key"
+          printf '%s' "$SAMSARIX_KUBERNETES_ACCEPTANCE_TOKEN_SECRET" \
+            > "$secret_directory/token-signing-secret"
+
+          kubectl create secret generic postgres-acceptance-auth \
+            --from-file=password="$secret_directory/postgres-password"
+          kubectl create secret generic postgres-acceptance-tls \
+            --from-file=server.crt="$secret_directory/server.crt" \
+            --from-file=server.key="$secret_directory/server.key"
+          kubectl create secret generic samsarix-chat-runtime \
+            --from-file=postgres-url="$secret_directory/postgres-url" \
+            --from-file=postgres-ca.pem="$secret_directory/postgres-ca.pem" \
+            --from-file=operator-api-key="$secret_directory/operator-api-key" \
+            --from-file=token-signing-secret="$secret_directory/token-signing-secret"
+      - name: Start TLS PostgreSQL and two application replicas
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl apply -f deploy/kubernetes/acceptance/postgres.yaml
+          kubectl rollout status deployment/postgres-acceptance --timeout=180s
+          kubectl apply -f deploy/kubernetes/postgres-preview.yaml
+          kubectl wait \
+            --for=condition=Ready \
+            --selector=app.kubernetes.io/name=samsarix-chat,app.kubernetes.io/component=engine \
+            pod \
+            --timeout=180s
+      - name: Prove distinct live StatefulSet identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=$'samsarix-chat-0\nsamsarix-chat-1'
+          actual=$(kubectl exec deployment/postgres-acceptance -- \
+            psql -U samsarix -d samsarix -Atc \
+            "SELECT instance_id FROM public.samsarix_instance_cursors WHERE lease_expires_at > clock_timestamp() ORDER BY instance_id")
+          if [[ "$actual" != "$expected" ]]; then
+            echo 'live PostgreSQL replica identities did not match the StatefulSet ordinals' >&2
+            exit 1
+          fi
+      - name: Exercise cross-replica HTTP and WebSocket behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl port-forward pod/samsarix-chat-0 18000:8000 > "$RUNNER_TEMP/samsarix-port-forward-0.log" 2>&1 &
+          first_forward=$!
+          kubectl port-forward pod/samsarix-chat-1 18001:8000 > "$RUNNER_TEMP/samsarix-port-forward-1.log" 2>&1 &
+          second_forward=$!
+          cleanup_forwards() {
+            kill "$first_forward" "$second_forward" 2>/dev/null || true
+            wait "$first_forward" "$second_forward" 2>/dev/null || true
+          }
+          trap cleanup_forwards EXIT
+
+          for port in 18000 18001; do
+            for attempt in $(seq 1 60); do
+              if curl --fail --silent --show-error "http://127.0.0.1:${port}/readyz" > /dev/null; then
+                break
+              fi
+              if [[ "$attempt" -eq 60 ]]; then
+                echo "Pod forward on port ${port} did not become ready" >&2
+                exit 1
+              fi
+              sleep 1
+            done
+          done
+          python scripts/smoke_kubernetes_preview.py \
+            --first-url http://127.0.0.1:18000 \
+            --second-url http://127.0.0.1:18001
+      - name: Replace one Pod and prove stable identity and durable state
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl delete pod samsarix-chat-0 --wait=true --timeout=120s
+          kubectl wait --for=condition=Ready pod/samsarix-chat-0 --timeout=180s
+
+          expected=$'samsarix-chat-0\nsamsarix-chat-1'
+          actual=$(kubectl exec deployment/postgres-acceptance -- \
+            psql -U samsarix -d samsarix -Atc \
+            "SELECT instance_id FROM public.samsarix_instance_cursors WHERE lease_expires_at > clock_timestamp() ORDER BY instance_id")
+          if [[ "$actual" != "$expected" ]]; then
+            echo 'stable identity was not recovered after Pod replacement' >&2
+            exit 1
+          fi
+
+          kubectl port-forward pod/samsarix-chat-0 18000:8000 > "$RUNNER_TEMP/samsarix-restart-forward-0.log" 2>&1 &
+          first_forward=$!
+          kubectl port-forward pod/samsarix-chat-1 18001:8000 > "$RUNNER_TEMP/samsarix-restart-forward-1.log" 2>&1 &
+          second_forward=$!
+          cleanup_forwards() {
+            kill "$first_forward" "$second_forward" 2>/dev/null || true
+            wait "$first_forward" "$second_forward" 2>/dev/null || true
+          }
+          trap cleanup_forwards EXIT
+
+          for port in 18000 18001; do
+            for attempt in $(seq 1 60); do
+              if curl --fail --silent --show-error "http://127.0.0.1:${port}/readyz" > /dev/null; then
+                break
+              fi
+              if [[ "$attempt" -eq 60 ]]; then
+                echo "replacement Pod forward on port ${port} did not become ready" >&2
+                exit 1
+              fi
+              sleep 1
+            done
+          done
+          python scripts/smoke_kubernetes_preview.py \
+            --first-url http://127.0.0.1:18000 \
+            --second-url http://127.0.0.1:18001 \
+            --verify-existing
+      - name: Capture failure diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          kubectl get all --show-labels || true
+          kubectl describe statefulset/samsarix-chat || true
+          kubectl describe pods -l app.kubernetes.io/name=samsarix-chat || true
+          kubectl logs -l app.kubernetes.io/name=samsarix-chat --all-containers --prefix --tail=300 || true
+          kubectl logs deployment/postgres-acceptance --all-containers --tail=300 || true
+          for log in "$RUNNER_TEMP"/samsarix-*-forward-*.log; do
+            if [[ -f "$log" ]]; then
+              printf '===== %s\n' "$log"
+              sed -n '1,300p' "$log"
+            fi
+          done
+      - name: Delete the disposable cluster
+        if: always()
+        shell: bash
+        run: kind delete cluster --name samsarix
