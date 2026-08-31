@@ -257,7 +257,8 @@ async def test_killed_webhook_worker_natural_lease_recovery(
                 assert control_receipt.delivery_id != original.delivery_id
                 assert json.loads(control_receipt.body)["data"]["message"] == control.json()
                 control_claim = await _claim(clean_postgres_database, control_receipt.delivery_id)
-                assert control_claim is not None and control_claim[0] != first_owner
+                assert control_claim is not None and control_claim[0] and control_claim[0] != first_owner
+                assert control_claim[1] > control_claim[2] and control_claim[3] == 0 and control_claim[4] is None
                 second_owner = control_claim[0]
                 still_owned = await _claim(clean_postgres_database, original.delivery_id)
                 assert still_owned is not None and still_owned[0] == first_owner

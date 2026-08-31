@@ -94,7 +94,9 @@ Return any `2xx` only after durably accepting the event. All other statuses, con
 
 ## Retry and recovery
 
-The default request timeout is 10 seconds. The default nine-attempt schedule starts immediately, then retries at approximately 5 seconds, 5 minutes, 30 minutes, 2 hours, 5 hours, 10 hours, 14 hours, and 20 hours, with deterministic ±20% jitter. Operators can configure 1–20 attempts and a 0.1–30 second timeout. Attempts after the documented schedule are at roughly 24-hour intervals.
+The default socket-operation timeout is 10 seconds. It is not a total delivery or shutdown deadline: slow response headers and multiple blocking phases can exceed it, and DNS resolution is not bounded by that setting. Use a process supervisor with a forced-termination deadline; a total in-process delivery deadline remains a named hardening gap. The default nine-attempt schedule starts immediately, then retries at approximately 5 seconds, 5 minutes, 30 minutes, 2 hours, 5 hours, 10 hours, 14 hours, and 20 hours, with deterministic ±20% jitter. Operators can configure 1–20 attempts and a 0.1–30 second socket timeout. Attempts after the documented schedule are at roughly 24-hour intervals.
+
+The PostgreSQL preview uses a database-clock 60-second claim lease. A crashed worker leaves its claim behind; another worker can reclaim the pending payload after expiry. The delivery ID and raw payload remain stable, while the retry has a fresh signing timestamp. An attempt sent before a crash but never recorded is absent from `attempt_count`, so that counter is not a count of all receiver requests or business effects. An old external request may outlive its database lease; exclusive live database ownership does not promise one physical request in flight. Durable receiver deduplication is required.
 
 Inspect delivery metadata:
 
