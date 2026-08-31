@@ -135,10 +135,16 @@ async def test_blocked_older_schema_migration_rolls_back_then_can_be_retried(cle
         assert await recovered.event_retention_floor() == 0
 
 
+@pytest.mark.parametrize("isolation", ["default", "serializable"])
 @pytest.mark.asyncio
-async def test_current_schema_inspection_waits_for_migration_lock_and_reads_committed_version(clean_postgres_database):
+async def test_current_schema_inspection_waits_for_migration_lock_and_reads_committed_version(
+    clean_postgres_database, isolation
+):
     await _initialize(clean_postgres_database)
-    service = PostgresFoundation(clean_postgres_database)
+    conninfo = clean_postgres_database
+    if isolation != "default":
+        conninfo = psycopg.conninfo.make_conninfo(conninfo, options=f"-c default_transaction_isolation={isolation}")
+    service = PostgresFoundation(conninfo)
     opening = None
     try:
         async with await psycopg.AsyncConnection.connect(clean_postgres_database) as migrator:
@@ -191,7 +197,7 @@ def test_starting_replica_does_not_interrupt_existing_room_session(clean_postgre
                 postgres_url=clean_postgres_database,
                 postgres_instance_id=instance_id,
                 postgres_relay_poll_seconds=0.01,
-                postgres_maintenance_interval_seconds=0.01,
+                postgres_maintenance_interval_seconds=0.1,
                 api_key="startup-inspection-operator-key",
             )
         )
