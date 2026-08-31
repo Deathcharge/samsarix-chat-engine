@@ -38,6 +38,8 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 - Event pruning records the greatest intentionally removed sequence even when no event rows remain. A returning stale relay cannot mistake that empty window for a healthy cursor: it closes local sockets before skipping to current authoritative state, and its generation rotation makes old connection leases non-live.
 - PostgreSQL replica IDs are exclusive generation-owned claims: a duplicate active owner fails closed, graceful shutdown releases the exact generation, and a stale process cannot heartbeat, read, or acknowledge after a replacement takes ownership.
 - PostgreSQL readiness and socket admission require a locally unexpired relay claim without pending fencing/recovery, not merely a running task. Failed lease cleanup defers to expiry while still closing the pool and omits exception contents from logs.
+- Socket admission revalidates a database-generation/local-epoch token under the connection-manager lock, so reservations cannot register after an intervening relay fence or same-generation recovery; rejected reservations release their capacity.
+- Process acceptance tests drain child diagnostics concurrently into a bounded tail and limit accelerated pool timeouts to the interrupted replica.
 - The asymmetric-authentication, test, and development dependency ranges now require `cryptography>=50,<51`, excluding the `cryptography>=44.0.0,<50.0.0` range affected by `PYSEC-2026-3552`.
 
 ## 0.12.0 — 2026-08-02
