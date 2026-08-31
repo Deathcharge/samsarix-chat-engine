@@ -29,6 +29,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.types import Message as ASGIMessage
 
 if TYPE_CHECKING:
+    from .postgres_connections import ConnectionRoomUnavailableError
     from .postgres_runtime import PostgresApplicationRuntime
 
 from .auth import (
@@ -628,10 +629,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     storage_errors: tuple[type[Exception], ...] = (sqlite3.Error,)
+    connection_room_errors: tuple[type[ConnectionRoomUnavailableError], ...] = ()
     if postgres_runtime is not None:
         from .postgres import PostgresFoundationError
+        from .postgres_connections import ConnectionRoomUnavailableError
 
         storage_errors += (PostgresFoundationError,)
+        connection_room_errors = (ConnectionRoomUnavailableError,)
 
         @application.exception_handler(PostgresFoundationError)
         async def handle_postgres_error(_request: Request, exc: PostgresFoundationError) -> JSONResponse:
@@ -1179,6 +1183,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         session = _SocketSession(connection_id=f"socket-{uuid.uuid4().hex}")
         close_code, close_reason = 1012, "Service restarting"
 
+        async def send_error(code: str, message: str) -> None:
+            event = _event("error", code=code, message=message)
+            if session.registered:
+                # Never fall back to a raw send after a concurrent manager-owned fence.
+                await manager.send(websocket, event)
+            else:
+                try:
+                    await asyncio.wait_for(websocket.send_json(event), resolved.websocket_send_timeout_seconds)
+                except Exception:
+                    logger.debug("WebSocket error notification was unavailable")
+
         async def cleanup() -> None:
             tasks = tuple(session.tasks)
             for task in tasks:
@@ -1214,18 +1229,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             close_code, close_reason = 1000, "Connection ended"
         except WebSocketDisconnect:
             close_code, close_reason = 1000, "Connection ended"
+        except connection_room_errors as exc:
+            if exc.room is None:
+                close_code, close_reason = 4404, "Room not found"
+                await send_error("room_not_found", "Room not found")
+            else:
+                close_code, close_reason = 4409, "Room archived"
+                await send_error("room_archived", "Archived rooms are read-only")
         except storage_errors as exc:
             logger.warning("WebSocket storage operation failed: %s", type(exc).__name__)
             close_code, close_reason = 1012, "Storage unavailable"
-            event = _event("error", code="storage_unavailable", message="Chat storage is temporarily unavailable")
-            if session.registered:
-                # Never fall back to a raw send after a concurrent manager-owned fence.
-                await manager.send(websocket, event)
-            else:
-                try:
-                    await asyncio.wait_for(websocket.send_json(event), resolved.websocket_send_timeout_seconds)
-                except Exception:
-                    logger.debug("WebSocket storage-error notification was unavailable")
+            await send_error("storage_unavailable", "Chat storage is temporarily unavailable")
         except Exception:
             close_code, close_reason = 1011, "Unexpected server error"
             raise
@@ -1356,9 +1370,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             try:
                 while True:
                     await asyncio.sleep(resolved.postgres_lease_seconds / 3)
-                    await postgres_runtime.renew_connection(connection_id)
+                    await postgres_runtime.renew_connection(connection_id, room_id=room_id)
             except asyncio.CancelledError:
                 raise
+            except connection_room_errors as exc:
+                if exc.room is None:
+                    await manager.close(
+                        websocket,
+                        code=4404,
+                        reason="Room not found",
+                        event=_event("error", code="room_not_found", message="Room not found"),
+                    )
+                else:
+                    await manager.close(
+                        websocket,
+                        code=4409,
+                        reason="Room archived",
+                        event=_event("room.archived", room=exc.room.model_dump(mode="json")),
+                    )
             except Exception as exc:
                 logger.warning("Closing WebSocket after PostgreSQL lease loss: %s", type(exc).__name__)
                 await manager.send(

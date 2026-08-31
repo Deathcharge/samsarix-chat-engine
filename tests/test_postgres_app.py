@@ -4,8 +4,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
+from dataclasses import replace
+
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 pytest.importorskip("psycopg")
 
@@ -136,3 +141,86 @@ def test_failed_handshake_releases_real_database_lease_before_reconnect(clean_po
             assert recovered.receive_json()["type"] == "ready"
             assert recovered.receive_json()["type"] == "history"
         assert client.portal.call(count_lease_rows) == 0
+
+
+@pytest.mark.parametrize("state", ["archived", "deleted"])
+def test_room_changes_between_validation_and_database_admission(clean_postgres_database, monkeypatch, state):
+    application = create_app(_settings(clean_postgres_database, "admission-room-change"))
+    headers = {"X-API-Key": "postgres-operator-key-1234"}
+    with TestClient(application) as client:
+        assert client.post("/v1/rooms", headers=headers, json={"id": "room", "name": "Room"}).status_code == 201
+        runtime = application.state.postgres_runtime
+        acquire = runtime.connections.try_acquire
+
+        async def change_before_acquisition(**kwargs):
+            await runtime.store.set_room_state("room", archived=True, frozen=None, actor="operator")
+            if state == "deleted":
+                await runtime.store.delete_room("room", actor="operator")
+            return await acquire(**kwargs)
+
+        monkeypatch.setattr(runtime.connections, "try_acquire", change_before_acquisition)
+        with client.websocket_connect("/v1/rooms/room/ws?username=Alice", headers=headers) as websocket:
+            error = websocket.receive_json()
+            assert error["type"] == "error"
+            assert error["code"] == ("room_archived" if state == "archived" else "room_not_found")
+            with pytest.raises(WebSocketDisconnect) as closed:
+                websocket.receive_json()
+            assert closed.value.code == (4409 if state == "archived" else 4404)
+        assert application.state.connections.active_connections == 0
+        assert client.get("/v1/stats", headers=headers).json() == {"active_connections": 0}
+        assert client.get("/readyz").status_code == 200
+
+
+@pytest.mark.parametrize("state", ["archived", "reaped", "deleted"])
+def test_heartbeat_observes_lifecycle_before_delayed_archive_relay(clean_postgres_database, monkeypatch, state):
+    application = create_app(
+        replace(_settings(clean_postgres_database, "heartbeat-room-change"), postgres_lease_seconds=9)
+    )
+    headers = {"X-API-Key": "postgres-operator-key-1234"}
+    archive_paused = threading.Event()
+    resume_archive = asyncio.Event()
+    with TestClient(application) as client:
+        runtime = application.state.postgres_runtime
+        dispatch = runtime.relay._dispatch
+
+        async def delayed_archive(event):
+            if event.event_type == "room.archived":
+                archive_paused.set()
+                await resume_archive.wait()
+            await dispatch(event)
+
+        monkeypatch.setattr(runtime.relay, "_dispatch", delayed_archive)
+        try:
+            for room_id in ("room", "unrelated"):
+                assert (
+                    client.post("/v1/rooms", headers=headers, json={"id": room_id, "name": room_id}).status_code == 201
+                )
+            with (
+                client.websocket_connect("/v1/rooms/room/ws?username=Alice", headers=headers) as alice,
+                client.websocket_connect("/v1/rooms/unrelated/ws?username=Bob", headers=headers) as bob,
+            ):
+                for connection in (alice, bob):
+                    assert connection.receive_json()["type"] == "ready"
+                    assert connection.receive_json()["type"] == "history"
+                archived = client.patch("/v1/rooms/room", headers=headers, json={"archived": True})
+                assert archived.status_code == 200
+                assert archive_paused.wait(5), "relay did not reach the controlled archive barrier"
+                if state == "reaped":
+                    client.portal.call(runtime.connections.reap_expired)
+                if state == "deleted":
+                    deleted = client.delete("/v1/rooms/room", headers={**headers, "X-Confirm-Room-Delete": "room"})
+                    assert deleted.status_code == 204
+                event = alice.receive_json()
+                if state == "deleted":
+                    assert event == {"type": "error", "code": "room_not_found", "message": "Room not found"}
+                else:
+                    assert event == {"type": "room.archived", "room": archived.json()}
+                with pytest.raises(WebSocketDisconnect) as closed:
+                    alice.receive_json()
+                assert closed.value.code == (4404 if state == "deleted" else 4409)
+                bob.send_json({"type": "ping"})
+                assert bob.receive_json() == {"type": "pong"}
+                assert client.get("/readyz").status_code == 200
+                client.portal.call(resume_archive.set)
+        finally:
+            client.portal.call(resume_archive.set)

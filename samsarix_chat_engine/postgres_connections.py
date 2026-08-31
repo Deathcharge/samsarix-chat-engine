@@ -12,6 +12,7 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.errors import UniqueViolation
 
+from .models import Room
 from .postgres import (
     _ROOM_ID_PATTERN,
     InstanceLeaseError,
@@ -32,6 +33,10 @@ class ConnectionLeaseError(RuntimeError):
 
 class ConnectionRoomUnavailableError(ConnectionLeaseError):
     """Raised when a connection's room is missing or archived."""
+
+    def __init__(self, room: Room | None) -> None:
+        super().__init__("connection room is missing" if room is None else "connection room is archived")
+        self.room = room
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,7 +126,7 @@ class PostgresConnectionRegistry:
 
             cursor = await connection.execute(
                 """
-                SELECT archived_at
+                SELECT id, name, description, created_at, archived_at, frozen_at
                 FROM public.samsarix_rooms
                 WHERE id = %s
                 FOR SHARE
@@ -129,8 +134,8 @@ class PostgresConnectionRegistry:
                 (room_id,),
             )
             room = await cursor.fetchone()
-            if room is None or room[0] is not None:
-                raise ConnectionRoomUnavailableError("connection room is missing or archived")
+            if room is None or room[4] is not None:
+                raise ConnectionRoomUnavailableError(_room_snapshot(room) if room is not None else None)
 
             await connection.execute("SELECT pg_advisory_xact_lock(%s)", (POSTGRES_CONNECTION_CAP_LOCK_ID,))
             stale = await _delete_expired(
@@ -213,11 +218,13 @@ class PostgresConnectionRegistry:
             raise InstanceLeaseError("instance lease expired before connection reservation")
         return _lease_from_row(row)
 
-    async def renew(self, *, connection_id: str, instance_id: str) -> datetime:
+    async def renew(self, *, connection_id: str, instance_id: str, room_id: str) -> datetime:
         """Extend one live connection only while its owner and room remain usable."""
 
         _validate_connection_id(connection_id)
         _validate_instance_id(instance_id)
+        if not _ROOM_ID_PATTERN.fullmatch(room_id):
+            raise ValueError("invalid room ID")
         async with self.foundation.transaction() as connection:
             cursor = await connection.execute(
                 """
@@ -228,6 +235,7 @@ class PostgresConnectionRegistry:
                      public.samsarix_rooms AS room
                 WHERE lease.connection_id = %s
                   AND lease.instance_id = %s
+                  AND lease.room_id = %s
                   AND lease.lease_expires_at > clock_timestamp()
                   AND owner.instance_id = lease.instance_id
                   AND owner.generation = lease.instance_generation
@@ -236,9 +244,22 @@ class PostgresConnectionRegistry:
                   AND room.archived_at IS NULL
                 RETURNING lease.lease_expires_at
                 """,
-                (self.lease_seconds, connection_id, instance_id),
+                (self.lease_seconds, connection_id, instance_id, room_id),
             )
             row = await cursor.fetchone()
+            if row is None:
+                # Maintenance may already have removed an archived reservation.
+                # Diagnose the authenticated room, not only the surviving lease row.
+                cursor = await connection.execute(
+                    """
+                    SELECT id, name, description, created_at, archived_at, frozen_at
+                    FROM public.samsarix_rooms WHERE id = %s
+                    """,
+                    (room_id,),
+                )
+                room = await cursor.fetchone()
+                if room is None or room[4] is not None:
+                    raise ConnectionRoomUnavailableError(_room_snapshot(room) if room is not None else None)
         if row is None:
             raise ConnectionLeaseError("connection lease is missing, expired, or unavailable")
         return cast(datetime, row[0])
@@ -481,6 +502,17 @@ async def _room_active_count(connection: AsyncConnection[tuple[Any, ...]], room_
     )
     row = await cursor.fetchone()
     return int(row[0]) if row is not None else 0
+
+
+def _room_snapshot(row: tuple[Any, ...]) -> Room:
+    return Room(
+        id=str(row[0]),
+        name=str(row[1]),
+        description=str(row[2]),
+        created_at=row[3],
+        archived_at=row[4],
+        frozen_at=row[5],
+    )
 
 
 def _lease_from_row(row: tuple[Any, ...]) -> ConnectionLease:

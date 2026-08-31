@@ -266,36 +266,38 @@ async def test_two_uvicorn_processes_reap_crashed_leases_and_restart(
             assert (await client.get(f"{second_url}/v1/rooms/process-room")).status_code == 200
 
             websocket_headers = {"X-API-Key": _OPERATOR_KEY}
-            async with (
-                websockets.connect(
-                    f"ws://127.0.0.1:{first_port}/v1/rooms/process-room/ws?username=Alice",
-                    additional_headers=websocket_headers,
-                    open_timeout=5,
-                    close_timeout=1,
-                ) as alice,
-                websockets.connect(
+            async with websockets.connect(
+                f"ws://127.0.0.1:{first_port}/v1/rooms/process-room/ws?username=Alice",
+                additional_headers=websocket_headers,
+                open_timeout=5,
+                close_timeout=1,
+            ) as alice:
+                assert json.loads(await asyncio.wait_for(alice.recv(), 5))["type"] == "ready"
+                assert json.loads(await asyncio.wait_for(alice.recv(), 5))["type"] == "history"
+                # HTTP upgrade (and even receiving history) can precede activation.
+                # This test checks crash/reap, not best-effort presence during startup.
+                await alice.send(json.dumps({"type": "ping"}))
+                await _receive_type(alice, "pong")
+                async with websockets.connect(
                     f"ws://127.0.0.1:{second_port}/v1/rooms/process-room/ws?username=Bob",
                     additional_headers=websocket_headers,
                     open_timeout=5,
                     close_timeout=1,
-                ) as bob,
-            ):
-                assert json.loads(await alice.recv())["type"] == "ready"
-                assert json.loads(await alice.recv())["type"] == "history"
-                assert json.loads(await bob.recv())["type"] == "ready"
-                assert json.loads(await bob.recv())["type"] == "history"
-                await _receive_type(alice, "presence.joined", username="Bob")
+                ) as bob:
+                    assert json.loads(await asyncio.wait_for(bob.recv(), 5))["type"] == "ready"
+                    assert json.loads(await asyncio.wait_for(bob.recv(), 5))["type"] == "history"
+                    await _receive_type(alice, "presence.joined", username="Bob")
 
-                await bob.send(json.dumps({"type": "message", "content": "survives process loss"}))
-                bob_message = await _receive_type(bob, "message.created")
-                alice_message = await _receive_type(alice, "message.created")
-                assert alice_message["message"]["id"] == bob_message["message"]["id"]
+                    await bob.send(json.dumps({"type": "message", "content": "survives process loss"}))
+                    bob_message = await _receive_type(bob, "message.created")
+                    alice_message = await _receive_type(alice, "message.created")
+                    assert alice_message["message"]["id"] == bob_message["message"]["id"]
 
-                first.kill()
-                first.wait(timeout=5)
-                left = await _receive_type(bob, "presence.left", username="Alice")
-                assert left["active_connections"] == 1
-                assert (await client.get(f"{second_url}/v1/stats")).json() == {"active_connections": 1}
+                    first.kill()
+                    first.wait(timeout=5)
+                    left = await _receive_type(bob, "presence.left", username="Alice")
+                    assert left["active_connections"] == 1
+                    assert (await client.get(f"{second_url}/v1/stats")).json() == {"active_connections": 1}
 
             restarted = _start_server(clean_postgres_database, "process-first", first_port)
             processes.append(restarted)

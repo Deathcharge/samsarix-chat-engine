@@ -221,8 +221,8 @@ class PostgresApplicationRuntime:
                 # the backstop when the database is still unavailable.
                 await _finish_connection_cleanup(self.release_connection(connection_id))
 
-    async def renew_connection(self, connection_id: str) -> None:
-        await self.connections.renew(connection_id=connection_id, instance_id=self.instance_id)
+    async def renew_connection(self, connection_id: str, *, room_id: str) -> None:
+        await self.connections.renew(connection_id=connection_id, instance_id=self.instance_id, room_id=room_id)
 
     async def release_connection(self, connection_id: str) -> bool:
         try:

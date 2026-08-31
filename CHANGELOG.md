@@ -27,6 +27,7 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 
 - `ConnectionManager.send()` now returns false for unknown or detached sockets, `close()` is a no-op for them, and duplicate active registration is rejected. Embedders must register an accepted socket before using manager-owned send/close; pre-admission protocol frames remain the caller's responsibility.
 - `ConnectionManager.close()` returns the detached `(room_id, username)` to the winning closer, or `None` for an already-detached socket, allowing one-owner finalization without losing departure metadata.
+- `ConnectionManager.close(..., event=...)` atomically owns a final notification and physical close, avoiding duplicate lifecycle frames when heartbeat and relay closers race.
 - AnyIO, already used transitively by Starlette, is an explicit bounded runtime dependency for ASGI cancellation-scope protection.
 
 ### Security and operations
@@ -53,6 +54,7 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 - Authenticated WebSocket session cleanup now covers initial database reads, admission, ready/history delivery, background tasks, and the receive loop. ASGI cancellation scopes and repeated direct cancellation cannot abandon its bounded cleanup operations. Storage failures send a non-leaking `storage_unavailable` error and close with 1012; unexpected failures close with 1011.
 - Individual manager closes retain ownership through their bounded physical close even if their caller is cancelled after detachment; cancelling a closing heartbeat cannot strand the transport.
 - Ambiguous PostgreSQL admission outcomes trigger best-effort idempotent reservation release, with lease expiry as the outage backstop. Known duplicate-reservation errors do not release the existing owner. Live tests inspect physical lease rows after failed handshakes and verify reconnect.
+- PostgreSQL admission and failed renewal distinguish an authoritatively archived or deleted room from storage/lease failure, even after maintenance removed the reservation. Admission returns `room_archived`/4409 or `room_not_found`/4404; an established heartbeat can send `room.archived`/4409 before the relay. Healthy renewal remains one query; uncertain storage/lease failures still close with 1012.
 - The asymmetric-authentication, test, and development dependency ranges now require `cryptography>=50,<51`, excluding the `cryptography>=44.0.0,<50.0.0` range affected by `PYSEC-2026-3552`.
 
 ## 0.12.0 — 2026-08-02
