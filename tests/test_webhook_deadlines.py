@@ -56,6 +56,18 @@ def _watch_transport(monkeypatch: pytest.MonkeyPatch, dispatcher: WebhookDispatc
     return finished
 
 
+async def _worker_idle(dispatcher: WebhookDispatcher) -> None:
+    # The resolver's finally block can run before its caller inspects the late
+    # result. Wait for that entire native function to exit, including cleanup,
+    # before asserting no connection was made or restoring monkeypatches.
+    for _ in range(200):
+        with dispatcher._transport._lock:
+            if dispatcher._transport._active is None:
+                return
+        await asyncio.sleep(0.01)
+    pytest.fail("released transport worker did not finish")
+
+
 @asynccontextmanager
 async def _dispatcher(
     tmp_path: Path, *, url: str = "https://hooks.example.com/events", timeout: float = 0.15
@@ -239,13 +251,14 @@ async def test_blocked_dns_is_bounded_and_cannot_send_late(
             assert sorted(item.attempt_count for item in pending) == ([0, 1] if finish == "deadline" else [0, 0])
             release.set()
             await _event(exited)
-            await asyncio.sleep(0.05)
+            await _worker_idle(dispatcher)
             assert connections == []
         finally:
             release.set()
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             await _event(exited)
+            await _worker_idle(dispatcher)
 
 
 @pytest.mark.timeout(10)
