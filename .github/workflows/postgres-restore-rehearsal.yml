@@ -1,0 +1,93 @@
+name: PostgreSQL logical restore rehearsal
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rehearse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:18.6-bookworm
+        env:
+          POSTGRES_DB: samsarix_backup_source
+          POSTGRES_PASSWORD: postgres-rehearsal-password
+          POSTGRES_USER: samsarix_rehearsal
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U samsarix_rehearsal -d samsarix_backup_source"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      SAMSARIX_RESTORE_REHEARSAL_CONFIRM: disposable-loopback-databases
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+          cache: pip
+      - run: python -m pip install --upgrade pip setuptools wheel
+      - run: python -m pip install -e ".[postgres,test]"
+      - name: Seed application state through the restored product boundary
+        env:
+          SAMSARIX_RESTORE_REHEARSAL_URL: postgresql://samsarix_rehearsal:postgres-rehearsal-password@127.0.0.1:5432/samsarix_backup_source
+        run: python scripts/postgres_restore_probe.py seed
+      - name: Create, inspect, and restore a native custom-format archive
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$POSTGRES_CONTAINER"
+          archive=/tmp/samsarix-logical-rehearsal.dump
+          cleanup() {
+            docker exec \
+              --env PGPASSWORD=postgres-rehearsal-password \
+              "$POSTGRES_CONTAINER" \
+              dropdb --if-exists --username=samsarix_rehearsal samsarix_backup_restore >/dev/null 2>&1 || true
+            docker exec "$POSTGRES_CONTAINER" rm -f "$archive" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker exec \
+            --env PGPASSWORD=postgres-rehearsal-password \
+            "$POSTGRES_CONTAINER" \
+            pg_dump \
+              --username=samsarix_rehearsal \
+              --dbname=samsarix_backup_source \
+              --format=custom \
+              --no-owner \
+              --no-privileges \
+              --file="$archive"
+          docker exec "$POSTGRES_CONTAINER" pg_restore --list "$archive" >/dev/null
+          docker exec "$POSTGRES_CONTAINER" sha256sum "$archive"
+          docker exec \
+            --env PGPASSWORD=postgres-rehearsal-password \
+            "$POSTGRES_CONTAINER" \
+            createdb \
+              --username=samsarix_rehearsal \
+              --template=template0 \
+              samsarix_backup_restore
+          docker exec \
+            --env PGPASSWORD=postgres-rehearsal-password \
+            "$POSTGRES_CONTAINER" \
+            pg_restore \
+              --username=samsarix_rehearsal \
+              --dbname=samsarix_backup_restore \
+              --exit-on-error \
+              --single-transaction \
+              --no-owner \
+              --no-privileges \
+              "$archive"
+
+          SAMSARIX_RESTORE_REHEARSAL_URL='postgresql://samsarix_rehearsal:postgres-rehearsal-password@127.0.0.1:5432/samsarix_backup_restore' \
+            python scripts/postgres_restore_probe.py verify
