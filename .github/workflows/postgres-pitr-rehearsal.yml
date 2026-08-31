@@ -68,7 +68,12 @@ jobs:
           }
 
           cleanup() {
+            status=$?
             set +e
+            if [ "$status" -ne 0 ] && [ "$target_started" -eq 1 ]; then
+              echo 'recovered-cluster diagnostic tail:' >&2
+              docker exec "$POSTGRES_CONTAINER" tail --lines=100 "$target_log" >&2 || true
+            fi
             if [ "$target_started" -eq 1 ]; then
               docker exec --user postgres "$POSTGRES_CONTAINER" \
                 pg_ctl --pgdata="$target_data" --mode=fast --wait stop >/dev/null 2>&1 || true
@@ -78,6 +83,7 @@ jobs:
               "$POSTGRES_CONTAINER" \
               dropdb --if-exists --force --username=postgres "$source_database" >/dev/null 2>&1 || true
             super_psql --dbname=postgres --command="DROP ROLE IF EXISTS ${app_role}" >/dev/null 2>&1 || true
+            return "$status"
           }
           trap cleanup EXIT
 
@@ -183,7 +189,7 @@ jobs:
           docker exec --interactive --user postgres "$POSTGRES_CONTAINER" \
             sh -c "cat >> '$target_data/postgresql.auto.conf'" <<PITR_CONFIG
           port = ${target_port}
-          listen_addresses = '127.0.0.1'
+          listen_addresses = '*'
           unix_socket_directories = '/tmp'
           restore_command = 'cp ${wal_archive}/%f %p'
           recovery_target_name = '${restore_point}'
