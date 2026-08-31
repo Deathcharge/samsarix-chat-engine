@@ -13,7 +13,12 @@ from typing import Any
 import pytest
 
 from scripts.load_metrics import Profile, arrivals, distribution, merge_message, validate_target
-from scripts.load_postgres import (
+
+# The checkout-only PostgreSQL harness needs the optional driver; SQLite-only
+# contributors must still be able to collect and run the remaining test suite.
+pytest.importorskip("psycopg")
+
+from scripts.load_postgres import (  # noqa: E402
     CheckFailed,
     Member,
     World,

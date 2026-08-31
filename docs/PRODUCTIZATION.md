@@ -4,6 +4,14 @@ Last updated: 2026-08-31
 
 ## Current v0.13 engineering status
 
+PR #41 merged as `79d3afd` after all 14 final-head jobs passed on PostgreSQL 18.6: **591 Python tests, two skips, 90.06% coverage, 112 PostgreSQL cases and 56 SDK tests**, plus four real-process 180-second load/recovery profiles. Final-head metrics, artifact hashes and the rebuilt runtime-only installed-wheel journey are recorded on [PR #41](https://github.com/Deathcharge/samsarix-chat-engine/pull/41#issuecomment-5482649644). Post-merge run `33424832229` is a separate acceptance record; it is not inferred green from the PR.
+
+Follow-up installation review found a regression in the newly added test module: importing its PostgreSQL harness unconditionally broke collection when only the `test` extra was installed. A clean runtime/test-only environment at `79d3afd` reproduced `ModuleNotFoundError: psycopg` before any cases ran. The module now uses the same explicit optional-driver skip as existing PostgreSQL tests; all 64 harness cases still execute when the driver is present. A new isolated SQLite-only CI job installs just `.[test]`, asserts the PostgreSQL driver is absent, checks dependencies and runs pytest. Local test-only verification passes **281 tests with 55 PostgreSQL/inapplicable skips**; the full-driver harness still passes all 64 cases. This fixes collection rather than requiring PostgreSQL for the supported SQLite product. No runtime, schema, dependency range, license or deployment change is involved.
+
+P1 priorities remain longer/larger **controlled-host** load/soak and latency diagnosis, kernel packet loss/database failover, PostgreSQL-native backup/PITR/restore/application rollback, and owner deployment acceptance. The final PR #41 steady run's POST p99 was 636.56 ms versus 13.15 ms in the earlier corrected run; no cause is established by different shared runners. Both measurements remain visible, and correctness acceptance is not a latency guarantee. P2 telemetry/cache remains demand-led; publication, live upgrades and legal decisions remain owner-controlled.
+
+### PR #41 evidence (historical)
+
 Revalidated baseline: clean `main...origin/main` at `a019399`, no open PRs, and all ten [post-merge checks](https://github.com/Deathcharge/samsarix-chat-engine/actions/runs/33419123216) passing: 527 Python tests, two skips, 90.09% coverage, 112 PostgreSQL cases and 56 SDK tests. The previous goal turn made verified progress through PRs #39/#40. The next P1 is measured load/recovery evidence: existing bounded process cases do not establish offered-rate behavior, client-state convergence under sustained traffic, resource growth or measured reconnect populations.
 
 A checkout-only [load/recovery harness](POSTGRES_LOAD.md) schedules bounded open-arrival create cycles against two real CLI processes, with signed multi-room subscribers, dependent edits/deletion, state/authorization checks and optional count/age/natural-gap fault injection while traffic continues. It counts missed arrivals rather than reducing offered load, separates HTTP/live/history measurements, records sampling scope and configuration, and refuses remote/non-scratch/shared database targets or overwriting reports. Four disposable CI profiles preserve JSON evidence even on failure; a manual longer-run workflow supports bounded soak probes. There are 64 passing local accounting/safety tests. No runtime, schema or dependency change was needed for this measurement increment.
@@ -16,9 +24,9 @@ The research rationale is explicit in the load guide: open arrivals avoid respon
 
 Initial local `python -m pytest -q -m "not postgres" --timeout=60 --tb=line --junitxml=dist/pr41-initial-local.xml` passes **469 tests, two inapplicable skips, 112 deselected**. Ruff lint/format (74 files), mypy (18 core source files) and the harness's help command pass. Two initial fake-clock test expectations exposed the need to model event-loop task scheduling before advancing simulated time; corrected clock fixtures and actual-start lateness accounting now pass. No live performance or production capacity claim is inferred from these unit/local results.
 
-### PR #40 evidence (historical)
-
 PR #41 final dependency review additionally updates all three PostgreSQL CI service declarations from 18.4 to 18.6, whose official release includes security fixes. This changes only disposable CI infrastructure, not runtime dependencies, schema or any deployed database. The load guide preserves versioned historical measurements and links the upstream operator migration notes. Fresh final-head acceptance on 18.6 is required before merge.
+
+### PR #40 evidence (historical)
 
 PR #39 merged as `8a03286` after all ten final-head checks passed: 526 Python tests, two skips, 90.08% coverage, 112 PostgreSQL cases and 56 SDK tests. Its fresh runtime-only wheel smoke and artifact hashes are recorded on the PR. However, [post-merge run 33416686370](https://github.com/Deathcharge/samsarix-chat-engine/actions/runs/33416686370) passed nine jobs and failed Linux Python 3.14 in the pre-existing blocked-DNS deadline test. The new process-recovery cases passed. This failed run is not accepted as green or hidden behind an unexplained retry.
 
