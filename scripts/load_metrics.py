@@ -85,8 +85,9 @@ async def arrivals(
     profile: Profile,
     operation: Callable[[int, float], Awaitable[None]],
     counters: Counter[str],
-    start_delay_ms: list[float],
+    record_start_delay: Callable[[float], None],
     *,
+    record_drop: Callable[[int, str, float], None] | None = None,
     clock: Callable[[], float] | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
@@ -105,8 +106,10 @@ async def arrivals(
         if delay >= 1 / profile.rate:
             counters["started"] -= 1
             counters["dropped_schedule"] += 1
+            if record_drop is not None:
+                record_drop(index, "schedule", delay * 1000)
             return
-        start_delay_ms.append(delay * 1000)
+        record_start_delay(delay * 1000)
         try:
             await operation(index, deadline)
         except Exception as exc:
@@ -122,8 +125,12 @@ async def arrivals(
             pending.difference_update(tuple(task for task in pending if task.done()))
             if clock() - deadline >= 1 / profile.rate:
                 counters["dropped_schedule"] += 1
+                if record_drop is not None:
+                    record_drop(index, "schedule", (clock() - deadline) * 1000)
             elif len(pending) >= profile.concurrency:
                 counters["dropped_concurrency"] += 1
+                if record_drop is not None:
+                    record_drop(index, "concurrency", (clock() - deadline) * 1000)
             else:
                 counters["started"] += 1
                 task = asyncio.create_task(invoke(index, deadline))
