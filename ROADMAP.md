@@ -103,15 +103,19 @@ This makes the supported topology repeatable without implying that a container m
 - [x] make current-schema startup inspection-only, retain serialized transactional upgrades, enforce exact readiness compatibility and close cancelled startup pools; live lock/rollback/replica tests gate acceptance;
 - [x] implement configurable pre-batch count/age lag fencing, retry-safe generation/cursor recovery, and controlled signed-member two-application history/fan-out acceptance;
 - [x] bound SDK connection attempts, wait for initial history/activation before publishing, retain retry budgets across flapping connections, and verify native-WebSocket reconnect/history/resumed delivery;
+- [x] prove contending real-process idempotent creates, ordered edits/deletes, author enforcement and recovered history, plus shared socket/room caps and HTTP/search/WebSocket/typing budgets;
+- [ ] prove a killed webhook worker's live claim is recovered by a separate surviving process;
 - [ ] prove measured live-lag and combined lifecycle/outage/reconnect-storm behavior before stronger reconnect-delivery claims;
-- [ ] prove kernel-level packet blackholes, database failover, and notification-listener interruption against real network processes;
+- [ ] prove kernel-level packet blackholes and database failover against real network processes;
 - [ ] run sustained load/soak and reconnect-storm tests and publish measured limits;
 - [ ] verify deployment manifests assign a unique stable instance ID to every replica and reject duplicate live ownership;
-- [ ] validate live-lag and `NOTIFY` interruption behavior under measured traffic;
+- [ ] validate separate-process live-lag and retained-gap recovery under measured traffic;
 - [ ] exercise and publish PostgreSQL-native backup, point-in-time recovery, restore, and application rollback evidence;
 - [ ] add OpenTelemetry hooks only when an operator needs them, with telemetry disabled by default.
 
 No horizontal-scale claim is acceptable before those tests pass. Redis Pub/Sub is at-most-once and does not solve shared storage, migration/restore coordination, webhook leadership, or distributed quotas. A broker and shared authoritative database must solve a demonstrated topology together rather than decorate the architecture.
+
+The relay currently polls; transactional `NOTIFY` emission is not consumed by a listener. Notification-assisted latency is an optional optimization, not a release prerequisite. If introduced, it must pass listener-loss/reconnect tests without weakening the polling correctness path.
 
 ## Deliberate non-goals
 
