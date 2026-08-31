@@ -87,7 +87,7 @@ v0.13 cannot claim multi-instance support until CI proves:
 - migration concurrency is serialized and newer schemas fail closed;
 - crashed connection leases expire and presence converges (a killed real Uvicorn process now emits the expected lease-derived leave/count on its surviving peer, then restarts under the same stable ID after expiry);
 - an event-log gap fences the lagging instance and clients recover through history (the storage/relay contract is implemented; the real-client recovery gate remains);
-- sustained load and forced database/network interruptions have measured, published outcomes (CI now proves one replica's TCP reset/refusal, healthy-peer progress, explicit reconnect/history recovery, and resumed fan-out without application restart; blackholed connections, database failover, and sustained load remain);
+- sustained load and forced database/network interruptions have measured, published outcomes (CI now proves one replica's TCP reset/refusal and silent bidirectional traffic stall over open TCP connections, healthy-peer progress, explicit reconnect/history recovery, and resumed fan-out without application restart; kernel-level packet blackholes, database failover, and sustained load remain);
 - SQLite single-instance behavior, package installation, Windows support, and rollback documentation remain green.
 
 ## Primary references

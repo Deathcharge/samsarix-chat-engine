@@ -62,6 +62,7 @@ All replicas must run the exact same Samsarix version and use identical authenti
 | `SAMSARIX_CHAT_POSTGRES_MIN_POOL_SIZE` | `1` | Per-process idle pool floor, 0–100 |
 | `SAMSARIX_CHAT_POSTGRES_MAX_POOL_SIZE` | `10` | Per-process pool ceiling, 1–100 |
 | `SAMSARIX_CHAT_POSTGRES_POOL_TIMEOUT` | `10` | Pool acquisition/startup timeout seconds, 0.1–60 |
+| `SAMSARIX_CHAT_POSTGRES_OPERATION_TIMEOUT` | `10` | Checked-out operation deadline seconds, 0.1–300; also sets per-session statement and idle-in-transaction limits |
 | `SAMSARIX_CHAT_POSTGRES_LEASE_SECONDS` | `30` | Process and socket lease, 3–300 seconds |
 | `SAMSARIX_CHAT_POSTGRES_RELAY_POLL` | `0.25` | Durable-log poll interval, 0.01–5 seconds |
 | `SAMSARIX_CHAT_POSTGRES_MAINTENANCE_INTERVAL` | `1` | Bounded cleanup cadence, 0.1–60 seconds |
@@ -77,7 +78,19 @@ On a detected database connection failure, the relay fences its existing local s
 
 `tests/test_postgres_processes.py::test_database_network_cut_fences_clients_and_recovers_without_process_restart` cuts one replica's real database TCP connections using a test-only loopback proxy and refuses replacement connections. A second Uvicorn process connects directly to the dedicated `samsarix_test` database. The test checks that the healthy peer keeps publishing, rejected writes do not appear in recovered history, readiness returns after reconnection, and fresh sockets again receive cross-replica messages. It does not stop PostgreSQL or modify its networking configuration.
 
-The test uses a three-second lease and a one-second pool timeout only for the interrupted replica to keep CI bounded. Other test replicas retain the default ten-second pool timeout. Child diagnostics are drained continuously into a bounded in-memory tail. This is a connection-reset/refusal test, **not** evidence for silently blackholed TCP, a database failover, notification-listener recovery, or production latency. Pool acquisition timeout does not bound an already-running SQL operation; those failure modes and measured timing at production settings remain release gates.
+The test now runs both connection reset/refusal and silent bidirectional traffic-stall cases. In the stall case, the loopback proxy keeps TCP connections open but withholds application traffic in both directions, including replacement connection handshakes. Existing sockets close with `1012`, readiness fails, the healthy peer continues publishing, and restoring forwarding allows fresh connections and history recovery. This models stalled database traffic, not kernel-level packet loss or a PostgreSQL failover.
+
+The test uses a three-second lease, one-second pool timeout, and two-second operation deadline for the interrupted replica. Other replicas retain the default ten-second pool and operation limits. Child diagnostics are drained continuously into a bounded in-memory tail. These are accelerated CI settings, **not** a production latency guarantee.
+
+## Operation deadlines and ambiguous outcomes
+
+Pool acquisition and checked-out operation time are separate limits. After checkout, the operation timer covers transaction setup, queries, and commit/rollback, including schema initialization. On expiry, the client closes the PostgreSQL session before interrupting its waiter, avoiding cancellation cleanup that would itself wait on the stalled transport. The unusable connection is discarded by the pool. The libpq connection timeout is at least two seconds (its minimum) and otherwise the pool timeout rounded up to whole seconds, preventing replacement connection handshakes from waiting indefinitely.
+
+Every connection also receives per-session `statement_timeout` and `idle_in_transaction_session_timeout` values equal to the operation limit in milliseconds. Existing unrelated connection options are preserved. These server-side limits bound individual statements and idle open transactions when a client cannot communicate cancellation; they do not make network transport reliable or replace a PostgreSQL failover strategy. Administrators should size the limit for their workload, including startup migrations and large exports. A request or shutdown may perform several sequential database operations; the setting is not a total HTTP-request or application-shutdown deadline.
+
+A timed-out write has an **unknown outcome** if PostgreSQL committed before its reply was lost. A `503 storage_unavailable` response does not prove rollback. Reconcile authoritative state and reuse the same `Idempotency-Key` or `client_message_id` when retrying message creation; do not blindly replay other mutations. Clients reconnect with backoff and reload history after socket loss. The process fault test withholds traffic before its rejected write starts and proves absence only for that controlled case.
+
+The design follows Psycopg's [pool timeout contract](https://www.psycopg.org/psycopg3/docs/api/pool.html) and [async cancellation caveats](https://www.psycopg.org/psycopg3/docs/advanced/async.html#interrupting-async-operations), plus PostgreSQL's [statement and idle-transaction timeout guidance](https://www.postgresql.org/docs/current/runtime-config-client.html). Python 3.11+ can preserve an overlapping caller cancellation separately from the deadline; Python 3.10 lacks that cancellation-count API, so the overlapping-cancellation discrimination test is explicitly skipped there.
 
 ## Migration, backup, and rollback
 
@@ -87,7 +100,7 @@ Rolling back to a binary that supports an older schema requires restoring its ma
 
 ## Known preview boundaries
 
-- Two-process normal delivery, kill/lease-expiry/restart, and database TCP reset/refusal with explicit reconnect/history recovery run in CI. Silently blackholed TCP, database failover, notification-listener interruption, reconnect storms, and sustained load/soak evidence remain pending.
+- Two-process normal delivery, kill/lease-expiry/restart, database TCP reset/refusal, and silent bidirectional database-traffic stalls with explicit reconnect/history recovery run in CI. Kernel-level packet blackholes, database failover, notification-listener interruption, reconnect storms, and sustained load/soak evidence remain pending.
 - A live but extremely slow replica can currently hold the event-retention floor; the configurable live-lag fence is not implemented yet.
 - Polling, rather than `LISTEN`/`NOTIFY`, currently determines normal fan-out latency.
 - The bundled Compose profile is still the supported SQLite single-replica example and does not provision PostgreSQL.
