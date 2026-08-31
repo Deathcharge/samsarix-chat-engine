@@ -358,7 +358,10 @@ def test_report_rejects_missing_convergence_or_no_work(monkeypatch: pytest.Monke
     assert not world.report()["accepted"]
 
 
-def test_drop_evidence_is_profile_bounded_and_contains_no_absolute_deadline() -> None:
+def test_drop_evidence_is_profile_bounded_and_contains_no_absolute_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("scripts.load_postgres.os.sched_getaffinity", lambda _pid: {0}, raising=False)
     world = World(Profile(duration=1, rate=1))
     world.record_drop(0, "schedule", 51.25)
     report = world.report()
