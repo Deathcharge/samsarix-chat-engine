@@ -64,6 +64,29 @@ def test_invalid_budget_rejected(timeout: float) -> None:
         AttemptBudget(timeout)
 
 
+async def test_fast_worker_completion_before_caller_wait_is_not_a_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport: BoundedTransport[int] = BoundedTransport()
+    finished = threading.Event()
+    original_finish = AttemptBudget.finish
+    original_put = transport._queue.put_nowait
+
+    def finish(budget: AttemptBudget) -> None:
+        original_finish(budget)
+        finished.set()
+
+    def put(work: Any) -> None:
+        original_put(work)
+        if work is not None:
+            assert finished.wait(2), "worker did not finish before the caller started waiting"
+
+    monkeypatch.setattr(AttemptBudget, "finish", finish)
+    monkeypatch.setattr(transport._queue, "put_nowait", put)
+    try:
+        assert await transport.run(lambda budget: 204, timeout=5) == 204
+    finally:
+        transport.close()
+
+
 @pytest.mark.parametrize("expired", [False, True])
 def test_cancel_closes_owned_and_late_bound_sockets(expired: bool) -> None:
     budget = AttemptBudget(1)
