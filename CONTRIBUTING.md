@@ -21,6 +21,7 @@ python -m pip install -e ".[dev]"
 python -m ruff check .
 python -m ruff format --check .
 python -m mypy samsarix_chat_engine
+python scripts/verify_kubernetes_preview.py
 python -m pip_audit
 python -m pytest --cov=samsarix_chat_engine --cov-report=term-missing
 python -m build
@@ -29,7 +30,7 @@ python -m twine check dist/*
 
 Add tests that exercise production code. Do not use mocks as a substitute for the primary SQLite, HTTP, or WebSocket behavior. Update `docs/API_REFERENCE.md` for protocol changes and `docs/PRODUCTIZATION.md` when a P0/P1 decision or release gate changes.
 
-Changes to `Dockerfile`, `compose.yaml`, secret-file configuration, or container documentation must also pass the Linux `container-image` CI job. It builds with a fresh base, verifies non-root/read-only execution, exercises authenticated persistence across restart, and removes its test volume.
+Changes to `Dockerfile`, `compose.yaml`, Kubernetes manifests, secret-file configuration, or deployment documentation must also pass the Linux `container-image` CI job. It builds with a fresh base, verifies both optional database/authentication drivers, checks non-root/read-only execution, exercises authenticated SQLite persistence across restart, and removes its test volume. The Kubernetes preview additionally requires the structural verifier and live PostgreSQL process tests.
 
 ## Pull requests
 

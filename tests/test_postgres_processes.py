@@ -254,6 +254,54 @@ async def test_two_uvicorn_processes_reap_crashed_leases_and_restart(
 
 
 @pytest.mark.asyncio
+async def test_duplicate_live_instance_id_fails_startup_without_disrupting_owner(
+    clean_postgres_database: str,
+) -> None:
+    """A manifest identity collision must fail closed and permit a later clean replacement."""
+
+    first_port = _unused_port()
+    duplicate_port = _unused_port()
+    first_url = f"http://127.0.0.1:{first_port}"
+    processes: list[LoggedServer] = []
+    first = _start_server(clean_postgres_database, "stable-replica-0", first_port)
+    processes.append(first)
+    headers = {"X-API-Key": _OPERATOR_KEY}
+
+    try:
+        async with httpx.AsyncClient(headers=headers, timeout=3, trust_env=False) as client:
+            await _wait_ready(client, first_url, first)
+            duplicate = _start_server(clean_postgres_database, "stable-replica-0", duplicate_port)
+            processes.append(duplicate)
+            await asyncio.wait_for(asyncio.to_thread(duplicate.wait), timeout=15)
+            duplicate.reader.join(timeout=2)
+
+            output = _process_output(duplicate)
+            assert duplicate.returncode not in {None, 0}
+            assert "instance ID is already active" in output
+            assert _OPERATOR_KEY not in output
+            password = urlsplit(clean_postgres_database).password
+            assert password is None or password not in output
+
+            assert (await client.get(f"{first_url}/readyz")).status_code == 200
+            created = await client.post(
+                f"{first_url}/v1/rooms",
+                json={"id": "identity-room", "name": "Stable identity"},
+            )
+            assert created.status_code == 201
+
+            await asyncio.to_thread(_stop_server, first)
+            replacement = _start_server(clean_postgres_database, "stable-replica-0", first_port)
+            processes.append(replacement)
+            await _wait_ready(client, first_url, replacement)
+            recovered = await client.get(f"{first_url}/v1/rooms/identity-room")
+            assert recovered.status_code == 200
+            assert recovered.json()["name"] == "Stable identity"
+    finally:
+        for process in reversed(processes):
+            _stop_server(process)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("fault", ["reset", "stall"])
 async def test_database_network_cut_fences_clients_and_recovers_without_process_restart(
     clean_postgres_database: str,

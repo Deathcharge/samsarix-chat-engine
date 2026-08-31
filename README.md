@@ -75,7 +75,7 @@ python examples/02_websocket_chat.py
 
 See [Getting started](docs/GETTING_STARTED.md) for authentication and browser examples, [Conversation controls](docs/CONVERSATION_CONTROLS.md) for moderation workflows, and [Data lifecycle operations](docs/OPERATIONS.md) for export, deletion, retention, backup, and restore.
 
-The development branch also contains a guarded, unreleased PostgreSQL multi-instance mode. It is fully wired through the application, and CI rehearses both a native logical dump into a fresh database and physical base-backup/WAL recovery to a named point with application-level verification. Provider failover, external old-primary fencing/cutover, controlled-host capacity, and owner deployment acceptance remain open gates. See [PostgreSQL multi-instance preview](docs/POSTGRES_PREVIEW.md) and [PostgreSQL recovery contract](docs/POSTGRES_BACKUP.md); SQLite remains the default and the supported v0.12 deployment.
+The development branch also contains a guarded, unreleased PostgreSQL multi-instance mode. It is fully wired through the application, and CI rehearses both a native logical dump into a fresh database and physical base-backup/WAL recovery to a named point with application-level verification. A structurally verified [Kubernetes evaluation manifest](deploy/kubernetes/README.md) derives stable replica IDs from StatefulSet Pod names, while a real-process test proves a duplicate live identity fails closed. Provider failover, external old-primary fencing/cutover, controlled-host capacity, and owner deployment acceptance remain open gates. See [PostgreSQL multi-instance preview](docs/POSTGRES_PREVIEW.md) and [PostgreSQL recovery contract](docs/POSTGRES_BACKUP.md); SQLite remains the default and the supported v0.12 deployment.
 
 PostgreSQL same-version startup inspects schema metadata without replaying DDL against live replicas. Actual schema upgrades still require drained/stopped old replicas and a PostgreSQL-native backup/rollback plan; mixed-version rolling upgrades are not supported.
 
@@ -176,7 +176,7 @@ All settings are optional for loopback development. Copy [.env.example](.env.exa
 | `SAMSARIX_CHAT_MAX_WEBHOOK_DELIVERIES` | `100000` | Bounded pending/completed outbox rows |
 | `SAMSARIX_CHAT_WEBHOOK_ALLOW_PRIVATE_TARGETS` | `false` | Explicitly allow trusted private-network destinations |
 
-The CLI refuses `--host 0.0.0.0` or another non-loopback bind unless an API key or token verifier is configured. `--allow-insecure-public` is an explicit development escape hatch, not a production recommendation. Install `.[asymmetric-auth]` when using a JWKS outside the container image; the image includes that extra.
+The CLI refuses `--host 0.0.0.0` or another non-loopback bind unless an API key or token verifier is configured. `--allow-insecure-public` is an explicit development escape hatch, not a production recommendation. Install `.[asymmetric-auth]` when using a JWKS outside the container image or `.[postgres]` for the PostgreSQL preview; the image includes both extras.
 
 ## Embed it
 
@@ -243,7 +243,7 @@ CI runs the tests on CPython 3.10–3.14 on Linux and CPython 3.12 on Windows, v
 
 ## Limitations and project status
 
-This is a coherent single-instance MVP, not a hosted chat platform. The container and Compose profile support exactly one SQLite process and replica. The guarded [PostgreSQL preview](docs/POSTGRES_PREVIEW.md) now wires the accepted [multi-instance architecture](docs/MULTI_INSTANCE_ARCHITECTURE.md) through real application instances, but remains explicitly unreleased until its remaining process-failure and measured-load gates pass. Attachments with explicit storage policy follow. Those are intentionally not presented as current supported capabilities.
+This is a coherent single-instance MVP, not a hosted chat platform. The Compose profile supports exactly one SQLite process and replica. The container also includes the guarded PostgreSQL extra so the checked [Kubernetes evaluation manifest](deploy/kubernetes/README.md) can run reviewed development images. The [PostgreSQL preview](docs/POSTGRES_PREVIEW.md) wires the accepted [multi-instance architecture](docs/MULTI_INSTANCE_ARCHITECTURE.md) through real application instances, but remains explicitly unreleased until its remaining process-failure, failover, and deployment-acceptance gates pass. Attachments with explicit storage policy follow. Those are intentionally not presented as current supported capabilities.
 
 ## License
 
