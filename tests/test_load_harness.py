@@ -8,6 +8,7 @@ import asyncio
 import json
 from collections import Counter
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -50,6 +51,7 @@ from scripts.load_postgres import (  # noqa: E402
         {"message_bytes": 4097},
         {"duration": 1800, "rate": 20},
         {"scenario": "count", "duration": 179},
+        {"scenario": "reconnect-storm", "duration": 179},
         {"duration": 180, "rate": 100, "message_bytes": 4096},
     ],
 )
@@ -271,9 +273,14 @@ def test_fault_scope_does_not_excuse_unrelated_healthy_stream_loss() -> None:
     assert not Member(world, 1, "load-0", "reader-b").uninterrupted()
     assert Member(world, 1, "load-1", "reader-c").uninterrupted()
 
+    storm = World(Profile(scenario="reconnect-storm"))
+    assert not Member(storm, 0, "load-1", "reader-d").uninterrupted()
+    assert not Member(storm, 1, "load-1", "reader-e").uninterrupted()
+
 
 def test_count_fault_limit_admits_its_population_before_injected_lag() -> None:
     assert World(Profile(scenario="count")).effective["POSTGRES_RELAY_MAX_PENDING_EVENTS"] == "100"
+    assert World(Profile(scenario="reconnect-storm")).effective["POSTGRES_RELAY_MAX_PENDING_EVENTS"] == "100"
     large = World(Profile(scenario="count", clients_per_room=32))
     assert large.effective["POSTGRES_RELAY_MAX_PENDING_EVENTS"] == "256"
 
@@ -356,6 +363,37 @@ def test_report_rejects_missing_convergence_or_no_work(monkeypatch: pytest.Monke
     world.counts["converged_clients"] = 32
     world.failures["incorrect_message_content"] = 1
     assert not world.report()["accepted"]
+
+
+def test_reconnect_storm_report_requires_every_client_to_recover(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("scripts.load_postgres.os.sched_getaffinity", lambda _pid: {0, 1}, raising=False)
+    world = World(Profile(scenario="reconnect-storm"))
+    world.counts.update(offered=3600, http_POST_accepted=3500, converged_clients=32, reconnected_clients=31)
+    assert not world.report()["accepted"]
+    world.counts.update(
+        reconnect_storm_clients=32,
+        archive_closed_clients=16,
+        archive_reconnect_refusals=16,
+        stale_fenced_clients=16,
+    )
+    world.counts["reconnected_clients"] = 32
+    assert not world.report()["accepted"]
+    world.fault["reconnect_storm"] = {"clients": 32}
+    assert world.report()["accepted"]
+
+
+def test_ci_runs_reconnect_storm_with_digest_pinned_postgres() -> None:
+    root = Path(__file__).resolve().parents[1]
+    ci = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    load = (root / ".github" / "workflows" / "postgres-load.yml").read_text(encoding="utf-8")
+    digest = "postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af"
+    assert "scenario: [steady, count, age, retained-gap, reconnect-storm]" in ci
+    assert "options: [steady, count, age, retained-gap, reconnect-storm]" in load
+    assert ci.count(digest) == 2
+    assert digest in load
+    assert "image: postgres:18.6-bookworm\n" not in "\n".join(
+        path.read_text(encoding="utf-8") for path in (root / ".github" / "workflows").glob("*.yml")
+    )
 
 
 def test_drop_evidence_is_profile_bounded_and_contains_no_absolute_deadline(

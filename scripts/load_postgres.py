@@ -114,7 +114,9 @@ class World:
             "POSTGRES_LEASE_SECONDS": "3" if p.scenario == "retained-gap" else "120",
             "POSTGRES_RELAY_POLL": "0.05",
             "POSTGRES_MAINTENANCE_INTERVAL": "0.1",
-            "POSTGRES_RELAY_MAX_PENDING_EVENTS": str(count_fault_limit) if p.scenario == "count" else "10000",
+            "POSTGRES_RELAY_MAX_PENDING_EVENTS": (
+                str(count_fault_limit) if p.scenario in {"count", "reconnect-storm"} else "10000"
+            ),
             "POSTGRES_RELAY_MAX_EVENT_AGE": "3" if p.scenario == "age" else "3600",
             "POSTGRES_MAX_REALTIME_EVENTS": "100" if p.scenario == "retained-gap" else "100000",
             "MAX_CONNECTIONS": str(p.rooms * p.clients_per_room),
@@ -184,7 +186,9 @@ class World:
         started = time.monotonic()
         self.sent[index, version] = started
         phase = self.phase
-        allowed_control_rejection = self.control_active and room == "load-0"
+        allowed_control_rejection = self.control_active and (
+            room == "load-0" or self.profile.scenario == "reconnect-storm"
+        )
         self.counts[f"http_{method}_attempts"] += 1
         try:
             response = await http.request(
@@ -274,8 +278,9 @@ class World:
         if p.scenario == "steady":
             return
         await asyncio.sleep(p.duration / 4)
+        reconnect_storm = p.scenario == "reconnect-storm"
         for member in self.members:
-            member.allow_reconnect = member.replica == 0 or member.room == "load-0"
+            member.allow_reconnect = reconnect_storm or member.replica == 0 or member.room == "load-0"
         self.control_active = True
         async with _paused(self.processes[0], observer):
             self.change_phase("paused")
@@ -284,15 +289,36 @@ class World:
             for member in self.members:
                 if member.replica == 0:
                     member.expect_fence = True
-            for update in ({"frozen": True}, {"frozen": False}, {"archived": True}, {"archived": False}):
+            control_rooms = [room_for(index, p.rooms) for index in range(p.rooms)] if reconnect_storm else ["load-0"]
+            updates = ({"frozen": True}, {"frozen": False}, {"archived": True})
+            for update in updates:
+                for room in control_rooms:
+                    response = await http.patch(
+                        f"http://127.0.0.1:{self.ports[1]}/v1/rooms/{room}",
+                        headers={"X-API-Key": _OPERATOR_KEY},
+                        json=update,
+                    )
+                    require(response.status_code == 200, "lifecycle_control_failed")
+                    self.counts["lifecycle_controls_accepted"] += 1
+                await asyncio.sleep(1)
+            if reconnect_storm:
+                archive_deadline = time.monotonic() + 15
+                while not all(
+                    member.frames["closed_4409"] >= 1 and member.frames["archive_reconnect_refusals"] >= 1
+                    for member in self.members
+                    if member.replica == 1
+                ):
+                    require(time.monotonic() < archive_deadline, "archive_reconnect_storm_timeout")
+                    await asyncio.sleep(0.05)
+            for room in control_rooms:
                 response = await http.patch(
-                    f"http://127.0.0.1:{self.ports[1]}/v1/rooms/load-0",
+                    f"http://127.0.0.1:{self.ports[1]}/v1/rooms/{room}",
                     headers={"X-API-Key": _OPERATOR_KEY},
-                    json=update,
+                    json={"archived": False},
                 )
                 require(response.status_code == 200, "lifecycle_control_failed")
                 self.counts["lifecycle_controls_accepted"] += 1
-                await asyncio.sleep(1)
+            await asyncio.sleep(1)
             deadline = time.monotonic() + 75
             while True:
                 current = await _snapshot(observer, _NAMES[0])
@@ -306,7 +332,7 @@ class World:
                     require(current.live, "live_lag_lease_expired")
                     reached = (
                         current.backlog > int(self.effective["POSTGRES_RELAY_MAX_PENDING_EVENTS"])
-                        if p.scenario == "count"
+                        if p.scenario in {"count", "reconnect-storm"}
                         else current.age > 3
                     )
                 if reached:
@@ -330,6 +356,33 @@ class World:
             require(time.monotonic() < deadline, "reconnect_convergence_timeout")
             await asyncio.sleep(0.05)
         self.fault["resumption_to_reconnected_s"] = time.monotonic() - resumed_at
+        if reconnect_storm:
+            affected = len(self.members)
+            archived_half = sum(member.replica == 1 for member in self.members)
+            reconnected = sum(member.connections >= 2 for member in self.members)
+            archive_closes = sum(member.frames["closed_4409"] >= 1 for member in self.members if member.replica == 1)
+            archive_refusals = sum(
+                member.frames["archive_reconnect_refusals"] >= 1 for member in self.members if member.replica == 1
+            )
+            stale_fences = sum(member.fences == 1 for member in self.members if member.replica == 0)
+            self.counts.update(
+                reconnect_storm_clients=affected,
+                reconnected_clients=reconnected,
+                archive_closed_clients=archive_closes,
+                archive_reconnect_refusals=archive_refusals,
+                stale_fenced_clients=stale_fences,
+            )
+            require(reconnected == affected, "reconnect_storm_client_missing")
+            require(archive_closes == archived_half, "archive_close_missing")
+            require(archive_refusals == archived_half, "archive_reconnect_refusal_missing")
+            require(stale_fences == affected - archived_half, "stale_fence_missing")
+            self.fault["reconnect_storm"] = {
+                "clients": affected,
+                "reconnected": reconnected,
+                "archive_closed": archive_closes,
+                "archive_reconnect_refused": archive_refusals,
+                "stale_fenced": stale_fences,
+            }
         self.control_active = False
         for member in self.members:
             member.allow_reconnect = False
@@ -387,6 +440,16 @@ class World:
         except (OSError, subprocess.SubprocessError):
             revision = None
         drops = self.counts["dropped_schedule"] + self.counts["dropped_concurrency"]
+        storm_clients = self.profile.rooms * self.profile.clients_per_room
+        storm_half = storm_clients // 2
+        storm_accepted = self.profile.scenario != "reconnect-storm" or (
+            self.counts["reconnect_storm_clients"] == storm_clients
+            and self.counts["reconnected_clients"] == storm_clients
+            and self.counts["archive_closed_clients"] == storm_half
+            and self.counts["archive_reconnect_refusals"] == storm_half
+            and self.counts["stale_fenced_clients"] == storm_half
+            and "reconnect_storm" in self.fault
+        )
         accepted = (
             not self.failures
             and drops == 0
@@ -395,6 +458,7 @@ class World:
             and self.counts["converged_clients"] == self.profile.rooms * self.profile.clients_per_room
             and self.counts["offered"] == self.profile.duration * self.profile.rate
             and self.counts["http_POST_accepted"] > 0
+            and storm_accepted
             and (
                 self.profile.scenario != "steady"
                 or all(
@@ -486,7 +550,9 @@ class Member:
         return {key for key in self.world.acknowledged if room_for(key[0], self.world.profile.rooms) == self.room}
 
     def uninterrupted(self) -> bool:
-        return self.world.profile.scenario == "steady" or (self.replica == 1 and self.room != "load-0")
+        return self.world.profile.scenario == "steady" or (
+            self.world.profile.scenario != "reconnect-storm" and self.replica == 1 and self.room != "load-0"
+        )
 
     def complete_stream(self) -> bool:
         return self.expected_live().issubset(self.observed) and all(count == 1 for count in self.observed.values())
@@ -550,6 +616,8 @@ class Member:
                 ) as socket:
                     ready = json.loads(await asyncio.wait_for(socket.recv(), 10))
                     if ready["type"] == "error" and self.allow_reconnect:
+                        if ready.get("code") == "room_archived":
+                            self.frames["archive_reconnect_refusals"] += 1
                         await asyncio.wait_for(socket.wait_closed(), 5)
                         self.frames["rejected_reconnects"] += 1
                     else:
@@ -730,7 +798,9 @@ async def run(profile: Profile, conninfo: str) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scenario", default="steady", choices=["steady", "count", "age", "retained-gap"])
+    parser.add_argument(
+        "--scenario", default="steady", choices=["steady", "count", "age", "retained-gap", "reconnect-storm"]
+    )
     parser.add_argument("--duration", type=int, default=180)
     parser.add_argument("--rate", type=int, default=20, help="scheduled create cycles per second, not HTTP requests")
     parser.add_argument("--rooms", type=int, default=4)

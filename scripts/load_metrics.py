@@ -24,7 +24,7 @@ class Profile:
     message_bytes: int = 128
 
     def __post_init__(self) -> None:
-        if self.scenario not in {"steady", "count", "age", "retained-gap"}:
+        if self.scenario not in {"steady", "count", "age", "retained-gap", "reconnect-storm"}:
             raise ValueError("unknown scenario")
         for name, lower, upper in (
             ("duration", 1, 1800),
