@@ -92,3 +92,19 @@ These are the first corrected workload results, not the final reviewed-head or p
 Final dependency review found the [PostgreSQL 18.6 security/bug-fix release](https://www.postgresql.org/docs/release/18.6/) and verified `18.6-bookworm` in the [official Docker image manifest](https://github.com/docker-library/official-images/blob/master/library/postgres). Both existing PostgreSQL CI services and the load service now use that patch. The 18.4 measurements above remain historical; final-head and post-merge runs must verify 18.6 separately. No live database is upgraded by this repository change. Deployment owners must review the release's configuration/data-cleanup notes and back up their own database before their upgrade; the disposable CI tests do not establish production migration safety.
 
 Measured host-specific profiles will not by themselves close kernel packet-loss, database failover, production-sized datasets, long-duration resource-growth, backup/PITR/restore/rollback or deployment-identity gates. The framework-neutral SDK has its own recovery tests; this Python workload is not a substitute for a browser/client-device matrix. Multi-instance production support remains gated by the full [architecture acceptance list](MULTI_INSTANCE_ARCHITECTURE.md).
+
+### Larger-population and longer-duration probes — 2026-08-31
+
+Three deliberately strict probes remain failed evidence rather than being retried with weaker acceptance:
+
+| Run/profile | Completed behavior | Strict failure |
+| --- | --- | --- |
+| `33426800102`, steady, 900 s, 32 clients | 17999 creates, 3600 edits, 1800 deletes persisted; 32 clients converge and drain | 1/18000 schedule slot late |
+| `33427933497`, count fault, 180 s, 128 clients | count barrier 259/256; 80 affected clients reconnect in 1.771 s; 128 converge and drain | 2/3600 schedule slots late around recovery |
+| `33428703695`, count fault, 180 s, 64 clients | count barrier 132/128; 40 affected clients reconnect in 0.950 s; 64 converge and drain | 1/3600 slot dropped at concurrency 32 |
+
+The first attempts at 128 clients (`33426806353` and `33427630829`) failed during setup because the injected 100-event count-fault limit was below the profile's presence burst. Static warning evidence proved count fencing on the repeat. The threshold now scales with the test population only; runtime defaults are unchanged. The corrected 128-client run then exercised the intended fault and exposed the distinct schedule boundary above.
+
+The 64-client drop is located exactly at synthetic cycle 1260, recovered-phase elapsed time 64.941 seconds. It coincides with host I/O PSI some-avg10 reaching as high as 39.71%, sampled WAL synchronization/write waits and lock waits, HTTP POST p99 1139.64 ms and live-delivery p99 1383.72/1496.68 ms. CPU PSI avg10 peaked at 1.18%; memory PSI was zero. PSI is host-wide and database waits are instantaneous, so this does **not** prove causation or ownership. It does explain why a shared-runner result cannot be translated into a deployment limit. Do not increase concurrency, weaken synchronous durability, or discard the dropped slot merely to turn this result green.
+
+The accepted 32-client profiles remain correctness/recovery evidence at their exact configuration. These failed larger/longer probes show that the current evidence does not establish a higher supported population or uninterrupted 20-cycle/s service over 15 minutes. Controlled-host repetitions with known storage, PostgreSQL resource accounting and production-sized history are the next measurement gate. Exact counters, memory/database growth and report hashes are retained in [the productization record](PRODUCTIZATION.md); JSON artifacts expire after 30 days.
