@@ -49,7 +49,7 @@ samsarix-chat serve --host 127.0.0.1 --port 8000
 
 Use a separate ID such as `chat-b` for a second replica. A concurrently active duplicate ID fails closed instead of sharing an event cursor. Run one Uvicorn worker per configured process; `--workers` would copy the same instance ID into multiple workers and is intentionally rejected by the database claim. A graceful shutdown releases the claim, while a crashed owner remains fenced until its lease expires.
 
-All replicas must run the exact same Samsarix version and use identical authentication, limits, webhook, retention, and timing settings. Put a health-aware load balancer in front of `/healthz` and `/readyz`; liveness does not depend on PostgreSQL, while readiness requires the schema, pool, relay, and maintenance loops.
+All replicas must run the exact same Samsarix version and use identical authentication, limits, webhook, retention, and timing settings. Use `/readyz` to decide whether a replica should receive traffic and `/healthz` for process liveness. Liveness does not depend on PostgreSQL. Readiness requires the schema, pool, running coordination loops, and a locally unexpired relay claim with no pending socket fence or recovery. A live task alone is not evidence that the relay can serve traffic. WebSocket lease admission applies the same relay-health guard.
 
 ## PostgreSQL settings
 
@@ -71,6 +71,14 @@ All replicas must run the exact same Samsarix version and use identical authenti
 
 `SAMSARIX_CHAT_DATABASE` and the CLI `--database` option cannot be combined with PostgreSQL mode. The SQLite `database backup` and `database restore` commands refuse PostgreSQL rather than pretending a copied local file protects a remote database.
 
+## Database connection interruption and recovery
+
+On a detected database connection failure, the relay fences its existing local sockets with close code `1012`. The process remains live, but readiness returns `503` while storage or the relay claim is unavailable. A failed explicit socket/instance release is logged by exception type only and left for lease expiry; shutdown still closes the pool. Once connectivity returns, the process reacquires its cursor and resumes polling without requiring an application restart. Clients must reconnect with backoff and reload authoritative history; they must not expect missed events to reappear on their closed socket.
+
+`tests/test_postgres_processes.py::test_database_network_cut_fences_clients_and_recovers_without_process_restart` cuts one replica's real database TCP connections using a test-only loopback proxy and refuses replacement connections. A second Uvicorn process connects directly to the dedicated `samsarix_test` database. The test checks that the healthy peer keeps publishing, rejected writes do not appear in recovered history, readiness returns after reconnection, and fresh sockets again receive cross-replica messages. It does not stop PostgreSQL or modify its networking configuration.
+
+The test uses a three-second lease and one-second pool timeout to keep CI bounded. It is a connection-reset/refusal test, **not** evidence for silently blackholed TCP, a database failover, notification-listener recovery, or production latency. Pool acquisition timeout does not bound an already-running SQL operation; those failure modes and measured timing at production settings remain release gates.
+
 ## Migration, backup, and rollback
 
 Startup takes a transaction-scoped advisory migration lock and advances the internal PostgreSQL schema to version 8. Newer unknown schemas fail closed. Before the first preview startup, take a provider-native physical/PITR backup or a tested logical backup that includes all `public.samsarix_*` tables and identity sequences.
@@ -79,7 +87,7 @@ Rolling back to a binary that supports an older schema requires restoring its ma
 
 ## Known preview boundaries
 
-- Two-process normal delivery and kill/lease-expiry/restart recovery run in CI; forced database/listener interruption, explicit reconnect recovery, reconnect storms, and sustained load/soak evidence remain pending.
+- Two-process normal delivery, kill/lease-expiry/restart, and database TCP reset/refusal with explicit reconnect/history recovery run in CI. Silently blackholed TCP, database failover, notification-listener interruption, reconnect storms, and sustained load/soak evidence remain pending.
 - A live but extremely slow replica can currently hold the event-retention floor; the configurable live-lag fence is not implemented yet.
 - Polling, rather than `LISTEN`/`NOTIFY`, currently determines normal fan-out latency.
 - The bundled Compose profile is still the supported SQLite single-replica example and does not provision PostgreSQL.

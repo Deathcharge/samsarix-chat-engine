@@ -20,22 +20,24 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 - Guarded PostgreSQL application configuration and lifecycle orchestration for shared HTTP storage, cross-instance WebSocket messages and room state, global socket capacity/rate controls/stats, leased connection renewal, sender-excluded presence/typing, bounded maintenance, and readiness.
 - A PostgreSQL preview deployment guide covering protected URL files, mandatory remote `verify-full` TLS, unique replica identities, pool/lease/retention bounds, migration, backup/rollback ownership, and remaining release gates.
 - A real-network acceptance test that launches two independent Uvicorn processes, verifies cross-process HTTP/WebSocket delivery, kills one replica, observes lease-derived presence/capacity convergence, restarts its stable identity after expiry, and reloads durable history.
+- A real two-process database connection-reset/refusal test with independent healthy-peer progress, unavailable-write rejection, explicit client reconnect/history recovery, and resumed fan-out without an application restart.
 
 ### Security and operations
 
 - Multi-process SQLite is explicitly rejected: WAL is same-host-only, single-writer, and current SQLite documentation identifies a concurrent WAL-reset corruption race affecting versions through 3.51.2.
 - Version 0.12 remains a one-process/one-replica release until the PostgreSQL acceptance gates pass; no horizontal-scale claim is introduced by this architecture increment.
-- PostgreSQL credentials remain internal to the optional foundation and are excluded from translated availability errors; the incomplete backend is not selectable through public configuration.
+- PostgreSQL credentials are excluded from translated availability errors; backend selection is explicit and remains a guarded preview.
 - Message deletion, room deletion, and automatic or explicit retention scrub message bodies from retained realtime event and terminal-webhook envelopes in the same transaction, and cancel unsent sensitive payloads.
 - PostgreSQL event and webhook envelopes remain bounded at 512 KiB so every valid 100,000-character message, including four-byte Unicode, fits without turning a valid domain write into a coordination failure.
 - PostgreSQL webhook claims can be acknowledged only by the live lease owner. Expired claims are safely redelivered with the same ID; receivers must still deduplicate because delivery is at least once.
 - A PostgreSQL relay that loses its database lease closes every local socket before renewing the same durable cursor. Unsupported internal event types are not forwarded onto the public WebSocket protocol.
 - Expired process IDs rotate their generation token on re-registration, preventing a restarted replica from reviving phantom occupancy while leaving stale socket rows available for bounded presence convergence. Archived, expired, and generation-mismatched reservations stop consuming capacity even before physical cleanup.
 - Distributed rate buckets persist only a scope-separated SHA-256 digest of the caller key. The digest reduces routine identity exposure but is not anonymization; database access and retention still require normal privacy controls.
-- Internal typing coordination events retain an opaque origin connection ID so future application wiring can exclude the sender. The public realtime relay does not forward these events until that exclusion contract is implemented; clients must continue treating advertised expiry as the stop-event backstop.
+- Internal typing coordination events retain an opaque origin connection ID for sender exclusion. The public relay strips that ID before forwarding; clients must continue treating advertised expiry as the stop-event backstop.
 - A restarted process rotates its database generation token after lease expiry. Connection, typing, count, renewal, and cleanup queries require the matching generation so stale sockets cannot regain capacity, activity, or presence merely because an operator reused a stable instance name.
 - Event pruning records the greatest intentionally removed sequence even when no event rows remain. A returning stale relay cannot mistake that empty window for a healthy cursor: it closes local sockets before skipping to current authoritative state, and its generation rotation makes old connection leases non-live.
 - PostgreSQL replica IDs are exclusive generation-owned claims: a duplicate active owner fails closed, graceful shutdown releases the exact generation, and a stale process cannot heartbeat, read, or acknowledge after a replacement takes ownership.
+- PostgreSQL readiness and socket admission require a locally unexpired relay claim without pending fencing/recovery, not merely a running task. Failed lease cleanup defers to expiry while still closing the pool and omits exception contents from logs.
 - The asymmetric-authentication, test, and development dependency ranges now require `cryptography>=50,<51`, excluding the `cryptography>=44.0.0,<50.0.0` range affected by `PYSEC-2026-3552`.
 
 ## 0.12.0 — 2026-08-02
