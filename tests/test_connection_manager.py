@@ -308,3 +308,59 @@ async def test_cancelled_closer_keeps_ownership_until_physical_close_finishes() 
         finish.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("winner", ["individual", "room", "member"])
+async def test_lifecycle_close_race_has_one_notification_and_one_physical_close(winner):
+    manager = ConnectionManager(max_connections=1, max_per_room=1, send_timeout=1)
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    class ClosingSocket(FakeWebSocket):
+        async def close(self, *, code: int, reason: str) -> None:
+            self.closed.append((code, reason))
+            started.set()
+            await finish.wait()
+
+    target = ClosingSocket()
+    websocket = as_websocket(target)
+    await manager.register(websocket, "room", "A", "subject")
+    event = {"type": "room.archived"}
+
+    async def close(kind):
+        if kind == "individual":
+            await manager.close(websocket, code=4409, reason="Room archived", event=event)
+        elif kind == "room":
+            await manager.close_room("room", event)
+        else:
+            await manager.close_member("room", "subject", event, code=4409, reason="Room archived")
+
+    first = asyncio.create_task(close(winner))
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        assert manager.active_connections == 0
+        for kind in ("individual", "room", "member"):
+            if kind != winner:
+                await asyncio.wait_for(close(kind), 1)
+        assert target.sent == [event]
+        assert target.closed == [(4409, "Room archived")]
+        finish.set()
+        await asyncio.wait_for(first, 1)
+    finally:
+        finish.set()
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_individual_event_close_attempts_transport_close_after_notification_failure():
+    manager = ConnectionManager(max_connections=1, max_per_room=1, send_timeout=0.1)
+    target = FakeWebSocket(fail_send=True)
+    websocket = as_websocket(target)
+    await manager.register(websocket, "room", "A")
+    assert await manager.close(websocket, code=4409, reason="Room archived", event={"type": "room.archived"}) == (
+        "room",
+        "A",
+    )
+    assert target.closed == [(4409, "Room archived")]

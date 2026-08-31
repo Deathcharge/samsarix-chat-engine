@@ -125,7 +125,9 @@ class ConnectionManager:
             return False
         return await self._send_with_lock(websocket, event, metadata.operation_lock)
 
-    async def close(self, websocket: WebSocket, *, code: int, reason: str) -> tuple[str, str] | None:
+    async def close(
+        self, websocket: WebSocket, *, code: int, reason: str, event: dict[str, Any] | None = None
+    ) -> tuple[str, str] | None:
         """Detach/close once and return room/user metadata to the winning owner."""
 
         async with self._lock:
@@ -133,6 +135,8 @@ class ConnectionManager:
         if metadata is not None:
             await _finish_connection_cleanup(
                 self._close_with_lock(websocket, metadata.operation_lock, code=code, reason=reason)
+                if event is None
+                else self._notify_and_close(websocket, metadata.operation_lock, event, code=code, reason=reason)
             )
             return metadata.room_id, metadata.username
         return None

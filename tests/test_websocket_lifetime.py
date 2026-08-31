@@ -8,6 +8,7 @@ import asyncio
 import json
 import sqlite3
 from dataclasses import replace
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -54,6 +55,7 @@ async def socket_app(request, settings: Settings, monkeypatch):
                 storage_backend="postgres",
                 postgres_url="postgresql://test:test@127.0.0.1/samsarix_test",
                 postgres_instance_id="handshake-test",
+                postgres_lease_seconds=3,
                 token_signing_secret=settings.token_signing_secret,
             )
         )
@@ -310,3 +312,66 @@ async def test_unexpected_initialization_error_releases_ownership_and_closes_101
     assert sent[-1] == {"type": "websocket.close", "code": 1011, "reason": "Unexpected server error"}
     if runtime is not None:
         assert runtime.reservations == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("socket_app", ["postgres"], indirect=True)
+@pytest.mark.parametrize("state", ["archived", "missing"])
+async def test_lifecycle_change_during_admission_uses_domain_close(socket_app, state):
+    from samsarix_chat_engine.postgres_connections import ConnectionRoomUnavailableError
+
+    application, runtime = socket_app
+    room = await application.state.store.get_room("room")
+    snapshot = room.model_copy(update={"archived_at": datetime.now(timezone.utc)}) if state == "archived" else None
+    runtime.admit_connection.side_effect = ConnectionRoomUnavailableError(snapshot)
+    websocket, sent, _, endpoint = _socket(application)
+    await endpoint(websocket, "room", username=None)
+    frames = [json.loads(item["text"]) for item in sent if item["type"] == "websocket.send"]
+    assert len(frames) == 1
+    assert frames[0]["type"] == "error"
+    assert frames[0]["code"] == ("room_archived" if state == "archived" else "room_not_found")
+    assert sent[-1]["code"] == (4409 if state == "archived" else 4404)
+    assert application.state.connections.active_connections == 0
+    runtime.release_connection.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("socket_app", ["postgres"], indirect=True)
+@pytest.mark.parametrize("state", ["archived", "missing", "unavailable", "expired"])
+async def test_heartbeat_distinguishes_room_lifecycle_from_storage_and_lease_failure(socket_app, monkeypatch, state):
+    from samsarix_chat_engine.postgres import PostgresUnavailableError
+    from samsarix_chat_engine.postgres_connections import ConnectionLeaseError, ConnectionRoomUnavailableError
+
+    application, runtime = socket_app
+    room = await application.state.store.get_room("room")
+    snapshot = room.model_copy(update={"archived_at": datetime.now(timezone.utc)})
+    runtime.renew_connection.side_effect = {
+        "archived": ConnectionRoomUnavailableError(snapshot),
+        "missing": ConnectionRoomUnavailableError(None),
+        "unavailable": PostgresUnavailableError("private database credentials"),
+        "expired": ConnectionLeaseError("expired"),
+    }[state]
+    websocket, sent, incoming, endpoint = _socket(application)
+    original_close = websocket.close
+
+    async def close(*args, **kwargs):
+        await original_close(*args, **kwargs)
+        incoming.put_nowait({"type": "websocket.disconnect", "code": kwargs["code"]})
+
+    monkeypatch.setattr(websocket, "close", close)
+    await asyncio.wait_for(endpoint(websocket, "room", username=None), 5)
+    frames = [json.loads(item["text"]) for item in sent if item["type"] == "websocket.send"]
+    assert [frame["type"] for frame in frames[:2]] == ["ready", "history"]
+    if state == "archived":
+        assert frames[2:] == [{"type": "room.archived", "room": snapshot.model_dump(mode="json")}]
+        assert sent[-1]["code"] == 4409
+    elif state == "missing":
+        assert frames[-1] == {"type": "error", "code": "room_not_found", "message": "Room not found"}
+        assert sent[-1]["code"] == 4404
+    else:
+        assert frames[-1]["code"] == "storage_unavailable"
+        assert sent[-1]["code"] == 1012
+    assert "private database" not in repr(sent)
+    assert application.state.connections.active_connections == 0
+    assert runtime.reservations == set()
+    runtime.release_connection.assert_awaited_once()

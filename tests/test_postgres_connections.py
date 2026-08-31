@@ -128,11 +128,15 @@ async def test_renew_release_and_room_lifecycle_fail_closed(clean_postgres_datab
         )
         assert lease is not None
         assert await registry.release(connection_id="socket-one", instance_id="node-b") is False
-        assert await registry.renew(connection_id="socket-one", instance_id="node-a") > lease.lease_expires_at
+        assert (
+            await registry.renew(connection_id="socket-one", instance_id="node-a", room_id="general")
+            > lease.lease_expires_at
+        )
 
         await store.set_room_state("general", archived=True, frozen=None, actor="operator")
-        with pytest.raises(ConnectionLeaseError, match="unavailable"):
-            await registry.renew(connection_id="socket-one", instance_id="node-a")
+        with pytest.raises(ConnectionRoomUnavailableError, match="archived") as archived:
+            await registry.renew(connection_id="socket-one", instance_id="node-a", room_id="general")
+        assert archived.value.room == await store.get_room("general")
         assert await registry.counts(room_id="general") == ConnectionCounts(0, 0)
         assert [item.connection_id for item in await registry.reap_expired()] == ["socket-one"]
         with pytest.raises(ConnectionRoomUnavailableError, match="archived"):
@@ -228,3 +232,47 @@ def test_registry_rejects_unsafe_configuration_and_identifiers() -> None:
             max_connections_per_room=2,
             lease_seconds=2,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["archived", "reaped", "deleted", "reopened", "expired", "wrong_room"])
+async def test_renewal_diagnoses_current_room_even_after_lease_cleanup(clean_postgres_database, state):
+    store = _store(clean_postgres_database)
+    await store.initialize()
+    try:
+        await store.create_room(RoomCreate(id="general", name="General"))
+        await store.create_room(RoomCreate(id="other", name="Other"))
+        await store.foundation.register_instance("node-a", lease_seconds=30)
+        registry = PostgresConnectionRegistry(store.foundation, max_connections=5, max_connections_per_room=5)
+        await registry.try_acquire(
+            connection_id="socket", instance_id="node-a", room_id="general", username="A", subject=None
+        )
+        if state in {"archived", "reaped", "deleted", "reopened"}:
+            await store.set_room_state("general", archived=True, frozen=None, actor="operator")
+        if state in {"reaped", "reopened"}:
+            assert len(await registry.reap_expired()) == 1
+        if state == "deleted":
+            await store.delete_room("general", actor="operator")
+        if state == "reopened":
+            await store.set_room_state("general", archived=False, frozen=None, actor="operator")
+        if state == "expired":
+            async with store.foundation.transaction() as connection:
+                await connection.execute(
+                    "UPDATE public.samsarix_connection_leases "
+                    "SET lease_expires_at = clock_timestamp() - interval '1 second'"
+                )
+        room_id = "other" if state == "wrong_room" else "general"
+        with pytest.raises(ConnectionLeaseError) as failure:
+            await registry.renew(connection_id="socket", instance_id="node-a", room_id=room_id)
+        if state in {"archived", "reaped", "deleted"}:
+            assert isinstance(failure.value, ConnectionRoomUnavailableError)
+            assert failure.value.room == await store.get_room("general")
+            if state != "deleted":
+                assert failure.value.room.archived_at is not None
+        else:
+            assert not isinstance(failure.value, ConnectionRoomUnavailableError)
+        if state == "wrong_room":
+            # Supplying a different active room must not renew someone else's lease.
+            assert await registry.renew(connection_id="socket", instance_id="node-a", room_id="general")
+    finally:
+        await store.close()
