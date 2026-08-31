@@ -274,3 +274,37 @@ async def test_unknown_sockets_are_inert_and_duplicate_registration_preserves_lo
     assert manager._metadata[websocket] is metadata
     assert manager.room_connections("room") == 1
     assert manager.room_connections("other") == 0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_closer_keeps_ownership_until_physical_close_finishes() -> None:
+    manager = ConnectionManager(max_connections=1, max_per_room=1, send_timeout=1)
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    class ClosingSocket(FakeWebSocket):
+        async def close(self, *, code: int, reason: str) -> None:
+            started.set()
+            await finish.wait()
+            self.closed.append((code, reason))
+
+    target = ClosingSocket()
+    websocket = as_websocket(target)
+    await manager.register(websocket, "room", "A")
+    task = asyncio.create_task(manager.close(websocket, code=1012, reason="Storage unavailable"))
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        assert manager.active_connections == 0
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        task.cancel()
+        finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 1)
+        assert target.closed == [(1012, "Storage unavailable")]
+        assert await manager.close(websocket, code=1000, reason="duplicate") is None
+    finally:
+        finish.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

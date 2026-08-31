@@ -1186,6 +1186,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
             metadata = await manager.close(websocket, code=close_code, reason=close_reason)
+            if not session.registered:
+                # Before registration the request, not the manager, owns transport
+                # closure. Never use this fallback for a manager-detached socket.
+                try:
+                    await asyncio.wait_for(
+                        websocket.close(code=close_code, reason=close_reason),
+                        resolved.websocket_send_timeout_seconds,
+                    )
+                except Exception:
+                    logger.debug("Unregistered WebSocket was already closed during cleanup")
             if postgres_runtime is not None and session.registered:
                 await postgres_runtime.release_connection(session.connection_id)
             elif postgres_runtime is None:
@@ -1206,23 +1216,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             close_code, close_reason = 1000, "Connection ended"
         except storage_errors as exc:
             logger.warning("WebSocket storage operation failed: %s", type(exc).__name__)
+            close_code, close_reason = 1012, "Storage unavailable"
             event = _event("error", code="storage_unavailable", message="Chat storage is temporarily unavailable")
             if session.registered:
                 # Never fall back to a raw send after a concurrent manager-owned fence.
                 await manager.send(websocket, event)
-                await manager.close(websocket, code=1012, reason="Storage unavailable")
             else:
                 try:
                     await asyncio.wait_for(websocket.send_json(event), resolved.websocket_send_timeout_seconds)
                 except Exception:
                     logger.debug("WebSocket storage-error notification was unavailable")
-                try:
-                    await asyncio.wait_for(
-                        websocket.close(code=1012, reason="Storage unavailable"),
-                        resolved.websocket_send_timeout_seconds,
-                    )
-                except Exception:
-                    logger.debug("WebSocket was already closed after storage failure")
         except Exception:
             close_code, close_reason = 1011, "Unexpected server error"
             raise

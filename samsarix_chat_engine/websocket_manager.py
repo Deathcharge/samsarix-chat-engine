@@ -131,7 +131,9 @@ class ConnectionManager:
         async with self._lock:
             metadata = self._detach_connection(websocket)
         if metadata is not None:
-            await self._close_with_lock(websocket, metadata.operation_lock, code=code, reason=reason)
+            await _finish_connection_cleanup(
+                self._close_with_lock(websocket, metadata.operation_lock, code=code, reason=reason)
+            )
             return metadata.room_id, metadata.username
         return None
 

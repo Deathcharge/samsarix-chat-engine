@@ -150,7 +150,19 @@ async def test_storage_failure_closes_handshake_and_releases_capacity(socket_app
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("phase", ["room_recheck", "moderation_recheck", "history", "counts", "ready", "history_frame"])
+@pytest.mark.parametrize(
+    "phase",
+    [
+        "initial_room",
+        "initial_moderation",
+        "room_recheck",
+        "moderation_recheck",
+        "history",
+        "counts",
+        "ready",
+        "history_frame",
+    ],
+)
 async def test_cancelled_handshake_releases_local_and_database_ownership(socket_app, monkeypatch, phase):
     application, runtime = socket_app
     entered = asyncio.Event()
@@ -174,7 +186,8 @@ async def test_cancelled_handshake_releases_local_and_database_ownership(socket_
     task = asyncio.create_task(endpoint(websocket, "room", username=None))
     try:
         await asyncio.wait_for(entered.wait(), 1)
-        assert application.state.connections.active_connections == 1
+        admitted = phase not in {"initial_room", "initial_moderation"}
+        assert application.state.connections.active_connections == int(admitted)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -183,7 +196,7 @@ async def test_cancelled_handshake_releases_local_and_database_ownership(socket_
         assert sent[-1]["code"] == 1012
         if runtime is not None:
             assert runtime.reservations == set()
-            runtime.release_connection.assert_awaited_once()
+            assert runtime.release_connection.await_count == int(admitted)
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -259,6 +272,8 @@ async def test_cleanup_survives_repeated_cancellation_and_emits_no_phantom_prese
 @pytest.mark.asyncio
 async def test_receive_loop_storage_failure_closes_and_stops_heartbeat(socket_app, monkeypatch):
     application, runtime = socket_app
+    broadcasts = AsyncMock(wraps=application.state.connections.broadcast)
+    monkeypatch.setattr(application.state.connections, "broadcast", broadcasts)
     websocket, sent, incoming, endpoint = _socket(application)
     original_receive = websocket.receive
 
@@ -280,6 +295,8 @@ async def test_receive_loop_storage_failure_closes_and_stops_heartbeat(socket_ap
     if runtime is not None:
         assert runtime.reservations == set()
         runtime.release_connection.assert_awaited_once()
+    else:
+        assert [call.args[1]["type"] for call in broadcasts.await_args_list] == ["presence.joined", "presence.left"]
 
 
 @pytest.mark.asyncio
