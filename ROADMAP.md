@@ -104,7 +104,8 @@ This makes the supported topology repeatable without implying that a container m
 - [x] implement configurable pre-batch count/age lag fencing, retry-safe generation/cursor recovery, and controlled signed-member two-application history/fan-out acceptance;
 - [x] bound SDK connection attempts, wait for initial history/activation before publishing, retain retry budgets across flapping connections, and verify native-WebSocket reconnect/history/resumed delivery;
 - [x] prove contending real-process idempotent creates, ordered edits/deletes, author enforcement and recovered history, plus shared socket/room caps and HTTP/search/WebSocket/typing budgets;
-- [ ] prove a killed webhook worker's live claim is recovered by a separate surviving process;
+- [x] prove a killed webhook worker's live claim is recovered by a separate surviving process after natural database lease expiry, retaining signed ID/body, while deletion-before-reclaim cancels pending payloads;
+- [ ] enforce a total webhook delivery/shutdown deadline, including slow response headers and bounded DNS/TLS/thread behavior; the existing socket-operation timeout is not a wall-clock bound;
 - [ ] prove measured live-lag and combined lifecycle/outage/reconnect-storm behavior before stronger reconnect-delivery claims;
 - [ ] prove kernel-level packet blackholes and database failover against real network processes;
 - [ ] run sustained load/soak and reconnect-storm tests and publish measured limits;

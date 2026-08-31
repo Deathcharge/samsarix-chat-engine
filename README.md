@@ -171,7 +171,7 @@ All settings are optional for loopback development. Copy [.env.example](.env.exa
 | `SAMSARIX_CHAT_WEBHOOK_PREVIOUS_SIGNING_SECRET` | unset | Temporary old `whsec_` secret for zero-downtime rotation |
 | `SAMSARIX_CHAT_WEBHOOK_PREVIOUS_SIGNING_SECRET_FILE` | unset | File alternative to the previous webhook secret |
 | `SAMSARIX_CHAT_WEBHOOK_EVENTS` | all four when URL set | Comma-separated selected committed message/moderation event types |
-| `SAMSARIX_CHAT_WEBHOOK_TIMEOUT` | `10` | Per-attempt network timeout in seconds, 0.1–30 |
+| `SAMSARIX_CHAT_WEBHOOK_TIMEOUT` | `10` | Blocking socket-operation timeout in seconds, 0.1–30; not a total delivery/shutdown deadline |
 | `SAMSARIX_CHAT_WEBHOOK_MAX_ATTEMPTS` | `9` | Total automatic delivery attempts, 1–20 |
 | `SAMSARIX_CHAT_MAX_WEBHOOK_DELIVERIES` | `100000` | Bounded pending/completed outbox rows |
 | `SAMSARIX_CHAT_WEBHOOK_ALLOW_PRIVATE_TARGETS` | `false` | Explicitly allow trusted private-network destinations |
