@@ -85,7 +85,7 @@ async def arrivals(
     profile: Profile,
     operation: Callable[[int, float], Awaitable[None]],
     counters: Counter[str],
-    start_delay_ms: list[float],
+    record_start_delay: Callable[[float], None],
     *,
     clock: Callable[[], float] | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -106,7 +106,7 @@ async def arrivals(
             counters["started"] -= 1
             counters["dropped_schedule"] += 1
             return
-        start_delay_ms.append(delay * 1000)
+        record_start_delay(delay * 1000)
         try:
             await operation(index, deadline)
         except Exception as exc:

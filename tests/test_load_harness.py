@@ -124,7 +124,7 @@ async def test_open_arrivals_count_concurrency_drops_instead_of_waiting() -> Non
     counters: Counter[str] = Counter()
     samples: list[float] = []
     await arrivals(
-        Profile(duration=1, rate=10, concurrency=2), operation, counters, samples, clock=lambda: now, sleep=sleep
+        Profile(duration=1, rate=10, concurrency=2), operation, counters, samples.append, clock=lambda: now, sleep=sleep
     )
     assert counters == {"offered": 10, "started": 2, "dropped_concurrency": 8, "peak_inflight": 2}
     assert sorted(completed) == [0, 1] and samples == [0, 0]
@@ -147,7 +147,7 @@ async def test_missed_schedule_slots_are_not_a_catch_up_burst() -> None:
 
     counters: Counter[str] = Counter()
     samples: list[float] = []
-    await arrivals(Profile(duration=1, rate=10), operation, counters, samples, clock=lambda: now, sleep=sleep)
+    await arrivals(Profile(duration=1, rate=10), operation, counters, samples.append, clock=lambda: now, sleep=sleep)
     assert counters["offered"] == 10 and counters["dropped_schedule"] == 3
     assert counters["started"] == 7 and counters["dropped_concurrency"] == 0
     assert [index for index, _ in scheduled] == list(range(3, 10))
@@ -165,7 +165,7 @@ async def test_arrival_cancellation_awaits_every_owned_operation() -> None:
         finally:
             exited.set()
 
-    task = asyncio.create_task(arrivals(Profile(duration=1, rate=1), operation, Counter(), []))
+    task = asyncio.create_task(arrivals(Profile(duration=1, rate=1), operation, Counter(), lambda _value: None))
     await entered.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -178,7 +178,7 @@ async def test_arrival_failure_is_not_lost_in_a_detached_task() -> None:
         raise ValueError("deliberate failure")
 
     with pytest.raises(ValueError, match="deliberate failure"):
-        await arrivals(Profile(duration=1, rate=100), operation, Counter(), [])
+        await arrivals(Profile(duration=1, rate=100), operation, Counter(), lambda _value: None)
 
 
 def message(version: int = 0, *, index: int = 0, room: str = "load-0") -> dict[str, Any]:

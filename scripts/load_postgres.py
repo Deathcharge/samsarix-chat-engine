@@ -19,7 +19,7 @@ import shutil
 import subprocess
 import sys
 import time
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -31,6 +31,7 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 from samsarix_chat_engine import AccessTokenService
+from scripts.load_diagnostics import Latencies, database_sample, host_pressure, log_signals, resource_sample
 from scripts.load_metrics import Profile, arrivals, distribution, merge_message, validate_target
 from tests.conftest import _reset_postgres_test_database
 from tests.process_helpers import LoggedServer, _stop_server, _unused_port, _wait_ready
@@ -75,18 +76,6 @@ def validate_environment() -> None:
     )
 
 
-def memory_sample(pid: int) -> dict[str, int]:
-    # smaps_rollup avoids the documented inaccuracy of status VmRSS/VmHWM.
-    # PSS and RSS are sampled, not lifetime peaks; shared RSS can be double-counted.
-    result = {}
-    for line in Path(f"/proc/{pid}/smaps_rollup").read_text().splitlines():
-        key, _, value = line.partition(":")
-        if key in {"Rss", "Pss"}:
-            result[f"{key.lower()}_kib"] = int(value.split()[0])
-    require(len(result) == 2, "memory_sample_missing")
-    return result
-
-
 class World:
     def __init__(self, profile: Profile) -> None:
         self.profile = profile
@@ -99,7 +88,8 @@ class World:
         self.ports: list[int] = []
         self.members: list[Member] = []
         self.counts: Counter[str] = Counter()
-        self.latencies: dict[str, list[float]] = defaultdict(list)
+        self.measurements = Latencies()
+        self.latencies = self.measurements.total
         self.sent: dict[tuple[int, int], float] = {}
         self.confirmed: dict[int, int] = {}
         self.acknowledged: set[tuple[int, int]] = set()
@@ -145,6 +135,9 @@ class World:
         self.phase = phase
         self.timeline.append({"phase": phase, "elapsed_s": round(time.monotonic() - self.started, 6)})
 
+    def measure(self, name: str, value: float) -> None:
+        self.measurements.record(name, value, time.monotonic() - self.started)
+
     def check_message(self, message: dict[str, Any], room: str, *, live: bool = False) -> tuple[int, int]:
         require(message["room_id"] == room, "cross_room_message")
         identifier = message["client_message_id"]
@@ -188,7 +181,7 @@ class World:
             self.counts["http_unknown_outcomes"] += 1
             return False
         finally:
-            self.latencies[f"http_{method}_all_ms"].append((time.monotonic() - started) * 1000)
+            self.measure(f"http_{method}_all_ms", (time.monotonic() - started) * 1000)
         self.counts[f"http_status_{response.status_code}"] += 1
         if response.status_code != (201, 200, 204)[version]:
             error = response.json().get("error", {}).get("code")
@@ -202,7 +195,7 @@ class World:
         self.confirmed[index] = version
         self.acknowledged.add((index, version))
         self.counts[f"http_{method}_accepted"] += 1
-        self.latencies[f"http_{method}_{phase}_accepted_ms"].append((time.monotonic() - started) * 1000)
+        self.measure(f"http_{method}_{phase}_accepted_ms", (time.monotonic() - started) * 1000)
         return True
 
     async def cycle(self, http: httpx.AsyncClient, index: int, _deadline: float) -> None:
@@ -238,7 +231,8 @@ class World:
 
     async def sample(self, observer: Any) -> None:
         while not self.stopping:
-            sample: dict[str, Any] = {"elapsed_s": round(time.monotonic() - self.started, 6), "phase": self.phase}
+            sample_started = time.monotonic()
+            sample: dict[str, Any] = {"elapsed_s": round(sample_started - self.started, 6), "phase": self.phase}
             for index, name in enumerate(_NAMES):
                 state = await _snapshot(observer, name)
                 sample[name] = {
@@ -247,10 +241,15 @@ class World:
                     "live": state.live,
                     "cursor": state.cursor,
                     "pruned_through": state.pruned,
-                    **await asyncio.to_thread(memory_sample, self.processes[index].pid),
+                    **await asyncio.to_thread(resource_sample, self.processes[index].pid),
                 }
             row = await (await observer.execute("SELECT pg_database_size(current_database())")).fetchone()
             sample["database_bytes"] = int(row[0])
+            sample["database_statistics"] = await database_sample(observer, _NAMES)
+            sample["driver"] = await asyncio.to_thread(resource_sample, os.getpid())
+            sample["host_pressure"] = await asyncio.to_thread(host_pressure)
+            sample["counts"] = dict(self.counts)
+            sample["sample_duration_ms"] = round((time.monotonic() - sample_started) * 1000, 6)
             self.samples.append(sample)
             await asyncio.sleep(1)
 
@@ -391,7 +390,7 @@ class World:
             )
         )
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "accepted": accepted,
             "revision": revision,
             "profile": asdict(self.profile),
@@ -413,6 +412,8 @@ class World:
             "counts": dict(self.counts),
             "failures": dict(self.failures),
             "latency_ms": {name: distribution(values) for name, values in sorted(self.latencies.items())},
+            "latency_windows": self.measurements.window_report(),
+            "server_log_tail_signals": [log_signals(process.output_tail()) for process in self.processes],
             "achieved_creates_per_scheduled_second": self.counts["http_POST_accepted"] / self.profile.duration,
             "fault": self.fault,
             "timeline": self.timeline,
@@ -445,6 +446,9 @@ class World:
                 "memory is sampled child RSS/PSS, not whole-deployment memory or a lifetime peak",
                 "20% of scheduled creates attempt one edit; 10% attempt one edit then deletion",
                 "arrival rate counts create cycles, not HTTP requests; missed slots are never replayed",
+                "latency windows group by completion time, including setup/drain; empty windows are omitted",
+                "CPU/I/O/database counters are cumulative; PSI is host-wide, not application-attributed",
+                "database waits are instantaneous samples, not wait durations; log signals cover only a bounded tail",
             ],
         }
 
@@ -485,8 +489,9 @@ class Member:
             self.observed[index, version] += 1
             self.frames[f"v{version}_{outcome}"] += 1
             if outcome == "new":
-                self.world.latencies[f"delivery_replica{self.replica}_{self.world.phase}_ms"].append(
-                    (time.monotonic() - self.world.sent[index, version]) * 1000
+                self.world.measure(
+                    f"delivery_replica{self.replica}_{self.world.phase}_ms",
+                    (time.monotonic() - self.world.sent[index, version]) * 1000,
                 )
         else:
             self.frames["history_items"] += 1
@@ -558,9 +563,7 @@ class Member:
                             self.apply(message, live=False)
                         self.connections += 1
                         self.ready = True
-                        self.world.latencies["connect_history_activation_ms"].append(
-                            (time.monotonic() - started) * 1000
-                        )
+                        self.world.measure("connect_history_activation_ms", (time.monotonic() - started) * 1000)
                         await reader
                         # async iteration ends normally for a clean remote close.
                         require(self.world.stopping or self.allow_reconnect, "unexpected_clean_disconnect")
@@ -644,7 +647,7 @@ async def exercise(world: World, conninfo: str, observer: Any) -> None:
                         p,
                         lambda index, due: world.cycle(http, index, due),
                         world.counts,
-                        world.latencies["start_delay_ms"],
+                        lambda delay: world.measure("start_delay_ms", delay),
                     )
                     await fault
                     require(not sampler.done(), "sampler_stopped_early")
@@ -749,7 +752,7 @@ def main() -> int:
         try:
             report = asyncio.run(run(profile, conninfo))
         except BaseException as exc:
-            report = {"schema_version": 1, "accepted": False, "failures": {type(exc).__name__: 1}}
+            report = {"schema_version": 2, "accepted": False, "failures": {type(exc).__name__: 1}}
         json.dump(report, output, indent=2, allow_nan=False)
         output.write("\n")
     print(
