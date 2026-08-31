@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-import httpx
+import httpx2 as httpx
 import websockets
 from websockets.asyncio.client import ClientConnection
 

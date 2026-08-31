@@ -113,7 +113,6 @@ jobs:
           kubectl apply -f deploy/kubernetes/acceptance/postgres.yaml
           kubectl rollout status deployment/postgres-acceptance --timeout=180s
           kubectl apply -f deploy/kubernetes/postgres-preview.yaml
-          kubectl rollout status statefulset/samsarix-chat --timeout=180s
           kubectl wait \
             --for=condition=Ready \
             --selector=app.kubernetes.io/name=samsarix-chat,app.kubernetes.io/component=engine \

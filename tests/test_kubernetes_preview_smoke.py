@@ -49,10 +49,14 @@ def test_parse_endpoint_rejects_nonlocal_or_ambiguous_targets(raw: str) -> None:
 def test_live_acceptance_assets_remain_pinned_and_ci_required() -> None:
     workflow = (_ROOT / ".github" / "workflows" / "kubernetes-preview.yml").read_text(encoding="utf-8")
     ci = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    smoke = (_ROOT / "scripts" / "smoke_kubernetes_preview.py").read_text(encoding="utf-8")
     assert "KIND_VERSION: v0.32.0" in workflow
     assert "KUBECTL_VERSION: v1.36.1" in workflow
     assert "kindest/node:v1.36.1@sha256:" in workflow
+    assert "rollout status statefulset/samsarix-chat" not in workflow
+    assert "--for=condition=Ready" in workflow
     assert "uses: ./.github/workflows/kubernetes-preview.yml" in ci
+    assert "import httpx2 as httpx" in smoke
 
     documents = list(
         yaml.safe_load_all(

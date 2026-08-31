@@ -54,7 +54,10 @@ The verifier requires the StatefulSet identity to come from `metadata.name`, req
 Wait for both Pods and exercise the service from inside the cluster:
 
 ```bash
-kubectl rollout status statefulset/samsarix-chat
+kubectl wait --for=condition=Ready \
+  --selector=app.kubernetes.io/name=samsarix-chat,app.kubernetes.io/component=engine \
+  pod \
+  --timeout=180s
 kubectl get pods -l app.kubernetes.io/name=samsarix-chat
 kubectl port-forward service/samsarix-chat 8000:80
 curl http://127.0.0.1:8000/readyz
