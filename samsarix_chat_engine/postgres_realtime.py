@@ -104,6 +104,7 @@ class PostgresRealtimeRelay:
         self._generation: UUID | None = None
         self._next_heartbeat = 0.0
         self._lease_deadline = 0.0
+        self._admission_epoch = 0
         self._stop = asyncio.Event()
         self._fenced = False
         self._fence_required = False
@@ -123,6 +124,14 @@ class PostgresRealtimeRelay:
             and asyncio.get_running_loop().time() < self._lease_deadline
         )
 
+    @property
+    def admission_token(self) -> tuple[UUID, int] | None:
+        """Identify one uninterrupted local admission window, including same-claim recovery."""
+
+        if not self.ready or self._generation is None:
+            return None
+        return self._generation, self._admission_epoch
+
     async def initialize(self) -> int:
         """Register or renew this process cursor and return its acknowledged sequence."""
 
@@ -134,6 +143,7 @@ class PostgresRealtimeRelay:
             generation=self._generation,
         )
         self._generation = registration.generation
+        self._admission_epoch += 1
         self._cursor = registration.last_sequence
         self._lease_deadline = started + self.lease_seconds
         self._next_heartbeat = asyncio.get_running_loop().time() + self.lease_seconds / 3
@@ -201,6 +211,7 @@ class PostgresRealtimeRelay:
                         lease_seconds=self.lease_seconds,
                     )
                     self._generation = registration.generation
+                    self._admission_epoch += 1
                     self._cursor = registration.last_sequence
                     self._lease_deadline = started + self.lease_seconds
                     self._next_heartbeat = asyncio.get_running_loop().time() + self.lease_seconds / 3
@@ -253,6 +264,8 @@ class PostgresRealtimeRelay:
         if self._fenced:
             self._fence_required = False
             return True
+        self._fence_required = True
+        self._admission_epoch += 1
         try:
             await self.target.close_all()
         except Exception as exc:
