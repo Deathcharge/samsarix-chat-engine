@@ -4,6 +4,18 @@ Last updated: 2026-08-31
 
 ## Current v0.13 engineering status
 
+Latest verified baseline: clean `main...origin/main` at `c6b810a` (merged PR #29), no open PRs, and all ten post-merge CI jobs passing: **282 tests, two SQLite-inapplicable skips, 88.87% branch-inclusive coverage**. The previous goal turn made verified implementation progress; this turn addresses the next P1, archive versus admission/lease-renewal ordering.
+
+PR #30 starts with **four failing lifecycle cases and two passing storage/expiry controls** on that baseline. A room archived or deleted between validation and admission escaped the normal domain-error contract; a heartbeat observing an archived room before the relay incorrectly reported a storage outage. Admission and failed renewal now diagnose authoritative room state and produce archive (4409) or missing-room (4404) outcomes. Renewal also recognizes archived/deleted rooms after maintenance has reaped the reservation. Healthy renewal remains one query; active-room invalid/expired leases and unavailable storage retain the fail-closed 1012 behavior. An individual manager close can own its final event atomically, so heartbeat/room/member closers cannot duplicate that event or physical close.
+
+The new live PostgreSQL tests deliberately change room state during admission and pause archive relay dispatch until heartbeat teardown wins, including reaped leases and room deletion. An unrelated room remains connected. These barriers exercise real PostgreSQL and ASGI handlers in one application process; they are not separate network-process fault tests. Existing separate-process normal-path moderation acceptance remains complementary evidence, not proof of all interleavings.
+
+Local verification: `python -m ruff check .`, `python -m ruff format --check .`, `python -m mypy samsarix_chat_engine`, and `git diff --check` pass. `python -m pytest -q -m "not postgres" --timeout=60 --tb=short` passes **229 tests, two inapplicable skips, 74 deselected**. Initial [PR #30 CI](https://github.com/Deathcharge/samsarix-chat-engine/actions/runs/33388072769) passed eight jobs but both database jobs exposed one invalid expired-lease fixture (SQLSTATE 23514): its expiry preceded its creation time. The fixture now moves both timestamps into the past while preserving the database constraint. The initial full run had **302 passes and two skips**, with that one failure; final-head CI is still a merge gate. No local PostgreSQL or Docker executable is available, so live verification runs in CI. Final CI and built-artifact evidence will be recorded on PR #30.
+
+Remaining P1 work: ready/history activation-window convergence; rapid archive/reopen with delayed events; live-lag fencing; real-process quota contention and webhook-worker crash recovery; kernel packet-loss/failover and measured load/reconnect storms; deployment manifests and PostgreSQL-native backup/PITR/rollback. The supported product remains single-instance SQLite, and PostgreSQL is an unreleased preview. P2 telemetry/caching stays behind demonstrated operator demand. This slice changes no schema (PostgreSQL 8 / SQLite 5), dependency, license, production infrastructure, package publication, or paid resource.
+
+### PR #29 evidence (historical)
+
 Latest verified baseline: clean `main...origin/main` at `42caa17` (merged PR #28), no open PRs, and all ten post-merge CI jobs passing (241 tests, 88.55% branch-inclusive coverage). The previous goal turn made verified implementation progress; the next P1 was authenticated-handshake resource ownership.
 
 PR #29 starts from **22 failing handler cases** on that baseline (two PostgreSQL-only count cases are inapplicable to SQLite). The old handler registered sockets before its cleanup block and could strand local membership or database reservations when room/moderation rechecks, history, counts, or initial sends failed or were cancelled. Initial storage failures also bypassed the WebSocket error contract. The request now owns cleanup across the whole authenticated session, awaits background task termination and closure/release, preserves direct cancellation, and shields finalization from ASGI cancel scopes and repeated task cancellation. Raw pre-registration close is kept separate from manager-owned closure so a detached socket cannot be revived through a fallback send. Unexpected errors close 1011; translated storage errors close 1012 without database details.
@@ -14,7 +26,7 @@ Initial [PR #29 CI](https://github.com/Deathcharge/samsarix-chat-engine/actions/
 
 Final local verification: `python -m ruff check .`, `python -m ruff format --check .`, `python -m mypy samsarix_chat_engine`, and `git diff --check` pass. `python -m pytest -q -m "not postgres" --timeout=60 --tb=short` passes **219 tests**, with two SQLite-inapplicable count cases skipped and 63 live PostgreSQL tests deselected. CI and package artifact evidence for the final head are recorded on PR #29 before merge.
 
-Remaining P1 work is archive versus lease-renewal ordering, the unbuffered ready/history activation window, live-lag fencing, real-process quota contention and webhook-worker crash recovery, kernel packet-loss/failover testing, measured load/reconnect storms, deployment manifests, and PostgreSQL-native backup/PITR/rollback. Cancellation shielding cannot survive process kill or guarantee immediate release during a database outage; lease expiry remains the backstop. The supported product remains the single-instance SQLite backend; PostgreSQL remains an unreleased preview. P2 telemetry/caching work stays behind demonstrated operator demand.
+PR #29 left archive versus lease-renewal ordering for PR #30, alongside the remaining P1 gates above. Cancellation shielding cannot survive process kill or guarantee immediate release during a database outage; lease expiry remains the backstop.
 
 ### PR #28 evidence (historical)
 
@@ -26,7 +38,7 @@ The accompanying manager regression tests first produced **6 failures / 8 passes
 
 Local final implementation verification: `python -m ruff check .`, `python -m ruff format --check .`, `python -m mypy samsarix_chat_engine`, and `git diff --check` pass. `python -m pytest -q tests/test_connection_manager.py tests/test_conversation_controls.py tests/test_postgres_runtime.py --timeout=30` passes **32 tests**; `python -m pytest -q -m "not postgres" --timeout=60` passes **180 tests**, with 61 deselected. [PR #28 CI run 33383479399](https://github.com/Deathcharge/samsarix-chat-engine/actions/runs/33383479399) passes all ten jobs at `92bc2c8`: **241 tests, 88.55% branch-inclusive coverage**, including **61 PostgreSQL tests** in the dedicated Python 3.14/PostgreSQL 18.4 job. Python 3.10–3.14 Linux, Windows 3.12, package build/metadata/installed-wheel smoke, dependency audit, TypeScript-client checks, and container smoke all pass. The documentation follow-up must pass its own CI before merge. No local PostgreSQL or Docker executable is available, so live tests run in CI. No schema change (PostgreSQL 8 / SQLite 5), new dependency, production deployment, publication, or paid resource is involved.
 
-PR #28's adversarial review queued handshake cleanup (addressed in PR #29) and archive versus lease-renewal ordering (still pending). Its normal-path moderation tests alone did not prove either race fixed. See the [preview guide](POSTGRES_PREVIEW.md) and [acceptance checklist](MULTI_INSTANCE_ARCHITECTURE.md#release-acceptance-gates).
+PR #28's adversarial review queued handshake cleanup (addressed in PR #29) and archive versus lease-renewal ordering (addressed in PR #30). Its normal-path moderation tests alone did not prove either race fixed. See the [preview guide](POSTGRES_PREVIEW.md) and [acceptance checklist](MULTI_INSTANCE_ARCHITECTURE.md#release-acceptance-gates).
 
 ### Prior increment evidence
 
@@ -139,7 +151,8 @@ Deployment owners control login, membership decisions, TLS/proxying, operator an
 - [x] Add verification-only asymmetric access tokens with bounded static public-key rotation.
 - [x] Reject sends after socket detachment and prove normal-path signed-member moderation/archive teardown across real PostgreSQL processes.
 - [x] Cover authenticated-handshake failure/cancellation cleanup, repeated cancellation, ambiguous reservation release, and physical live-database lease cleanup/reconnect.
-- [ ] Cover archive versus lease-renewal ordering and ready/history activation-window convergence; do not infer these guarantees from normal-path moderation acceptance.
+- [x] Diagnose archived/deleted rooms during admission and heartbeat renewal, including reaped leases and a delayed archive relay; prevent duplicate final notifications across competing closers.
+- [ ] Cover ready/history activation-window convergence and rapid archive/reopen with delayed events; do not infer these guarantees from normal-path moderation acceptance or the controlled lifecycle barriers.
 - [ ] Complete the PostgreSQL release gates before multiple workers or hosts are supported; shared storage and durable relay/presence are implemented, while fault/lag/contended-quota/webhook-crash acceptance remains.
 - [ ] Run sustained concurrent load/soak tests and publish measured limits before capacity claims.
 

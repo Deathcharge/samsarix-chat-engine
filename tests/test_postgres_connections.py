@@ -259,7 +259,8 @@ async def test_renewal_diagnoses_current_room_even_after_lease_cleanup(clean_pos
             async with store.foundation.transaction() as connection:
                 await connection.execute(
                     "UPDATE public.samsarix_connection_leases "
-                    "SET lease_expires_at = clock_timestamp() - interval '1 second'"
+                    "SET created_at = clock_timestamp() - interval '2 seconds', "
+                    "lease_expires_at = clock_timestamp() - interval '1 second'"
                 )
         room_id = "other" if state == "wrong_room" else "general"
         with pytest.raises(ConnectionLeaseError) as failure:

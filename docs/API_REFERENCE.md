@@ -211,6 +211,8 @@ After successful authentication, a storage failure during room validation, admis
 
 The request retains ownership until bounded cleanup has stopped its heartbeat/typing tasks, attempted its owned local close, and attempted any owned database reservation release. Cancellation does not turn that cleanup into an untracked background task. An individual closer retains ownership through its bounded physical close even when the calling task is cancelled; concurrent closes do not take that ownership away. A failed handshake does not announce a SQLite departure for a client that never joined. For PostgreSQL, reservation-derived presence can briefly show a join followed by its compensating leave; presence remains best effort, not proof that the ready/history handshake completed.
 
+In the PostgreSQL preview, a room archived or deleted between validation and admission yields `room_archived`/4409 or `room_not_found`/4404. An established connection's heartbeat may observe that lifecycle change before the polling relay: archive then sends `room.archived` with the observed room snapshot and closes 4409; deletion sends `room_not_found` and closes 4404. Only the winning closer sends its final lifecycle notification. If room state cannot be verified, or an otherwise active room has an expired/missing lease, the server retains the conservative `storage_unavailable`/1012 outcome. Concurrent failures do not guarantee a particular final frame; clients reauthorize and reload current state on reconnect.
+
 ### Server events
 
 After authentication and room validation, events begin with:
