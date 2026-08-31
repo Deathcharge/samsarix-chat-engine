@@ -207,6 +207,10 @@ The client must reply before the configured deadline:
 
 The legacy `{"type":"auth","api_key":"..."}` command is also accepted. Failure closes with 4401. Room or identity escalation closes with 4403. Credentials are not accepted in query parameters.
 
+After successful authentication, a storage failure during room validation, admission, history initialization, or the receive loop sends `{"type":"error","code":"storage_unavailable","message":"Chat storage is temporarily unavailable"}` and attempts close code 1012. The error can arrive instead of `ready`/`history`, or after initialization; clients must not assume those initial frames are guaranteed. Cancelled sessions also attempt 1012; unexpected server failures attempt 1011. A broken transport may prevent any final frame reaching the client.
+
+The request retains ownership until bounded cleanup has stopped its heartbeat/typing tasks, attempted its owned local close, and attempted any owned database reservation release. Cancellation does not turn that cleanup into an untracked background task. An individual closer retains ownership through its bounded physical close even when the calling task is cancelled; concurrent closes do not take that ownership away. A failed handshake does not announce a SQLite departure for a client that never joined. For PostgreSQL, reservation-derived presence can briefly show a join followed by its compensating leave; presence remains best effort, not proof that the ready/history handshake completed.
+
 ### Server events
 
 After authentication and room validation, events begin with:

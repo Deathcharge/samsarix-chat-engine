@@ -96,6 +96,8 @@ This makes the supported topology repeatable without implying that a container m
 - [x] prove a database TCP reset/refusal fences an isolated replica, preserves healthy-peer progress, and recovers history/fan-out on explicit client reconnect without application restart;
 - [x] bound checked-out PostgreSQL operations and prove recovery from a silent bidirectional traffic stall over open TCP connections;
 - [x] prove signed-member freeze/mute/ban controls, cross-process archive/ban teardown, reconnect denial/recovery, and unrelated-room isolation against real network processes;
+- [x] finalize interrupted authenticated handshakes, shield cleanup from repeated cancellation, and verify physical PostgreSQL lease release/reconnect after initialization failure;
+- [ ] exercise archive versus lease-renewal ordering and close the ready/history activation gap before stronger reconnect-delivery claims;
 - [ ] prove kernel-level packet blackholes, database failover, and notification-listener interruption against real network processes;
 - [ ] run sustained load/soak and reconnect-storm tests and publish measured limits;
 - [ ] verify deployment manifests assign a unique stable instance ID to every replica and reject duplicate live ownership;

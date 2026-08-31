@@ -87,3 +87,52 @@ def test_two_app_instances_share_http_websocket_presence_typing_and_messages(
             assert left["username"] == "Bob"
             assert left["active_connections"] == 1
             assert second_client.get("/v1/stats", headers=headers).json() == {"active_connections": 1}
+
+
+@pytest.mark.parametrize("phase", ["room_recheck", "history"])
+def test_failed_handshake_releases_real_database_lease_before_reconnect(clean_postgres_database, monkeypatch, phase):
+    from starlette.websockets import WebSocketDisconnect
+
+    from samsarix_chat_engine.postgres import PostgresUnavailableError
+
+    application = create_app(_settings(clean_postgres_database, "handshake-release"))
+    headers = {"X-API-Key": "postgres-operator-key-1234"}
+    with TestClient(application) as client:
+        assert client.post("/v1/rooms", headers=headers, json={"id": "room", "name": "Room"}).status_code == 201
+        store = application.state.store
+        method = "get_room" if phase == "room_recheck" else "list_messages"
+        original = getattr(store, method)
+        calls = 0
+
+        async def fail(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if phase == "history" or calls == 2:
+                raise PostgresUnavailableError("injected after committed socket reservation")
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(store, method, fail)
+        with client.websocket_connect("/v1/rooms/room/ws?username=Alice", headers=headers) as websocket:
+            assert websocket.receive_json() == {
+                "type": "error",
+                "code": "storage_unavailable",
+                "message": "Chat storage is temporarily unavailable",
+            }
+            with pytest.raises(WebSocketDisconnect) as closed:
+                websocket.receive_json()
+            assert closed.value.code == 1012
+        assert application.state.connections.active_connections == 0
+        assert client.get("/v1/stats", headers=headers).json() == {"active_connections": 0}
+
+        async def count_lease_rows():
+            async with store.foundation.transaction() as connection:
+                cursor = await connection.execute("SELECT COUNT(*) FROM public.samsarix_connection_leases")
+                return (await cursor.fetchone())[0]
+
+        # Inspect physical rows, not counts that could hide an expired lease.
+        assert client.portal.call(count_lease_rows) == 0
+        monkeypatch.setattr(store, method, original)
+        with client.websocket_connect("/v1/rooms/room/ws?username=Alice", headers=headers) as recovered:
+            assert recovered.receive_json()["type"] == "ready"
+            assert recovered.receive_json()["type"] == "history"
+        assert client.portal.call(count_lease_rows) == 0

@@ -220,3 +220,91 @@ async def test_admission_rejects_a_reservation_owned_by_another_database_generat
         )
     assert manager.active_connections == 0
     runtime.connections.release.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["unavailable", "cancelled"])
+async def test_admission_releases_reservation_when_commit_reply_never_returns(failure: str) -> None:
+    runtime, manager = await _admission_runtime()
+    reserved = asyncio.Event()
+    database_has_reservation = False
+
+    async def reserve(**_kwargs):
+        nonlocal database_has_reservation
+        database_has_reservation = True
+        reserved.set()
+        if failure == "unavailable":
+            raise PostgresUnavailableError("connection reply lost")
+        await asyncio.Event().wait()
+
+    async def release(**_kwargs):
+        nonlocal database_has_reservation
+        database_has_reservation = False
+        return True
+
+    runtime.connections.try_acquire.side_effect = reserve
+    runtime.connections.release.side_effect = release
+    task = asyncio.create_task(
+        runtime.admit_connection(manager, Mock(), connection_id="socket", room_id="room", username="A", subject=None)
+    )
+    try:
+        await asyncio.wait_for(reserved.wait(), 1)
+        if failure == "cancelled":
+            task.cancel()
+        with pytest.raises(asyncio.CancelledError if failure == "cancelled" else PostgresUnavailableError):
+            await asyncio.wait_for(task, 1)
+        assert not database_has_reservation
+        assert manager.active_connections == 0
+        runtime.connections.release.assert_awaited_once_with(connection_id="socket", instance_id="admission-test")
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancellation_does_not_abandon_reservation_release() -> None:
+    runtime, manager = await _admission_runtime()
+    release_started = asyncio.Event()
+    finish_release = asyncio.Event()
+
+    async def release(**_kwargs):
+        release_started.set()
+        await finish_release.wait()
+        return True
+
+    runtime.connections.release.side_effect = release
+    await manager._lock.acquire()
+    task = asyncio.create_task(
+        runtime.admit_connection(manager, Mock(), connection_id="socket", room_id="room", username="A", subject=None)
+    )
+    try:
+        await asyncio.sleep(0)
+        runtime.connections.try_acquire.assert_awaited_once()
+        task.cancel()
+        await asyncio.wait_for(release_started.wait(), 1)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        finish_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 1)
+        runtime.connections.release.assert_awaited_once()
+        assert manager.active_connections == 0
+    finally:
+        manager._lock.release()
+        finish_release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_known_duplicate_reservation_error_does_not_release_existing_owner() -> None:
+    from samsarix_chat_engine.postgres_connections import ConnectionLeaseError
+
+    runtime, manager = await _admission_runtime()
+    runtime.connections.try_acquire.side_effect = ConnectionLeaseError("connection ID is already leased")
+    with pytest.raises(ConnectionLeaseError):
+        await runtime.admit_connection(
+            manager, Mock(), connection_id="existing-socket", room_id="room", username="A", subject=None
+        )
+    runtime.connections.release.assert_not_awaited()

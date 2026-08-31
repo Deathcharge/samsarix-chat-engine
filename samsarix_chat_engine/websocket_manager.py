@@ -7,12 +7,29 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from typing import Any, NamedTuple
 
+from anyio import CancelScope
 from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
+
+
+async def _finish_connection_cleanup(cleanup: Coroutine[Any, Any, object]) -> None:
+    """Finish bounded cleanup under ASGI scopes or repeated direct cancellation."""
+
+    with CancelScope(shield=True):
+        task = asyncio.create_task(cleanup, name="samsarix-connection-cleanup")
+        cancelled = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+        task.result()
+        if cancelled:
+            raise asyncio.CancelledError
 
 
 class ConnectionMetadata(NamedTuple):
@@ -108,13 +125,17 @@ class ConnectionManager:
             return False
         return await self._send_with_lock(websocket, event, metadata.operation_lock)
 
-    async def close(self, websocket: WebSocket, *, code: int, reason: str) -> None:
-        """Detach before closing; only an already-started send may finish first."""
+    async def close(self, websocket: WebSocket, *, code: int, reason: str) -> tuple[str, str] | None:
+        """Detach/close once and return room/user metadata to the winning owner."""
 
         async with self._lock:
             metadata = self._detach_connection(websocket)
         if metadata is not None:
-            await self._close_with_lock(websocket, metadata.operation_lock, code=code, reason=reason)
+            await _finish_connection_cleanup(
+                self._close_with_lock(websocket, metadata.operation_lock, code=code, reason=reason)
+            )
+            return metadata.room_id, metadata.username
+        return None
 
     async def broadcast(
         self,
