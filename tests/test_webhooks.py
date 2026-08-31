@@ -307,6 +307,7 @@ async def test_dispatcher_retries_then_delivers_and_manual_replay_reuses_id(
     replay = await store.retry_webhook_delivery(delivered[0].id)
     assert replay.id == delivered[0].id
     assert replay.attempt_count == 0
+    dispatcher.stop()
 
 
 class _CaptureHandler(BaseHTTPRequestHandler):
@@ -447,7 +448,8 @@ async def test_https_transport_connects_to_the_validated_address_with_original_h
             pass
 
     class FakePinnedConnection:
-        def __init__(self, hostname: str, address: str, port: int, timeout: float) -> None:
+        def __init__(self, hostname: str, address: str, port: int, timeout: float, *, budget: Any) -> None:
+            assert 0 < budget.remaining() <= timeout
             captured.update(hostname=hostname, address=address, port=port, timeout=timeout)
 
         def request(self, method: str, path: str, *, body: bytes, headers: dict[str, str]) -> None:

@@ -7,12 +7,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import socket
-import subprocess
 import sys
-import threading
 import time
-from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from typing import Any
@@ -20,6 +16,8 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx2 as httpx
 import pytest
+
+from tests.process_helpers import LoggedServer, _stop_server, _unused_port, _wait_ready
 
 pytest.importorskip("psycopg")
 websockets = pytest.importorskip("websockets.asyncio.client")
@@ -30,36 +28,6 @@ pytestmark = pytest.mark.postgres
 
 _OPERATOR_KEY = "postgres-process-operator-key-1234"
 _SIGNING_SECRET = "postgres-process-test-signing-secret-at-least-32-bytes"
-
-
-def _unused_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.bind(("127.0.0.1", 0))
-        return int(listener.getsockname()[1])
-
-
-class LoggedServer(subprocess.Popen[str]):
-    """Drain child diagnostics continuously into a bounded in-memory tail."""
-
-    def __init__(self, command: list[str], *, env: dict[str, str]) -> None:
-        super().__init__(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        self._output: deque[str] = deque(maxlen=32)
-        self._output_lock = threading.Lock()
-        self.reader = threading.Thread(target=self._drain, name=f"test-server-output-{self.pid}", daemon=True)
-        self.reader.start()
-
-    def _drain(self) -> None:
-        assert self.stdout is not None
-        try:
-            while chunk := self.stdout.readline(4096):
-                with self._output_lock:
-                    self._output.append(chunk)
-        finally:
-            self.stdout.close()
-
-    def output_tail(self) -> str:
-        with self._output_lock:
-            return "".join(self._output)[-4_000:]
 
 
 def _start_server(
@@ -199,36 +167,8 @@ async def _database_proxy(conninfo: str) -> AsyncIterator[tuple[DatabaseProxy, s
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-def _stop_server(process: LoggedServer) -> None:
-    try:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=12)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
-    finally:
-        process.reader.join(timeout=2)
-
-
 def _process_output(process: LoggedServer) -> str:
     return process.output_tail()
-
-
-async def _wait_ready(client: httpx.AsyncClient, base_url: str, process: LoggedServer) -> None:
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            pytest.fail(f"server exited before readiness:\n{_process_output(process)}")
-        try:
-            response = await client.get(f"{base_url}/readyz")
-            if response.status_code == 200:
-                return
-        except httpx.HTTPError:
-            pass
-        await asyncio.sleep(0.05)
-    pytest.fail(f"server did not become ready:\n{_process_output(process)}")
 
 
 async def _receive_type(websocket: Any, event_type: str, *, username: str | None = None) -> dict[str, Any]:

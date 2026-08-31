@@ -105,7 +105,7 @@ This makes the supported topology repeatable without implying that a container m
 - [x] bound SDK connection attempts, wait for initial history/activation before publishing, retain retry budgets across flapping connections, and verify native-WebSocket reconnect/history/resumed delivery;
 - [x] prove contending real-process idempotent creates, ordered edits/deletes, author enforcement and recovered history, plus shared socket/room caps and HTTP/search/WebSocket/typing budgets;
 - [x] prove a killed webhook worker's live claim is recovered by a separate surviving process after natural database lease expiry, retaining signed ID/body, while deletion-before-reclaim cancels pending payloads;
-- [ ] enforce a total webhook delivery/shutdown deadline, including slow response headers and bounded DNS/TLS/thread behavior; the existing socket-operation timeout is not a wall-clock bound;
+- [x] enforce a total webhook network-attempt deadline, interrupt owned TCP/TLS sockets on stop/cancellation, and bound unresolved native DNS to one daemon job without blocking process exit; storage and whole-process shutdown retain separate budgets;
 - [ ] prove measured live-lag and combined lifecycle/outage/reconnect-storm behavior before stronger reconnect-delivery claims;
 - [ ] prove kernel-level packet blackholes and database failover against real network processes;
 - [ ] run sustained load/soak and reconnect-storm tests and publish measured limits;
