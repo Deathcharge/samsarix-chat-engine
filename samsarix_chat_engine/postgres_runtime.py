@@ -8,13 +8,19 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 
 from .postgres import PostgresFoundationError, PostgresUnavailableError
-from .postgres_connections import ConnectionCounts, ConnectionLease, PostgresConnectionRegistry
+from .postgres_connections import ConnectionCounts, PostgresConnectionRegistry
 from .postgres_rate_limits import PostgresRateLimiter
 from .postgres_realtime import PostgresRealtimeRelay, RealtimeTarget
 from .postgres_store import PostgresChatStore
 from .postgres_typing import PostgresTypingRegistry, TypingTransition
+
+if TYPE_CHECKING:
+    from fastapi import WebSocket
+
+    from .websocket_manager import ConnectionManager
 
 logger = logging.getLogger(__name__)
 EVENT_PRUNE_INTERVAL_SECONDS = 60.0
@@ -157,23 +163,51 @@ class PostgresApplicationRuntime:
             return False
         return await self.store.check_ready() and self.relay.ready
 
-    async def acquire_connection(
+    async def admit_connection(
         self,
+        manager: ConnectionManager,
+        websocket: WebSocket,
         *,
         connection_id: str,
         room_id: str,
         username: str,
         subject: str | None,
-    ) -> ConnectionLease | None:
-        if not self.relay.ready:
+    ) -> bool:
+        """Reserve and register only within the same uninterrupted relay admission window."""
+
+        token = self.relay.admission_token
+        if token is None:
             raise PostgresUnavailableError("PostgreSQL realtime is temporarily unavailable")
-        return await self.connections.try_acquire(
+        lease = await self.connections.try_acquire(
             connection_id=connection_id,
             instance_id=self.instance_id,
             room_id=room_id,
             username=username,
             subject=subject,
         )
+        if lease is None:
+            return False
+
+        def admission_check() -> bool:
+            return self.relay.admission_token == token and lease.instance_generation == token[0]
+
+        registered = False
+        try:
+            registered = await manager.register(
+                websocket,
+                room_id,
+                username,
+                subject,
+                connection_id=connection_id,
+                broadcast_ready=False,
+                admission_check=admission_check,
+            )
+            if not registered and not admission_check():
+                raise PostgresUnavailableError("PostgreSQL realtime is temporarily unavailable")
+            return registered
+        finally:
+            if not registered:
+                await self.release_connection(connection_id)
 
     async def renew_connection(self, connection_id: str) -> None:
         await self.connections.renew(connection_id=connection_id, instance_id=self.instance_id)

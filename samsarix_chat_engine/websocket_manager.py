@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import defaultdict
+from collections.abc import Callable
 from typing import Any, NamedTuple
 
 from fastapi import WebSocket
@@ -43,10 +44,14 @@ class ConnectionManager:
         *,
         connection_id: str | None = None,
         broadcast_ready: bool = True,
+        admission_check: Callable[[], bool] | None = None,
     ) -> bool:
         """Register an already-accepted socket, returning false at capacity."""
 
         async with self._lock:
+            # Check under the same lock that fencing uses to detach sockets.
+            if admission_check is not None and not admission_check():
+                return False
             if len(self._metadata) >= self.max_connections or len(self._rooms[room_id]) >= self.max_per_room:
                 if not self._rooms[room_id]:
                     self._rooms.pop(room_id, None)

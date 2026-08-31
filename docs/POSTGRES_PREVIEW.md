@@ -49,7 +49,7 @@ samsarix-chat serve --host 127.0.0.1 --port 8000
 
 Use a separate ID such as `chat-b` for a second replica. A concurrently active duplicate ID fails closed instead of sharing an event cursor. Run one Uvicorn worker per configured process; `--workers` would copy the same instance ID into multiple workers and is intentionally rejected by the database claim. A graceful shutdown releases the claim, while a crashed owner remains fenced until its lease expires.
 
-All replicas must run the exact same Samsarix version and use identical authentication, limits, webhook, retention, and timing settings. Use `/readyz` to decide whether a replica should receive traffic and `/healthz` for process liveness. Liveness does not depend on PostgreSQL. Readiness requires the schema, pool, running coordination loops, and a locally unexpired relay claim with no pending socket fence or recovery. A live task alone is not evidence that the relay can serve traffic. WebSocket lease admission applies the same relay-health guard.
+All replicas must run the exact same Samsarix version and use identical authentication, limits, webhook, retention, and timing settings. Use `/readyz` to decide whether a replica should receive traffic and `/healthz` for process liveness. Liveness does not depend on PostgreSQL. Readiness requires the schema, pool, running coordination loops, and a locally unexpired relay claim with no pending socket fence or recovery. A live task alone is not evidence that the relay can serve traffic. WebSocket admission captures both the database generation and a local admission epoch before reserving capacity, then rechecks them under the same local lock used to detach fenced sockets. A reservation that crosses a fence is released and rejected even if the relay recovered with the same database generation in the meantime.
 
 ## PostgreSQL settings
 
@@ -77,7 +77,7 @@ On a detected database connection failure, the relay fences its existing local s
 
 `tests/test_postgres_processes.py::test_database_network_cut_fences_clients_and_recovers_without_process_restart` cuts one replica's real database TCP connections using a test-only loopback proxy and refuses replacement connections. A second Uvicorn process connects directly to the dedicated `samsarix_test` database. The test checks that the healthy peer keeps publishing, rejected writes do not appear in recovered history, readiness returns after reconnection, and fresh sockets again receive cross-replica messages. It does not stop PostgreSQL or modify its networking configuration.
 
-The test uses a three-second lease and one-second pool timeout to keep CI bounded. It is a connection-reset/refusal test, **not** evidence for silently blackholed TCP, a database failover, notification-listener recovery, or production latency. Pool acquisition timeout does not bound an already-running SQL operation; those failure modes and measured timing at production settings remain release gates.
+The test uses a three-second lease and a one-second pool timeout only for the interrupted replica to keep CI bounded. Other test replicas retain the default ten-second pool timeout. Child diagnostics are drained continuously into a bounded in-memory tail. This is a connection-reset/refusal test, **not** evidence for silently blackholed TCP, a database failover, notification-listener recovery, or production latency. Pool acquisition timeout does not bound an already-running SQL operation; those failure modes and measured timing at production settings remain release gates.
 
 ## Migration, backup, and rollback
 

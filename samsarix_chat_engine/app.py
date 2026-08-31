@@ -1180,7 +1180,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         connection_id = f"socket-{uuid.uuid4().hex}"
         if postgres_runtime is not None:
             try:
-                lease = await postgres_runtime.acquire_connection(
+                registered = await postgres_runtime.admit_connection(
+                    manager,
+                    websocket,
                     connection_id=connection_id,
                     room_id=room_id,
                     username=username,
@@ -1192,20 +1194,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
                 await websocket.close(code=1012, reason="Storage unavailable")
                 return
-            admitted = lease is not None
         else:
-            admitted = True
-        registered = admitted and await manager.register(
-            websocket,
-            room_id,
-            username,
-            principal.subject,
-            connection_id=connection_id,
-            broadcast_ready=False,
-        )
+            registered = await manager.register(
+                websocket,
+                room_id,
+                username,
+                principal.subject,
+                connection_id=connection_id,
+                broadcast_ready=False,
+            )
         if not registered:
-            if admitted and postgres_runtime is not None:
-                await postgres_runtime.release_connection(connection_id)
             await websocket.send_json(
                 _event("error", code="connection_capacity_reached", message="Connection capacity reached")
             )

@@ -10,7 +10,9 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
+from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from typing import Any
@@ -33,7 +35,31 @@ def _unused_port() -> int:
         return int(listener.getsockname()[1])
 
 
-def _start_server(conninfo: str, instance_id: str, port: int) -> subprocess.Popen[str]:
+class LoggedServer(subprocess.Popen[str]):
+    """Drain child diagnostics continuously into a bounded in-memory tail."""
+
+    def __init__(self, command: list[str], *, env: dict[str, str]) -> None:
+        super().__init__(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        self._output: deque[str] = deque(maxlen=32)
+        self._output_lock = threading.Lock()
+        self.reader = threading.Thread(target=self._drain, name=f"test-server-output-{self.pid}", daemon=True)
+        self.reader.start()
+
+    def _drain(self) -> None:
+        assert self.stdout is not None
+        try:
+            while chunk := self.stdout.readline(4096):
+                with self._output_lock:
+                    self._output.append(chunk)
+        finally:
+            self.stdout.close()
+
+    def output_tail(self) -> str:
+        with self._output_lock:
+            return "".join(self._output)[-4_000:]
+
+
+def _start_server(conninfo: str, instance_id: str, port: int, *, pool_timeout: float = 10) -> LoggedServer:
     environment = {
         key: value for key, value in os.environ.items() if not key.startswith(("SAMSARIX_CHAT_", "HELIX_CHAT_"))
     }
@@ -43,7 +69,7 @@ def _start_server(conninfo: str, instance_id: str, port: int) -> subprocess.Pope
             "SAMSARIX_CHAT_POSTGRES_URL": conninfo,
             "SAMSARIX_CHAT_POSTGRES_INSTANCE_ID": instance_id,
             "SAMSARIX_CHAT_POSTGRES_MAX_POOL_SIZE": "4",
-            "SAMSARIX_CHAT_POSTGRES_POOL_TIMEOUT": "1",
+            "SAMSARIX_CHAT_POSTGRES_POOL_TIMEOUT": str(pool_timeout),
             "SAMSARIX_CHAT_POSTGRES_LEASE_SECONDS": "3",
             "SAMSARIX_CHAT_POSTGRES_RELAY_POLL": "0.05",
             "SAMSARIX_CHAT_POSTGRES_MAINTENANCE_INTERVAL": "0.1",
@@ -52,7 +78,7 @@ def _start_server(conninfo: str, instance_id: str, port: int) -> subprocess.Pope
             "SAMSARIX_CHAT_MAX_CONNECTIONS_PER_ROOM": "8",
         }
     )
-    return subprocess.Popen(  # noqa: S603 - fixed interpreter and argument vector
+    return LoggedServer(
         [
             sys.executable,
             "-m",
@@ -66,9 +92,6 @@ def _start_server(conninfo: str, instance_id: str, port: int) -> subprocess.Pope
             "warning",
         ],
         env=environment,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
     )
 
 
@@ -156,24 +179,24 @@ async def _database_proxy(conninfo: str) -> AsyncIterator[tuple[DatabaseProxy, s
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-def _stop_server(process: subprocess.Popen[str]) -> None:
-    if process.poll() is not None:
-        return
-    process.terminate()
+def _stop_server(process: LoggedServer) -> None:
     try:
-        process.wait(timeout=12)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5)
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=12)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+    finally:
+        process.reader.join(timeout=2)
 
 
-def _process_output(process: subprocess.Popen[str]) -> str:
-    if process.poll() is None or process.stdout is None:
-        return ""
-    return process.stdout.read()[-4_000:]
+def _process_output(process: LoggedServer) -> str:
+    return process.output_tail()
 
 
-async def _wait_ready(client: httpx.AsyncClient, base_url: str, process: subprocess.Popen[str]) -> None:
+async def _wait_ready(client: httpx.AsyncClient, base_url: str, process: LoggedServer) -> None:
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         if process.poll() is not None:
@@ -206,7 +229,7 @@ async def test_two_uvicorn_processes_reap_crashed_leases_and_restart(
     second_port = _unused_port()
     first_url = f"http://127.0.0.1:{first_port}"
     second_url = f"http://127.0.0.1:{second_port}"
-    processes: list[subprocess.Popen[str]] = []
+    processes: list[LoggedServer] = []
     first = _start_server(clean_postgres_database, "process-first", first_port)
     second = _start_server(clean_postgres_database, "process-second", second_port)
     processes.extend((first, second))
@@ -274,12 +297,12 @@ async def test_database_network_cut_fences_clients_and_recovers_without_process_
 ) -> None:
     """Cut only replica A's database sockets; replica B must continue serving."""
 
-    processes: list[subprocess.Popen[str]] = []
+    processes: list[LoggedServer] = []
     headers = {"X-API-Key": _OPERATOR_KEY}
     async with _database_proxy(clean_postgres_database) as (proxy, proxied_url):
         try:
             first_port = _unused_port()
-            first = _start_server(proxied_url, "network-first", first_port)
+            first = _start_server(proxied_url, "network-first", first_port, pool_timeout=1)
             processes.append(first)
             second_port = _unused_port()
             second = _start_server(clean_postgres_database, "network-second", second_port)
@@ -356,3 +379,20 @@ async def test_database_network_cut_fences_clients_and_recovers_without_process_
             proxy.enabled = True
             for process in reversed(processes):
                 await asyncio.to_thread(_stop_server, process)
+
+
+def test_child_output_is_drained_beyond_pipe_capacity_and_remains_bounded() -> None:
+    process = LoggedServer(
+        [sys.executable, "-c", "import sys; sys.stdout.write('x' * 1000000 + '\\noutput-complete\\n')"],
+        env=dict(os.environ),
+    )
+    try:
+        # A PIPE with no concurrent reader would block this child before it can exit.
+        assert process.wait(timeout=10) == 0
+    finally:
+        _stop_server(process)
+    assert not process.reader.is_alive()
+    assert process.stdout is not None and process.stdout.closed
+    output = _process_output(process)
+    assert output.endswith("output-complete\n")
+    assert len(output) <= 4_000
