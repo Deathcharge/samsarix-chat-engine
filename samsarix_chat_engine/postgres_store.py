@@ -27,9 +27,11 @@ from .models import (
     ReactionMutation,
     ReactionSummary,
     ReadState,
+    ReadStateSummary,
     Room,
     RoomCreate,
     WebhookDelivery,
+    validate_read_state_query_room_ids,
 )
 from .postgres import POSTGRES_SCHEMA_VERSION, PostgresFoundation, PostgresFoundationError
 from .store import (
@@ -1012,6 +1014,77 @@ class PostgresChatStore:
         async with self.foundation.transaction() as connection:
             await _require_room(connection, room_id)
             return await _read_state_from_connection(connection, room_id, subject)
+
+    async def query_read_states(self, room_ids: list[str], subject: str) -> list[ReadStateSummary]:
+        """Return one content-free cross-room snapshot in caller order."""
+
+        room_ids = validate_read_state_query_room_ids(room_ids)
+        async with self.foundation.transaction() as connection:
+            cursor = await connection.execute(
+                """
+                WITH requested(room_id, ordinal) AS (
+                    SELECT room_id, ordinal
+                    FROM unnest(%s::text[]) WITH ORDINALITY AS input(room_id, ordinal)
+                )
+                SELECT requested.room_id,
+                       room.id IS NOT NULL AS room_exists,
+                       read_state.message_id,
+                       read_state.updated_at,
+                       COALESCE(unread.unread_count, 0),
+                       latest.id,
+                       latest.created_at,
+                       COALESCE(member_control.banned_until > clock_timestamp(), FALSE) AS banned
+                FROM requested
+                LEFT JOIN public.samsarix_rooms AS room ON room.id = requested.room_id
+                LEFT JOIN public.samsarix_room_read_states AS read_state
+                  ON read_state.room_id = requested.room_id AND read_state.subject = %s
+                LEFT JOIN public.samsarix_room_member_controls AS member_control
+                  ON member_control.room_id = requested.room_id AND member_control.subject = %s
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*) AS unread_count
+                    FROM public.samsarix_messages AS unread_message
+                    WHERE unread_message.room_id = requested.room_id
+                      AND unread_message.deleted_at IS NULL
+                      AND (unread_message.author_subject IS NULL OR unread_message.author_subject <> %s)
+                      AND (
+                          read_state.message_created_at IS NULL
+                          OR unread_message.created_at > read_state.message_created_at
+                          OR (
+                              unread_message.created_at = read_state.message_created_at
+                              AND unread_message.id > COALESCE(read_state.message_id, '')
+                          )
+                      )
+                ) AS unread ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT latest_message.id, latest_message.created_at
+                    FROM public.samsarix_messages AS latest_message
+                    WHERE latest_message.room_id = requested.room_id
+                      AND latest_message.deleted_at IS NULL
+                    ORDER BY latest_message.created_at DESC, latest_message.id DESC
+                    LIMIT 1
+                ) AS latest ON TRUE
+                ORDER BY requested.ordinal
+                """,
+                (room_ids, subject, subject, subject),
+            )
+            rows = await cursor.fetchall()
+        summaries: list[ReadStateSummary] = []
+        for row in rows:
+            if not bool(row[1]):
+                raise RoomNotFoundError(str(row[0]))
+            if bool(row[7]):
+                raise MemberBannedError(subject)
+            summaries.append(
+                ReadStateSummary(
+                    room_id=str(row[0]),
+                    last_read_message_id=str(row[2]) if row[2] is not None else None,
+                    last_read_at=row[3],
+                    unread_count=int(row[4]),
+                    latest_message_id=str(row[5]) if row[5] is not None else None,
+                    latest_message_at=row[6],
+                )
+            )
+        return summaries
 
     async def mark_read(self, room_id: str, subject: str, message_id: str | None) -> ReadState:
         """Advance a room cursor using database ordering without allowing regression."""

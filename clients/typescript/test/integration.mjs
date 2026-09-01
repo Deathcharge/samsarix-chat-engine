@@ -37,6 +37,15 @@ assert.equal(room.name, "SDK Room");
 
 const initialReadState = await client.getReadState("sdk-room");
 assert.equal(initialReadState.unread_count, 1);
+const initialInbox = await client.queryReadStates(["sdk-room"]);
+assert.equal(initialInbox.subject, "sdk-user");
+assert.equal(initialInbox.total_unread_count, 1);
+assert.equal(initialInbox.unread_room_count, 1);
+assert.equal(initialInbox.items[0].room_id, "sdk-room");
+assert.equal(initialInbox.items[0].unread_count, 1);
+assert.ok(initialInbox.items[0].latest_message_id);
+assert.ok(initialInbox.items[0].latest_message_at);
+assert.equal("content" in initialInbox.items[0], false);
 
 const created = await client.createMessage(
   "sdk-room",
@@ -182,7 +191,7 @@ session.sendMessage("Live after reconnect", "sdk-resumed-1");
 assert.equal((await resumed).message.client_message_id, "sdk-resumed-1");
 session.close();
 
-console.log("typescript_client_http=ok metadata=ok attachments=ok threads=ok reactions=ok pins=ok search=ok websocket=ok activation=ok reconnect_history=ok resumed_delivery=ok edit_delete=ok");
+console.log("typescript_client_http=ok metadata=ok attachments=ok inbox=ok threads=ok reactions=ok pins=ok search=ok websocket=ok activation=ok reconnect_history=ok resumed_delivery=ok edit_delete=ok");
 
 function nextEvent(roomSession, type) {
   return new Promise((resolve, reject) => {

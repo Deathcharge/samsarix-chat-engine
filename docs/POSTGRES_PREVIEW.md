@@ -11,7 +11,7 @@ Every replica uses PostgreSQL for rooms, messages, search, moderation, read stat
 - an ordered transactional event log and one exclusively generation-fenced cursor per replica;
 - cross-replica message, room-state, moderation, presence, and typing delivery;
 - deployment-wide and per-room WebSocket capacity;
-- database-time message, search, and typing rate buckets;
+- database-time message, bounded-query (search and inbox), and typing rate buckets;
 - connection heartbeats, crash reclamation, and bounded typing/connection cleanup;
 - bounded event retention that never crosses a live cursor and fences stale replicas after a retained gap.
 

@@ -177,6 +177,17 @@ This milestone lets a host application associate messages with support tickets, 
 
 This milestone serves support evidence, classroom resources and incident artifacts without making the chat engine a blob store. The host application authenticates uploads, validates/scans bytes, owns quotas and object lifecycle, resolves opaque IDs, and issues fresh authorized downloads. Samsarix never stores a signed URL or fetches file content.
 
+## v0.19 — bounded cross-room inbox state
+
+- [x] add a content-free batch query for 1–100 explicit room IDs and one signed subject;
+- [x] require `room:read` for every requested room and fail the whole query for missing or actively banned rooms;
+- [x] return input-ordered cursor/unread state, latest visible message ID/time, total unread messages and unread-room count;
+- [x] execute the set in one SQLite or PostgreSQL statement without creating read-state rows;
+- [x] add a dedicated per-subject request budget that remains coordinated across PostgreSQL replicas;
+- [x] expose client-side validation and `queryReadStates()` through unpublished TypeScript SDK 0.10.0.
+
+This milestone makes a host-owned support, classroom or incident inbox practical without adding a Samsarix membership/assignment database or copying message content into a second response. The host supplies authorized room IDs from its own domain model, merges returned state with its own labels and assignments, and loads one transcript on demand.
+
 ## Deliberate non-goals
 
 - no built-in password database, social graph, billing, or end-user frontend;

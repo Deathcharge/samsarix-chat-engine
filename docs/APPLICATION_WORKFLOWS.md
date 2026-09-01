@@ -1,6 +1,6 @@
 # Application workflows
 
-Samsarix Chat Engine 0.10 provides the small amount of application state needed to build a credible one-to-one or small-team support inbox: per-user read cursors, current unread counts, ephemeral typing signals, and authorized per-case message retrieval. The host application still owns accounts, customer records, assignment, notifications, and the user interface.
+Samsarix Chat Engine provides the small amount of application state needed to build a credible one-to-one or small-team support inbox: per-user read cursors, bounded cross-room unread snapshots, ephemeral typing signals, and authorized per-case message retrieval. The host application still owns accounts, customer records, assignment, notifications, and the user interface.
 
 ## Support-room journey
 
@@ -14,7 +14,8 @@ const chat = new SamsarixChatClient({
   credential: async () => ({ token: await issueSupportRoomToken() }),
 });
 
-const before = await chat.getReadState("support-case-42");
+const inbox = await chat.queryReadStates(["support-case-42", "support-case-43"]);
+const before = inbox.items.find((item) => item.room_id === "support-case-42");
 await chat.createMessage("support-case-42", {
   content: "Payment failed after the upgrade",
   client_message_id: crypto.randomUUID(),
@@ -83,7 +84,7 @@ python examples/03_support_workflow.py
 
 On PowerShell, assign the two command results to `$env:SAMSARIX_CHAT_CUSTOMER_TOKEN` and `$env:SAMSARIX_CHAT_AGENT_TOKEN` instead. The example also requires `SAMSARIX_CHAT_API_KEY` so it can create the room.
 
-## Read-state contract
+## Read-state and inbox-query contract
 
 `GET /v1/rooms/{room_id}/read-state` returns the signed subject's cursor and a currently derived unread count. `PUT` accepts `{"message_id":"..."}` or `{}` to advance through a specific message or the latest room position. `DELETE` removes only the caller's stored cursor.
 
@@ -95,7 +96,9 @@ On PowerShell, assign the two command results to `$env:SAMSARIX_CHAT_CUSTOMER_TO
 - Each room is capped by `SAMSARIX_CHAT_MAX_READ_STATES_PER_ROOM`. Users can erase their own row, and deleting a room cascades its read-state rows.
 - Read-state changes are intentionally excluded from the administrative audit stream and room-message export: they are high-volume, user-specific interaction metadata rather than administrative actions.
 
-The returned `unread_count` is computed at request time. Samsarix does not push unread-count events or aggregate counts across rooms; clients should refresh after reconnect, message activity, or marking a room read.
+The returned `unread_count` is computed at request time. `POST /v1/read-states/query` accepts 1–100 unique room IDs already granted by the signed token and obtains every room's cursor/count plus latest visible message ID/time in one storage statement. It also returns `total_unread_count` and `unread_room_count`. The result follows input order and contains no message body or sender, so the host can merge it with its own case/member/assignment list and lazily fetch one selected transcript. Any unauthorized, missing, or actively banned room fails the whole query; no partial result can reveal another room. The query has its own per-subject `SAMSARIX_CHAT_READ_STATE_QUERIES_PER_MINUTE` allowance.
+
+Samsarix does not push aggregate unread-count events or discover a subject's room membership. Clients should refresh the batch after reconnect, relevant message activity, or marking a room read. Hosts with more than 100 candidate rooms should page their own membership list and issue bounded batches.
 
 ## Support-case search contract
 
@@ -119,6 +122,6 @@ For offline assignment, notifications, CRM synchronization, or case timelines, v
 
 ## Product and privacy boundary
 
-The host application should use opaque, stable internal account IDs as token subjects rather than email addresses. Read timestamps and typing activity can reveal engagement patterns, so expose them only to participants with a legitimate room relationship and document their use in the host product's privacy notice. Samsarix deliberately does not provide per-message read receipts, cross-room user activity, or durable typing history.
+The host application should use opaque, stable internal account IDs as token subjects rather than email addresses. Read timestamps and typing activity can reveal engagement patterns, so expose them only to participants with a legitimate room relationship and document their use in the host product's privacy notice. Samsarix deliberately does not provide per-message read receipts, server-owned room membership discovery, or durable typing history.
 
-This shape follows common chat expectations without copying an entire hosted platform: Stream documents initial and event-driven unread state and channel-filtered search, while Sendbird documents channel-scoped unread counts, typing indicators, message search, and the need to restrict relational user data to relevant channel members. See the [Stream unread guide](https://getstream.io/chat/docs/javascript/unread/), [Stream message search](https://getstream.io/chat/docs/php/search/), [Sendbird channel overview](https://sendbird.com/docs/chat/sdk/v4/javascript/channel/overview-channel), and [Sendbird message-search overview](https://docs.sendbird.com/docs/chat/platform-api/v3/message/message-search/message-search-overview).
+This shape follows common chat expectations without copying an entire hosted platform: Stream documents channel lists ordered or filtered by unread state, Sendbird exposes per-channel and total unread counts, and Twilio pairs user-conversation unread counts with a last-read cursor. Samsarix instead batches only host-supplied, token-authorized room IDs because membership remains outside the engine. See [Stream channel queries](https://getstream.io/chat/docs/javascript/query-channels/), [Sendbird unread totals](https://sendbird.com/docs/chat/platform-api/v3/user/managing-unread-count/get-number-of-unread-items), and [Twilio user conversations](https://www.twilio.com/docs/conversations/api/user-conversation-resource).

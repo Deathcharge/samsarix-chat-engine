@@ -196,6 +196,51 @@ test("read-state methods preserve the signed-subject workflow", async () => {
   assert.equal(requests[3].init.method, "DELETE");
 });
 
+test("read-state query validates and preserves caller room order", async () => {
+  const requests = [];
+  const result = {
+    subject: "agent-7",
+    items: [
+      {
+        room_id: "incident-9",
+        last_read_message_id: null,
+        last_read_at: null,
+        unread_count: 2,
+        latest_message_id: "message-9",
+        latest_message_at: "2026-09-01T00:00:00Z",
+      },
+      {
+        room_id: "support-42",
+        last_read_message_id: "message-4",
+        last_read_at: "2026-09-01T00:01:00Z",
+        unread_count: 0,
+        latest_message_id: "message-4",
+        latest_message_at: "2026-09-01T00:00:30Z",
+      },
+    ],
+    total_unread_count: 2,
+    unread_room_count: 1,
+  };
+  const client = new SamsarixChatClient({
+    baseUrl: "https://chat.example",
+    credential: { token: "agent-token" },
+    fetch: async (url, init) => {
+      requests.push({ url: String(url), init });
+      return jsonResponse(result);
+    },
+  });
+
+  assert.deepEqual(await client.queryReadStates(["incident-9", "support-42"]), result);
+  assert.equal(requests[0].url, "https://chat.example/v1/read-states/query");
+  assert.equal(requests[0].init.method, "POST");
+  assert.deepEqual(JSON.parse(requests[0].init.body), { room_ids: ["incident-9", "support-42"] });
+
+  for (const invalid of [[], ["Support"], ["support", "support"], Array.from({ length: 101 }, (_, i) => `r-${i}`)]) {
+    await assert.rejects(client.queryReadStates(invalid), TypeError);
+  }
+  assert.equal(requests.length, 1);
+});
+
 test("message search encodes normalized queries and pagination", async () => {
   const requests = [];
   const page = { items: [], next_before: null };

@@ -20,6 +20,9 @@ from samsarix_chat_engine.config import ConfigurationError, Settings
 def test_public_api_and_parser_help() -> None:
     assert samsarix_chat_engine.__version__ == "0.12.0"
     assert callable(samsarix_chat_engine.create_app)
+    assert samsarix_chat_engine.ReadStateQuery(room_ids=["support"]).room_ids == ["support"]
+    assert samsarix_chat_engine.ReadStateSummary
+    assert samsarix_chat_engine.ReadStateQueryResult
     help_text = build_parser().format_help()
     assert "serve" in help_text
     assert "local-first" in help_text
@@ -34,6 +37,7 @@ def test_settings_from_env_and_validation(monkeypatch: pytest.MonkeyPatch, tmp_p
     monkeypatch.setenv("SAMSARIX_CHAT_MAX_READ_STATES_PER_ROOM", "250")
     monkeypatch.setenv("SAMSARIX_CHAT_TYPING_EVENTS_PER_MINUTE", "45")
     monkeypatch.setenv("SAMSARIX_CHAT_SEARCHES_PER_MINUTE", "17")
+    monkeypatch.setenv("SAMSARIX_CHAT_READ_STATE_QUERIES_PER_MINUTE", "19")
     monkeypatch.setenv("SAMSARIX_CHAT_TYPING_TIMEOUT", "6.5")
     webhook_secret = "whsec_" + base64.b64encode(b"configuration-webhook-secret-32!!").decode("ascii")
     monkeypatch.setenv("SAMSARIX_CHAT_WEBHOOK_URL", "https://hooks.example.com/chat")
@@ -53,6 +57,7 @@ def test_settings_from_env_and_validation(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert settings.max_read_states_per_room == 250
     assert settings.typing_events_per_minute == 45
     assert settings.searches_per_minute == 17
+    assert settings.read_state_queries_per_minute == 19
     assert settings.typing_timeout_seconds == 6.5
     assert settings.webhook_url == "https://hooks.example.com/chat"
     assert settings.webhook_signing_secret == webhook_secret
@@ -79,6 +84,8 @@ def test_settings_from_env_and_validation(monkeypatch: pytest.MonkeyPatch, tmp_p
         Settings(typing_timeout_seconds=31)
     with pytest.raises(ConfigurationError, match="searches_per_minute"):
         Settings(searches_per_minute=0)
+    with pytest.raises(ConfigurationError, match="read_state_queries_per_minute"):
+        Settings(read_state_queries_per_minute=0)
     monkeypatch.setenv("SAMSARIX_CHAT_MESSAGE_RETENTION_DAYS", "not-a-number")
     with pytest.raises(ConfigurationError, match="must be an integer"):
         Settings.from_env()

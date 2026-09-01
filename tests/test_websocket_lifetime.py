@@ -42,6 +42,7 @@ async def socket_app(request, settings: Settings, monkeypatch):
             store=store,
             message_limiter=application.state.message_limiter,
             search_limiter=application.state.search_limiter,
+            read_state_limiter=application.state.read_state_limiter,
             typing_limiter=application.state.typing_limiter,
             admit_connection=AsyncMock(side_effect=admit),
             release_connection=AsyncMock(side_effect=release),

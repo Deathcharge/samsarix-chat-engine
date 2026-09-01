@@ -31,9 +31,11 @@ from .models import (
     ReactionMutation,
     ReactionSummary,
     ReadState,
+    ReadStateSummary,
     Room,
     RoomCreate,
     WebhookDelivery,
+    validate_read_state_query_room_ids,
 )
 
 T = TypeVar("T")
@@ -451,6 +453,8 @@ class ChatStorage(Protocol):
 
     async def get_read_state(self, room_id: str, subject: str) -> ReadState: ...
 
+    async def query_read_states(self, room_ids: list[str], subject: str) -> list[ReadStateSummary]: ...
+
     async def mark_read(self, room_id: str, subject: str, message_id: str | None) -> ReadState: ...
 
     async def clear_read_state(self, room_id: str, subject: str) -> None: ...
@@ -783,6 +787,12 @@ class ChatStore:
         """Return a signed subject's cursor and a current derived unread count."""
 
         return await asyncio.to_thread(self._get_read_state_sync, room_id, subject)
+
+    async def query_read_states(self, room_ids: list[str], subject: str) -> list[ReadStateSummary]:
+        """Return a bounded content-free inbox snapshot in caller order."""
+
+        validated_room_ids = validate_read_state_query_room_ids(room_ids)
+        return await asyncio.to_thread(self._query_read_states_sync, validated_room_ids, subject)
 
     async def mark_read(self, room_id: str, subject: str, message_id: str | None) -> ReadState:
         """Advance a signed subject's room cursor without allowing regression."""
@@ -1956,6 +1966,80 @@ class ChatStore:
             if connection.execute("SELECT 1 FROM rooms WHERE id = ?", (room_id,)).fetchone() is None:
                 raise RoomNotFoundError(room_id)
             return self._read_state_from_connection(connection, room_id, subject)
+
+    def _query_read_states_sync(self, room_ids: list[str], subject: str) -> list[ReadStateSummary]:
+        requested_values = ", ".join("(?, ?)" for _ in room_ids)
+        parameters: list[Any] = []
+        for ordinal, room_id in enumerate(room_ids):
+            parameters.extend((room_id, ordinal))
+        parameters.append(subject)
+        sql = f"""
+            WITH requested(room_id, ordinal) AS (VALUES {requested_values}),
+                 viewer(subject) AS (VALUES (?))
+            SELECT requested.room_id,
+                   rooms.id IS NOT NULL AS room_exists,
+                   read_state.message_id,
+                   read_state.updated_at,
+                   (
+                       SELECT COUNT(*)
+                       FROM messages AS unread
+                       WHERE unread.room_id = requested.room_id
+                         AND unread.deleted_at IS NULL
+                         AND (unread.author_subject IS NULL OR unread.author_subject <> viewer.subject)
+                         AND (
+                             read_state.message_created_at IS NULL
+                             OR unread.created_at > read_state.message_created_at
+                             OR (
+                                 unread.created_at = read_state.message_created_at
+                                 AND unread.id > COALESCE(read_state.message_id, '')
+                             )
+                         )
+                   ) AS unread_count,
+                   (
+                       SELECT latest.id
+                       FROM messages AS latest
+                       WHERE latest.room_id = requested.room_id AND latest.deleted_at IS NULL
+                       ORDER BY latest.created_at DESC, latest.id DESC
+                       LIMIT 1
+                   ) AS latest_message_id,
+                   (
+                       SELECT latest.created_at
+                       FROM messages AS latest
+                       WHERE latest.room_id = requested.room_id AND latest.deleted_at IS NULL
+                       ORDER BY latest.created_at DESC, latest.id DESC
+                       LIMIT 1
+                   ) AS latest_message_at,
+                   COALESCE(julianday(member_control.banned_until) > julianday('now'), FALSE) AS banned
+            FROM requested
+            CROSS JOIN viewer
+            LEFT JOIN rooms ON rooms.id = requested.room_id
+            LEFT JOIN room_read_states AS read_state
+              ON read_state.room_id = requested.room_id AND read_state.subject = viewer.subject
+            LEFT JOIN room_member_controls AS member_control
+              ON member_control.room_id = requested.room_id AND member_control.subject = viewer.subject
+            ORDER BY requested.ordinal
+        """  # noqa: S608 - only a bounded list of parameter placeholders is interpolated
+        with closing(self._connect()) as connection, connection:
+            rows = connection.execute(sql, parameters).fetchall()
+        summaries: list[ReadStateSummary] = []
+        for row in rows:
+            if not bool(row["room_exists"]):
+                raise RoomNotFoundError(str(row["room_id"]))
+            if bool(row["banned"]):
+                raise MemberBannedError(subject)
+            summaries.append(
+                ReadStateSummary(
+                    room_id=str(row["room_id"]),
+                    last_read_message_id=str(row["message_id"]) if row["message_id"] is not None else None,
+                    last_read_at=datetime.fromisoformat(row["updated_at"]) if row["updated_at"] else None,
+                    unread_count=int(row["unread_count"]),
+                    latest_message_id=(str(row["latest_message_id"]) if row["latest_message_id"] is not None else None),
+                    latest_message_at=(
+                        datetime.fromisoformat(row["latest_message_at"]) if row["latest_message_at"] else None
+                    ),
+                )
+            )
+        return summaries
 
     def _mark_read_sync(self, room_id: str, subject: str, message_id: str | None) -> ReadState:
         with closing(self._connect()) as connection, connection:

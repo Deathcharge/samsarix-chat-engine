@@ -320,7 +320,7 @@ def main() -> int:
                     ],
                 },
             )
-            _request(
+            unread_message = _request(
                 base_url + "/v1/rooms/wheel-room/messages",
                 method="POST",
                 credential=("X-API-Key", operator_key),
@@ -338,6 +338,12 @@ def main() -> int:
                 base_url + "/v1/rooms/wheel-room/read-state",
                 credential=("Authorization", f"Bearer {token}"),
             )
+            inbox_before = _request(
+                base_url + "/v1/read-states/query",
+                method="POST",
+                credential=("Authorization", f"Bearer {token}"),
+                body={"room_ids": ["wheel-room"]},
+            )
             read_after = _request(
                 base_url + "/v1/rooms/wheel-room/read-state",
                 method="PUT",
@@ -351,6 +357,14 @@ def main() -> int:
             )
             if read_before["unread_count"] != 1 or read_after["unread_count"] != 0 or cleared_read is not None:
                 raise RuntimeError("installed-wheel read-state journey mismatch")
+            if (
+                inbox_before["subject"] != "wheel-user"
+                or inbox_before["total_unread_count"] != 1
+                or inbox_before["unread_room_count"] != 1
+                or inbox_before["items"][0]["latest_message_id"] != unread_message["id"]
+                or "content" in inbox_before["items"][0]
+            ):
+                raise RuntimeError("installed-wheel inbox query mismatch")
             _request(
                 base_url + "/v1/rooms/wheel-room/read-state",
                 method="PUT",
@@ -529,7 +543,7 @@ def main() -> int:
                 raise RuntimeError("installed-wheel database was not persisted")
             print(
                 f"http=ok metadata=ok attachments=ok search=ok threads=ok reactions=ok pins=ok websocket=ok "
-                f"read_state=ok typing=ok controls=ok "
+                f"read_state=ok inbox=ok typing=ok controls=ok "
                 f"webhook=ok export=ok "
                 f"lifecycle=ok backup=ok "
                 f"sender={websocket_sender} history={len(history['items'])}"
