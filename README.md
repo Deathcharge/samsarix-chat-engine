@@ -2,7 +2,7 @@
 
 Samsarix Chat Engine is a small, local-first room chat service from Samsarix LLC for developers who need persisted messages and live WebSocket delivery without adopting a full collaboration platform. It runs as a standalone FastAPI service or as an embeddable ASGI application, stores data in SQLite, and has no dependency on Redis, an LLM provider, or any private package.
 
-Version 0.12.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, verification-only asymmetric authentication, accountable data lifecycle, practical conversation controls, typed TypeScript client, support workflow and retrieval, durable application webhooks, and hardened container deployment are implemented and tested. The development branch additionally includes unreleased one-depth threaded replies and a guarded PostgreSQL multi-instance preview. The project is licensed under the standard Mozilla Public License 2.0.
+Version 0.12.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, verification-only asymmetric authentication, accountable data lifecycle, practical conversation controls, typed TypeScript client, support workflow and retrieval, durable application webhooks, and hardened container deployment are implemented and tested. The development branch additionally includes unreleased one-depth threaded replies, bounded message reactions, and a guarded PostgreSQL multi-instance preview. The project is licensed under the standard Mozilla Public License 2.0.
 
 ## What works
 
@@ -23,7 +23,8 @@ Version 0.12.0 is an alpha release candidate. Its core single-instance journey, 
 - Stream versioned room exports, archive/reopen rooms, and require two-step confirmed deletion.
 - Apply optional age-based retention and inspect a bounded metadata-only administrative audit trail.
 - Create integrity-checked SQLite backups and restore them through the CLI.
-- Deliver selected committed message/moderation events through a signed, durable, retrying webhook outbox.
+- Add bounded durable reactions for acknowledgement, resolution, and lightweight feedback without extra message noise.
+- Deliver selected committed message/moderation/reaction events through a signed, durable, retrying webhook outbox.
 - Deploy one non-root process with a hardened Compose profile, mounted secret files, persistent SQLite volume, and readiness health check.
 - Bound message size, send rate, connections, room count, and retained history.
 - Check liveness at `/healthz`, storage readiness at `/readyz`, and OpenAPI docs at `/docs`.
@@ -102,7 +103,7 @@ The profile publishes only to host loopback, runs as UID/GID 10001, mounts `/dat
 
 The framework-neutral [`@samsarix/chat-client`](clients/typescript/README.md) source ships in `clients/typescript`. It wraps authenticated HTTP operations and browser-safe first-message WebSocket authentication, emits generated declarations, refreshes credentials on reconnect, and applies bounded exponential backoff without runtime dependencies. The package is verified and packable but is not yet published to npm.
 
-Unpublished SDK 0.5.0 adds `listReplies()` and `sendReply()` while retaining the 0.4 connection contract: it waits for initial history and a post-history activation reply before `connect()` resolves. Attempts have a configurable deadline; retry budgets reset only after a stable activated connection, not merely `ready`. See the [migration and recovery contract](clients/typescript/README.md#reconnect-behavior), including browser-legal close codes and caller-owned history reconciliation.
+Unpublished SDK 0.6.0 adds `addReaction()` and `removeReaction()` alongside `listReplies()` and `sendReply()`, while retaining the 0.4 connection contract: it waits for initial history and a post-history activation reply before `connect()` resolves. Attempts have a configurable deadline; retry budgets reset only after a stable activated connection, not merely `ready`. See the [migration and recovery contract](clients/typescript/README.md#reconnect-behavior), including browser-legal close codes and caller-owned history reconciliation.
 
 ## WebSocket protocol
 
@@ -132,7 +133,7 @@ To reply to a top-level message, add its ID:
 {"type":"typing","active":true}
 ```
 
-Clients receive `message.created`, `message.updated`, `message.deleted`, `typing.started`, `typing.stopped`, room-state, moderation, presence, `pong`, and structured `error` events. Browser clients first receive `auth.required` and reply with `{"type":"auth","token":"..."}`. Token identity supplies the username; legacy local/operator connections still use `?username=`. API keys and tokens are never accepted in query strings.
+Clients receive `message.created`, `message.updated`, `message.deleted`, `message.reaction.updated`, `typing.started`, `typing.stopped`, room-state, moderation, presence, `pong`, and structured `error` events. Browser clients first receive `auth.required` and reply with `{"type":"auth","token":"..."}`. Token identity supplies the username; legacy local/operator connections still use `?username=`. API keys and tokens are never accepted in query strings.
 
 The exact HTTP and event contracts are in [API reference](docs/API_REFERENCE.md). See [Identity and room authorization](docs/AUTHORIZATION.md) for issuance and permission examples, and [Application workflows](docs/APPLICATION_WORKFLOWS.md) for the end-to-end support-room integration.
 
@@ -177,7 +178,7 @@ All settings are optional for loopback development. Copy [.env.example](.env.exa
 | `SAMSARIX_CHAT_WEBHOOK_SIGNING_SECRET_FILE` | unset | File alternative to the current webhook secret |
 | `SAMSARIX_CHAT_WEBHOOK_PREVIOUS_SIGNING_SECRET` | unset | Temporary old `whsec_` secret for zero-downtime rotation |
 | `SAMSARIX_CHAT_WEBHOOK_PREVIOUS_SIGNING_SECRET_FILE` | unset | File alternative to the previous webhook secret |
-| `SAMSARIX_CHAT_WEBHOOK_EVENTS` | all four when URL set | Comma-separated selected committed message/moderation event types |
+| `SAMSARIX_CHAT_WEBHOOK_EVENTS` | all five when URL set | Comma-separated selected committed message/moderation/reaction event types |
 | `SAMSARIX_CHAT_WEBHOOK_TIMEOUT` | `10` | Total network-attempt budget in seconds, 0.1–30, including the caller's DNS wait; storage operations and whole-process shutdown have separate budgets |
 | `SAMSARIX_CHAT_WEBHOOK_MAX_ATTEMPTS` | `9` | Total automatic delivery attempts, 1–20 |
 | `SAMSARIX_CHAT_MAX_WEBHOOK_DELIVERIES` | `100000` | Bounded pending/completed outbox rows |
@@ -213,6 +214,7 @@ HTTP / WebSocket clients
 
 - SQLite writes are serialized within one process and use `BEGIN IMMEDIATE`; foreign keys, WAL mode, and a five-second busy timeout are enabled.
 - A message is persisted before `message.created` is broadcast. An HTTP success therefore means the local database committed it.
+- Reaction actor rows and grouped message counts commit atomically. Keys are sorted, capped at 20 distinct values per message, and removed with a tombstone.
 - Selected webhook rows commit in the same transaction as their message/moderation change, then deliver at least once in the background. Receivers deduplicate the stable delivery ID.
 - Signed users can persist a monotonic per-room read cursor and retrieve a current unread count that excludes their own and deleted messages.
 - Search is room-authorized, current-state Unicode-normalized substring matching over at most the configured retained messages for that room; it is not global, fuzzy, or externally indexed.

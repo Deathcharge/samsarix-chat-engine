@@ -10,6 +10,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ROOM_ID_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,63}$"
+REACTION_KEY_PATTERN = r"^[a-z0-9][a-z0-9_+\-]{0,29}$"
 
 
 class APIModel(BaseModel):
@@ -71,6 +72,13 @@ class MessageCreate(_MessageContentPayload):
     parent_message_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
+class ReactionSummary(APIModel):
+    """A stable reaction key and its current distinct-reactor count."""
+
+    key: str = Field(min_length=1, max_length=30, pattern=REACTION_KEY_PATTERN)
+    count: int = Field(ge=1)
+
+
 class Message(APIModel):
     """A persisted chat message."""
 
@@ -81,12 +89,30 @@ class Message(APIModel):
     created_at: datetime
     client_message_id: str | None = None
     parent_message_id: str | None = None
+    reactions: list[ReactionSummary] = Field(default_factory=list)
     edited_at: datetime | None = None
     deleted_at: datetime | None = None
 
 
 class MessageUpdate(_MessageContentPayload):
     """Author or administrator message-content update."""
+
+
+class ReactionActor(APIModel):
+    """Optional actor identity for operator/local reaction mutations."""
+
+    reactor: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class ReactionMutation(APIModel):
+    """Result of an idempotent add/remove reaction operation."""
+
+    message: Message
+    key: str = Field(min_length=1, max_length=30, pattern=REACTION_KEY_PATTERN)
+    reactor: str = Field(min_length=1, max_length=64)
+    present: bool
+    changed: bool
+    updated_at: datetime
 
 
 class MessagePage(APIModel):

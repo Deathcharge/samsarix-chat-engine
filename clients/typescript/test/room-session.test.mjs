@@ -102,6 +102,27 @@ test("browser authentication, typed events, publish, ping, and close", async () 
   sockets[0].completeHandshake();
   await connected;
 
+  sockets[0].receive({
+    type: "message.reaction.updated",
+    message: {
+      id: "message-1",
+      room_id: "room/a",
+      sender: "user",
+      content: "hello",
+      created_at: "2026-08-31T00:00:00Z",
+      client_message_id: null,
+      parent_message_id: null,
+      reactions: [{ key: "ack", count: 1 }],
+      edited_at: null,
+      deleted_at: null,
+    },
+    key: "ack",
+    reactor: "user",
+    present: true,
+    changed: true,
+    updated_at: "2026-08-31T00:00:01Z",
+  });
+
   session.sendMessage("hello", "client-1");
   session.sendReply("parent-1", "answer", "reply-1");
   session.ping();
@@ -123,6 +144,8 @@ test("browser authentication, typed events, publish, ping, and close", async () 
   assert.equal(urls[0], "wss://chat.example/base/v1/rooms/room%2Fa/ws");
   assert.deepEqual(states, ["idle", "connecting", "connected"]);
   assert.equal(events[0].type, "auth.required");
+  assert.equal(events.at(-1).type, "message.reaction.updated");
+  assert.deepEqual(events.at(-1).message.reactions, [{ key: "ack", count: 1 }]);
 
   session.close();
   assert.equal(session.state, "closed");

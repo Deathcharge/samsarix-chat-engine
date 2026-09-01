@@ -51,7 +51,7 @@ Admin-only. Send `{"archived":true}` to make a room read-only and close active c
 
 ### `GET /v1/rooms/{room_id}/export`
 
-Admin-only. Streams `application/x-ndjson`: a `samsarix.room_export` metadata record with `schema_version: 3`, followed by one current `message` record or tombstone per line in chronological order. Schema 3 retains room freeze and message edit/delete timestamps from schema 2 and adds nullable message `parent_message_id`. The response is an attachment and the operation records `room.export_requested`.
+Admin-only. Streams `application/x-ndjson`: a `samsarix.room_export` metadata record with `schema_version: 4`, followed by one current `message` record or tombstone per line in chronological order. Schema 4 retains nullable `parent_message_id` from schema 3 and adds the current grouped `reactions` array. The response is an attachment and the operation records `room.export_requested`.
 
 ### `DELETE /v1/rooms/{room_id}`
 
@@ -84,7 +84,13 @@ Replaces a non-deleted message's content and sets `edited_at`. The signed author
 
 ### `DELETE /v1/rooms/{room_id}/messages/{message_id}`
 
-The signed author or an administrator may delete. Success returns 204, replaces content with an empty string, sets `deleted_at`, and broadcasts `message.deleted` once. Repeating the delete is idempotent. The tombstone stays in chronological history so clients do not reorder surrounding messages; deleted content is not retained by this feature. Administrators may remove content while a room is frozen or archived.
+The signed author or an administrator may delete. Success returns 204, replaces content with an empty string, clears all reaction actors/counts, sets `deleted_at`, and broadcasts `message.deleted` once. Repeating the delete is idempotent. The tombstone stays in chronological history so clients do not reorder surrounding messages; deleted content and reaction identity are not retained by this feature. Administrators may remove content while a room is frozen or archived.
+
+### `PUT|DELETE /v1/rooms/{room_id}/messages/{message_id}/reactions/{reaction_key}`
+
+Requires `room:write`. `PUT` idempotently adds and `DELETE` idempotently removes one actor's reaction. Keys must match `^[a-z0-9][a-z0-9_+\-]{0,29}$`; a message may have at most 20 distinct keys. Signed users send `{}` and the server uses the token subject. Operator/local callers send `{"reactor":"display-or-stable-id"}`; a token cannot impersonate another reactor.
+
+The response contains the updated message, key, reactor, desired `present` state, whether storage `changed`, and `updated_at`. The reactor identity is therefore visible to authorized room clients and selected webhook receivers even though message history exposes only grouped counts. A real change broadcasts `message.reaction.updated` and can enqueue the same optional signed webhook; an idempotent replay does neither. Unknown, deleted, archived, frozen, muted, banned, capacity, and identity failures use the normal stable error contracts.
 
 ### `GET /v1/rooms/{room_id}/messages?limit=50&before={message_id}`
 
@@ -97,7 +103,7 @@ Returns messages in chronological order:
 }
 ```
 
-Pages contain the newest matching messages. Message objects include nullable `parent_message_id`, `edited_at`, and `deleted_at`; a deleted message has empty `content`. Top-level history intentionally includes replies in the same flat chronological stream for backward compatibility. When `next_before` is non-null, pass it as `before` to fetch the next older page. An unknown or cross-room cursor returns `400 invalid_cursor`.
+Pages contain the newest matching messages. Message objects include nullable `parent_message_id`, sorted `reactions: [{"key":"ack","count":2}]`, `edited_at`, and `deleted_at`; a deleted message has empty `content` and no reactions. Top-level history intentionally includes replies in the same flat chronological stream for backward compatibility. When `next_before` is non-null, pass it as `before` to fetch the next older page. An unknown or cross-room cursor returns `400 invalid_cursor`.
 
 ### `GET /v1/rooms/{room_id}/messages/{parent_message_id}/replies?limit=50&before={message_id}`
 
@@ -251,6 +257,7 @@ Live events are:
 - `message.created`: contains `message` and `idempotent_replay`.
 - `message.updated`: contains the committed current `message`.
 - `message.deleted`: contains the committed message tombstone.
+- `message.reaction.updated`: contains the complete current `message`, reaction `key`, `reactor`, desired `present` state, `changed: true`, and `updated_at`. Replace the message by ID; do not increment a cached count independently.
 - `presence.joined` / `presence.left`: contains `username` and the room connection count when the event was produced; best effort only. Queued or delayed events can predate the count in `ready`, so their counts are not fresh measurements at receipt and are never an authorization input.
 - `typing.started`: contains `username` and `expires_in`; sent to other connections only when a user transitions to typing.
 - `typing.stopped`: contains `username`; sent after an explicit stop, successful publish, disconnect, or server timeout.

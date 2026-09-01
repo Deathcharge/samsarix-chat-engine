@@ -25,6 +25,8 @@ from .models import (
     MemberModeration,
     MemberModerationUpdate,
     Message,
+    ReactionMutation,
+    ReactionSummary,
     ReadState,
     Room,
     RoomCreate,
@@ -32,7 +34,7 @@ from .models import (
 )
 
 T = TypeVar("T")
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 logger = logging.getLogger(__name__)
 
 
@@ -153,6 +155,10 @@ class MessageDeletedError(StoreError):
 
 class ThreadDepthError(StoreError):
     """Raised when a reply targets another reply instead of a top-level message."""
+
+
+class ReactionCapacityError(StoreError):
+    """Raised when a message already has the maximum distinct reaction keys."""
 
 
 class MessageOwnershipError(StoreError):
@@ -367,6 +373,18 @@ class ChatStorage(Protocol):
         is_admin: bool,
         member_subject: str | None = None,
     ) -> tuple[Message, bool]: ...
+
+    async def set_message_reaction(
+        self,
+        *,
+        room_id: str,
+        message_id: str,
+        reactor: str,
+        key: str,
+        present: bool,
+        allow_frozen: bool,
+        member_subject: str | None = None,
+    ) -> ReactionMutation: ...
 
     async def get_member_moderation(self, room_id: str, subject: str) -> MemberModeration | None: ...
 
@@ -611,6 +629,31 @@ class ChatStore:
                 member_subject,
             )
 
+    async def set_message_reaction(
+        self,
+        *,
+        room_id: str,
+        message_id: str,
+        reactor: str,
+        key: str,
+        present: bool,
+        allow_frozen: bool,
+        member_subject: str | None = None,
+    ) -> ReactionMutation:
+        """Idempotently add or remove one actor's bounded reaction key."""
+
+        async with self._write_lock:
+            return await asyncio.to_thread(
+                self._set_message_reaction_sync,
+                room_id,
+                message_id,
+                reactor,
+                key,
+                present,
+                allow_frozen,
+                member_subject,
+            )
+
     async def get_member_moderation(self, room_id: str, subject: str) -> MemberModeration | None:
         row = await asyncio.to_thread(
             self._run,
@@ -697,7 +740,7 @@ class ChatStore:
             cursor = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, edited_at, deleted_at
+                       parent_message_id, reactions_json, edited_at, deleted_at
                 FROM messages WHERE room_id = ? ORDER BY created_at, id
                 """,
                 (room_id,),
@@ -814,6 +857,7 @@ class ChatStore:
                     created_at TEXT NOT NULL,
                     client_message_id TEXT,
                     parent_message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+                    reactions_json TEXT NOT NULL DEFAULT '[]',
                     UNIQUE(room_id, client_message_id)
                 );
 
@@ -839,9 +883,31 @@ class ChatStore:
                 connection.execute(
                     "ALTER TABLE messages ADD COLUMN parent_message_id TEXT REFERENCES messages(id) ON DELETE SET NULL"
                 )
+            if "reactions_json" not in message_columns:
+                connection.execute("ALTER TABLE messages ADD COLUMN reactions_json TEXT NOT NULL DEFAULT '[]'")
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS messages_thread_order "
                 "ON messages(room_id, parent_message_id, created_at DESC, id DESC)"
+            )
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS message_reactions (
+                    message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                    room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+                    reactor TEXT NOT NULL CHECK (length(reactor) BETWEEN 1 AND 64),
+                    reaction_key TEXT NOT NULL CHECK (
+                        length(reaction_key) BETWEEN 1 AND 30
+                        AND substr(reaction_key, 1, 1) GLOB '[a-z0-9]'
+                        AND reaction_key NOT GLOB '*[^a-z0-9_+-]*'
+                    ),
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (message_id, reactor, reaction_key)
+                );
+                CREATE INDEX IF NOT EXISTS message_reactions_summary
+                    ON message_reactions(message_id, reaction_key, reactor);
+                CREATE INDEX IF NOT EXISTS message_reactions_room_actor
+                    ON message_reactions(room_id, reactor, message_id);
+                """
             )
             connection.executescript(
                 """
@@ -1017,7 +1083,7 @@ class ChatStore:
                 existing = connection.execute(
                     """
                     SELECT id, room_id, sender, content, created_at, client_message_id,
-                           parent_message_id, edited_at, deleted_at
+                           parent_message_id, reactions_json, edited_at, deleted_at
                     FROM messages WHERE room_id = ? AND client_message_id = ?
                     """,
                     (room_id, client_message_id),
@@ -1070,7 +1136,7 @@ class ChatStore:
             persisted = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, edited_at, deleted_at
+                       parent_message_id, reactions_json, edited_at, deleted_at
                 FROM messages WHERE id = ?
                 """,
                 (message.id,),
@@ -1110,7 +1176,7 @@ class ChatStore:
             row = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, edited_at, deleted_at
+                       parent_message_id, reactions_json, edited_at, deleted_at
                 FROM messages WHERE room_id = ? AND id = ?
                 """,
                 (room_id, message_id),
@@ -1136,7 +1202,7 @@ class ChatStore:
             row = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, edited_at, deleted_at
+                       parent_message_id, reactions_json, edited_at, deleted_at
                 FROM messages WHERE id = ?
                 """,
                 (message_id,),
@@ -1173,7 +1239,7 @@ class ChatStore:
             row = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, edited_at, deleted_at
+                       parent_message_id, reactions_json, edited_at, deleted_at
                 FROM messages WHERE room_id = ? AND id = ?
                 """,
                 (room_id, message_id),
@@ -1185,8 +1251,9 @@ class ChatStore:
             if row["deleted_at"] is not None:
                 return self._message_from_row(row), False
             deleted_at = datetime.now(timezone.utc)
+            connection.execute("DELETE FROM message_reactions WHERE message_id = ?", (message_id,))
             connection.execute(
-                "UPDATE messages SET content = '', deleted_at = ? WHERE id = ?",
+                "UPDATE messages SET content = '', reactions_json = '[]', deleted_at = ? WHERE id = ?",
                 (deleted_at.isoformat(), message_id),
             )
             self._insert_audit(
@@ -1199,7 +1266,7 @@ class ChatStore:
             row = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, edited_at, deleted_at
+                       parent_message_id, reactions_json, edited_at, deleted_at
                 FROM messages WHERE id = ?
                 """,
                 (message_id,),
@@ -1215,6 +1282,116 @@ class ChatStore:
                 data={"actor": actor, "message": message.model_dump(mode="json")},
             )
         return message, True
+
+    def _set_message_reaction_sync(
+        self,
+        room_id: str,
+        message_id: str,
+        reactor: str,
+        key: str,
+        present: bool,
+        allow_frozen: bool,
+        member_subject: str | None,
+    ) -> ReactionMutation:
+        now = datetime.now(timezone.utc)
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            room = connection.execute("SELECT archived_at, frozen_at FROM rooms WHERE id = ?", (room_id,)).fetchone()
+            if room is None:
+                raise RoomNotFoundError(room_id)
+            if room["archived_at"] is not None:
+                raise RoomArchivedError(room_id)
+            if room["frozen_at"] is not None and not allow_frozen:
+                raise RoomFrozenError(room_id)
+            self._enforce_member_write_sync(connection, room_id, member_subject)
+            row = connection.execute(
+                """
+                SELECT id, room_id, sender, content, created_at, client_message_id,
+                       parent_message_id, reactions_json, edited_at, deleted_at
+                FROM messages WHERE room_id = ? AND id = ?
+                """,
+                (room_id, message_id),
+            ).fetchone()
+            if row is None:
+                raise MessageNotFoundError(message_id)
+            if row["deleted_at"] is not None:
+                raise MessageDeletedError(message_id)
+
+            existing = connection.execute(
+                "SELECT 1 FROM message_reactions WHERE message_id = ? AND reactor = ? AND reaction_key = ?",
+                (message_id, reactor, key),
+            ).fetchone()
+            changed = False
+            if present and existing is None:
+                key_exists = connection.execute(
+                    "SELECT 1 FROM message_reactions WHERE message_id = ? AND reaction_key = ? LIMIT 1",
+                    (message_id, key),
+                ).fetchone()
+                if key_exists is None:
+                    distinct_keys = connection.execute(
+                        "SELECT COUNT(DISTINCT reaction_key) FROM message_reactions WHERE message_id = ?",
+                        (message_id,),
+                    ).fetchone()[0]
+                    if distinct_keys >= 20:
+                        raise ReactionCapacityError(message_id)
+                connection.execute(
+                    """
+                    INSERT INTO message_reactions (message_id, room_id, reactor, reaction_key, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (message_id, room_id, reactor, key, now.isoformat()),
+                )
+                changed = True
+            elif not present and existing is not None:
+                connection.execute(
+                    "DELETE FROM message_reactions WHERE message_id = ? AND reactor = ? AND reaction_key = ?",
+                    (message_id, reactor, key),
+                )
+                changed = True
+
+            if changed:
+                summaries = [
+                    ReactionSummary(key=summary["reaction_key"], count=summary["reaction_count"])
+                    for summary in connection.execute(
+                        """
+                        SELECT reaction_key, COUNT(*) AS reaction_count
+                        FROM message_reactions WHERE message_id = ?
+                        GROUP BY reaction_key ORDER BY reaction_key
+                        """,
+                        (message_id,),
+                    ).fetchall()
+                ]
+                connection.execute(
+                    "UPDATE messages SET reactions_json = ? WHERE id = ?",
+                    (json.dumps([item.model_dump() for item in summaries], separators=(",", ":")), message_id),
+                )
+                row = connection.execute(
+                    """
+                    SELECT id, room_id, sender, content, created_at, client_message_id,
+                           parent_message_id, reactions_json, edited_at, deleted_at
+                    FROM messages WHERE id = ?
+                    """,
+                    (message_id,),
+                ).fetchone()
+
+            mutation = ReactionMutation(
+                message=self._message_from_row(row),
+                key=key,
+                reactor=reactor,
+                present=present,
+                changed=changed,
+                updated_at=now,
+            )
+            if changed:
+                self._insert_webhook(
+                    connection,
+                    event_type="message.reaction.updated",
+                    room_id=room_id,
+                    resource_id=message_id,
+                    occurred_at=now,
+                    data=mutation.model_dump(mode="json"),
+                )
+            return mutation
 
     def _set_member_moderation_sync(
         self,
@@ -1384,7 +1561,7 @@ class ChatStore:
                 rows = connection.execute(
                     """
                     SELECT id, room_id, sender, content, created_at, client_message_id,
-                           parent_message_id, edited_at, deleted_at
+                           parent_message_id, reactions_json, edited_at, deleted_at
                     FROM messages
                     WHERE room_id = ? AND (created_at < ? OR (created_at = ? AND id < ?))
                     ORDER BY created_at DESC, id DESC
@@ -1396,7 +1573,7 @@ class ChatStore:
                 rows = connection.execute(
                     """
                     SELECT id, room_id, sender, content, created_at, client_message_id,
-                           parent_message_id, edited_at, deleted_at
+                           parent_message_id, reactions_json, edited_at, deleted_at
                     FROM messages
                     WHERE room_id = ?
                     ORDER BY created_at DESC, id DESC
@@ -1445,7 +1622,7 @@ class ChatStore:
             rows = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, edited_at, deleted_at
+                       parent_message_id, reactions_json, edited_at, deleted_at
                 FROM messages
                 WHERE room_id = ? AND parent_message_id = ?
                   AND (? IS NULL OR created_at < ? OR (created_at = ? AND id < ?))
@@ -1492,7 +1669,7 @@ class ChatStore:
             rows = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, edited_at, deleted_at
+                       parent_message_id, reactions_json, edited_at, deleted_at
                 FROM messages
                 WHERE room_id = ?
                   AND deleted_at IS NULL
@@ -2006,6 +2183,7 @@ class ChatStore:
             created_at=datetime.fromisoformat(row["created_at"]),
             client_message_id=row["client_message_id"],
             parent_message_id=row["parent_message_id"],
+            reactions=[ReactionSummary.model_validate(item) for item in json.loads(row["reactions_json"])],
             edited_at=datetime.fromisoformat(row["edited_at"]) if row["edited_at"] else None,
             deleted_at=datetime.fromisoformat(row["deleted_at"]) if row["deleted_at"] else None,
         )

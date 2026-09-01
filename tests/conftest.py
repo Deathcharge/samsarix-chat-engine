@@ -75,6 +75,7 @@ async def _reset_postgres_test_database(conninfo: str) -> None:
         await connection.execute("DROP TABLE IF EXISTS public.samsarix_realtime_events")
         await connection.execute("DROP TABLE IF EXISTS public.samsarix_room_read_states")
         await connection.execute("DROP TABLE IF EXISTS public.samsarix_room_member_controls")
+        await connection.execute("DROP TABLE IF EXISTS public.samsarix_message_reactions")
         await connection.execute("DROP TABLE IF EXISTS public.samsarix_messages")
         await connection.execute("DROP TABLE IF EXISTS public.samsarix_rooms")
         await connection.execute("DROP TABLE IF EXISTS public.samsarix_audit_events")

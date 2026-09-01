@@ -21,6 +21,8 @@ from .models import (
     MemberModeration,
     MemberModerationUpdate,
     Message,
+    ReactionMutation,
+    ReactionSummary,
     ReadState,
     Room,
     RoomCreate,
@@ -38,6 +40,7 @@ from .store import (
     MessageNotFoundError,
     MessageOwnershipError,
     PendingWebhook,
+    ReactionCapacityError,
     ReadStateCapacityError,
     RetentionNotConfiguredError,
     RoomAlreadyExistsError,
@@ -459,7 +462,7 @@ class PostgresChatStore:
             )
             await connection.execute("SELECT pg_advisory_xact_lock(%s)", (POSTGRES_MESSAGE_CAP_LOCK_ID,))
             row = await self._lock_message(connection, room_id, message_id)
-            if row[8] is not None:
+            if row[9] is not None:
                 raise MessageDeletedError(message_id)
             if not is_admin and str(row[2]) != actor:
                 raise MessageOwnershipError(message_id)
@@ -513,8 +516,12 @@ class PostgresChatStore:
             row = await self._lock_message(connection, room_id, message_id)
             if not is_admin and str(row[2]) != actor:
                 raise MessageOwnershipError(message_id)
-            if row[8] is not None:
+            if row[9] is not None:
                 return _message_from_row(row), False
+            await connection.execute(
+                "DELETE FROM public.samsarix_message_reactions WHERE message_id = %s",
+                (message_id,),
+            )
             cursor = await connection.execute(
                 _DELETE_MESSAGE_SQL,
                 (message_id,),
@@ -545,6 +552,115 @@ class PostgresChatStore:
                 payload={"type": "message.deleted", "message": message.model_dump(mode="json")},
             )
         return message, True
+
+    async def set_message_reaction(
+        self,
+        *,
+        room_id: str,
+        message_id: str,
+        reactor: str,
+        key: str,
+        present: bool,
+        allow_frozen: bool,
+        member_subject: str | None = None,
+    ) -> ReactionMutation:
+        async with self.foundation.transaction() as connection:
+            await self._lock_writable_room(
+                connection,
+                room_id,
+                allow_frozen=allow_frozen,
+                member_subject=member_subject,
+            )
+            row = await self._lock_message(connection, room_id, message_id)
+            if row[9] is not None:
+                raise MessageDeletedError(message_id)
+            cursor = await connection.execute("SELECT clock_timestamp()")
+            now = _required_row(await cursor.fetchone(), "reaction timestamp")[0]
+            cursor = await connection.execute(
+                """
+                SELECT 1 FROM public.samsarix_message_reactions
+                WHERE message_id = %s AND reactor = %s AND reaction_key = %s
+                """,
+                (message_id, reactor, key),
+            )
+            existing = await cursor.fetchone()
+            changed = False
+            if present and existing is None:
+                cursor = await connection.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM public.samsarix_message_reactions
+                        WHERE message_id = %s AND reaction_key = %s
+                    ), COUNT(DISTINCT reaction_key)
+                    FROM public.samsarix_message_reactions WHERE message_id = %s
+                    """,
+                    (message_id, key, message_id),
+                )
+                capacity = _required_row(await cursor.fetchone(), "reaction capacity")
+                if not capacity[0] and int(capacity[1]) >= 20:
+                    raise ReactionCapacityError(message_id)
+                await connection.execute(
+                    """
+                    INSERT INTO public.samsarix_message_reactions (
+                        message_id, room_id, reactor, reaction_key, created_at
+                    ) VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (message_id, room_id, reactor, key, now),
+                )
+                changed = True
+            elif not present and existing is not None:
+                await connection.execute(
+                    """
+                    DELETE FROM public.samsarix_message_reactions
+                    WHERE message_id = %s AND reactor = %s AND reaction_key = %s
+                    """,
+                    (message_id, reactor, key),
+                )
+                changed = True
+
+            if changed:
+                cursor = await connection.execute(
+                    """
+                    SELECT reaction_key, COUNT(*)
+                    FROM public.samsarix_message_reactions WHERE message_id = %s
+                    GROUP BY reaction_key ORDER BY reaction_key
+                    """,
+                    (message_id,),
+                )
+                summaries = [ReactionSummary(key=str(item[0]), count=int(item[1])) for item in await cursor.fetchall()]
+                cursor = await connection.execute(
+                    f"""
+                    UPDATE public.samsarix_messages SET reaction_summaries = %s
+                    WHERE id = %s RETURNING {_MESSAGE_COLUMNS}
+                    """,  # noqa: S608 - internal constant
+                    (Jsonb([item.model_dump() for item in summaries]), message_id),
+                )
+                row = _required_row(await cursor.fetchone(), "reaction summary update")
+
+            mutation = ReactionMutation(
+                message=_message_from_row(row),
+                key=key,
+                reactor=reactor,
+                present=present,
+                changed=changed,
+                updated_at=now,
+            )
+            if changed:
+                await self._insert_webhook(
+                    connection,
+                    event_type="message.reaction.updated",
+                    room_id=room_id,
+                    resource_id=message_id,
+                    occurred_at=now,
+                    data=mutation.model_dump(mode="json"),
+                )
+                await self.foundation.append_event(
+                    connection,
+                    room_id=room_id,
+                    event_type="message.reaction.updated",
+                    payload={"type": "message.reaction.updated", **mutation.model_dump(mode="json")},
+                )
+            return mutation
 
     async def get_member_moderation(self, room_id: str, subject: str) -> MemberModeration | None:
         async with self.foundation.transaction() as connection:
@@ -1249,12 +1365,30 @@ class PostgresChatStore:
             await connection.execute(
                 """
                 UPDATE public.samsarix_realtime_events
-                SET payload = jsonb_set(
-                    payload,
-                    ARRAY['message', 'content'],
-                    to_jsonb(''::text),
-                    false
-                )
+                SET payload = CASE
+                    WHEN event_type = 'message.reaction.updated' THEN jsonb_set(
+                        jsonb_set(
+                            jsonb_set(
+                                payload,
+                                ARRAY['message', 'content'],
+                                to_jsonb(''::text),
+                                false
+                            ),
+                            ARRAY['message', 'reactions'],
+                            '[]'::jsonb,
+                            false
+                        ),
+                        ARRAY['reactor'],
+                        to_jsonb('[deleted]'::text),
+                        false
+                    )
+                    ELSE jsonb_set(
+                        payload,
+                        ARRAY['message', 'content'],
+                        to_jsonb(''::text),
+                        false
+                    )
+                END
                 WHERE room_id = %s
                   AND event_type LIKE 'message.%%'
                   AND payload #>> '{message,id}' = ANY(%s::text[])
@@ -1397,7 +1531,8 @@ class PostgresChatStore:
 
 
 _MESSAGE_COLUMNS = (
-    "id, room_id, sender, content, created_at, client_message_id, parent_message_id, edited_at, deleted_at"
+    "id, room_id, sender, content, created_at, client_message_id, parent_message_id, "
+    "reaction_summaries, edited_at, deleted_at"
 )
 _MESSAGE_SELECT = f"SELECT {_MESSAGE_COLUMNS} FROM public.samsarix_messages"  # noqa: S608 - internal constant
 _CREATE_MESSAGE_SQL = f"""
@@ -1414,7 +1549,7 @@ RETURNING {_MESSAGE_COLUMNS}
 """  # noqa: S608 - internal constant
 _DELETE_MESSAGE_SQL = f"""
 UPDATE public.samsarix_messages
-SET content = '', search_content = '', deleted_at = clock_timestamp()
+SET content = '', search_content = '', reaction_summaries = '[]'::jsonb, deleted_at = clock_timestamp()
 WHERE id = %s
 RETURNING {_MESSAGE_COLUMNS}
 """  # noqa: S608 - internal constant
@@ -1531,8 +1666,9 @@ def _message_from_row(row: tuple[Any, ...]) -> Message:
         created_at=row[4],
         client_message_id=str(row[5]) if row[5] is not None else None,
         parent_message_id=str(row[6]) if row[6] is not None else None,
-        edited_at=row[7],
-        deleted_at=row[8],
+        reactions=[ReactionSummary.model_validate(item) for item in row[7]],
+        edited_at=row[8],
+        deleted_at=row[9],
     )
 
 

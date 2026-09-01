@@ -14,6 +14,8 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 
 ### Added
 
+- Bounded durable message reactions across HTTP, SQLite, PostgreSQL, exports, signed webhooks, realtime delivery, and unpublished TypeScript SDK 0.6.0. Each actor can idempotently add/remove a validated key; messages expose sorted grouped counts, deleted messages discard reaction identity, and each message is capped at 20 distinct keys.
+- SQLite schema v7 and PostgreSQL schema v10 add actor-unique reaction rows plus transactionally maintained summaries. NDJSON room export advances to schema 4 for the `reactions` field.
 - One-depth threaded replies across HTTP, WebSocket, SQLite, PostgreSQL, exports, webhooks, and the TypeScript client. Messages expose nullable `parent_message_id`; authorized clients can page a top-level message's replies, and nested replies are rejected with `thread_depth_exceeded`.
 - Unpublished TypeScript SDK 0.5.0 with `listReplies()` and `RoomSession.sendReply()` helpers. Its incoming-message parent field remains optional so the client can consume released 0.12 events that predate threading.
 - SQLite schema v6 and PostgreSQL schema v9 add an indexed self-reference with `ON DELETE SET NULL`; count/age retention can therefore remove an old parent while retaining and promoting newer replies. NDJSON room export advances to schema 3 for the nullable parent field.

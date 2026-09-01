@@ -12,6 +12,7 @@ import type {
   MessageCreate,
   MessagePage,
   ReadState,
+  ReactionMutation,
   Room,
   RoomCreate,
   RoomSessionOptions,
@@ -187,6 +188,14 @@ export class SamsarixChatClient {
     );
   }
 
+  async addReaction(roomId: string, messageId: string, key: string, reactor?: string): Promise<ReactionMutation> {
+    return this.mutateReaction("PUT", roomId, messageId, key, reactor);
+  }
+
+  async removeReaction(roomId: string, messageId: string, key: string, reactor?: string): Promise<ReactionMutation> {
+    return this.mutateReaction("DELETE", roomId, messageId, key, reactor);
+  }
+
   async updateMemberModeration(
     roomId: string,
     subject: string,
@@ -200,6 +209,25 @@ export class SamsarixChatClient {
 
   roomSession(roomId: string, options: RoomSessionOptions = {}): RoomSession {
     return new RoomSession(this, roomId, options);
+  }
+
+  private async mutateReaction(
+    method: "PUT" | "DELETE",
+    roomId: string,
+    messageId: string,
+    key: string,
+    reactor?: string,
+  ): Promise<ReactionMutation> {
+    if (!/^[a-z0-9][a-z0-9_+\-]{0,29}$/.test(key)) {
+      throw new RangeError("reaction key must be 1-30 lowercase ASCII key characters");
+    }
+    if (reactor !== undefined && (reactor.trim().length === 0 || reactor.length > 64)) {
+      throw new RangeError("reactor must be between 1 and 64 non-blank characters");
+    }
+    return this.request<ReactionMutation>(
+      `/v1/rooms/${encodeURIComponent(roomId)}/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(key)}`,
+      { method, body: reactor === undefined ? {} : { reactor } },
+    );
   }
 
   private async request<T>(
