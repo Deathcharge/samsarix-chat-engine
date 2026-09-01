@@ -14,6 +14,9 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 
 ### Added
 
+- Shared room message pins across HTTP, SQLite, PostgreSQL, exports, metadata audit, optional signed webhooks, realtime relay, and unpublished TypeScript SDK 0.7.0. `room:read` lists newest pins; `room:read` plus the new least-privilege `room:pin` capability changes them without granting deployment administration.
+- Pin/unpin is idempotent and actor-bound. Messages expose nullable `pinned_at`/`pinned_by`; `message.pin.updated` carries the complete replacement message. Tombstones clear pin state, cancel or scrub webhook payloads, and redact pin actors from retained PostgreSQL events.
+- SQLite schema v8 and PostgreSQL schema v11 add indexed shared-pin metadata. NDJSON room export advances to schema 5 for the pin fields.
 - Bounded durable message reactions across HTTP, SQLite, PostgreSQL, exports, signed webhooks, realtime delivery, and unpublished TypeScript SDK 0.6.0. Each actor can idempotently add/remove a validated key; messages expose sorted grouped counts, deleted messages discard reaction identity, and each message is capped at 20 distinct keys.
 - SQLite schema v7 and PostgreSQL schema v10 add actor-unique reaction rows plus transactionally maintained summaries. NDJSON room export advances to schema 4 for the `reactions` field.
 - One-depth threaded replies across HTTP, WebSocket, SQLite, PostgreSQL, exports, webhooks, and the TypeScript client. Messages expose nullable `parent_message_id`; authorized clients can page a top-level message's replies, and nested replies are rejected with `thread_depth_exceeded`.

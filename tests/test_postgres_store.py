@@ -100,7 +100,7 @@ async def test_schema_v2_migrates_transactionally_and_widens_event_payloads(
     service = _store(clean_postgres_database)
     await service.initialize()
     try:
-        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 10
+        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 11
         assert await service.check_ready()
         assert await service.list_rooms() == []
         async with service.foundation.transaction() as connection:
@@ -195,7 +195,7 @@ async def test_schema_v6_backfills_matching_instance_generations(
     service = _store(clean_postgres_database)
     await service.initialize()
     try:
-        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 10
+        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 11
         async with service.foundation.transaction() as connection:
             cursor = await connection.execute(
                 """
@@ -240,7 +240,7 @@ async def test_schema_v8_adds_thread_parent_column_and_index(clean_postgres_data
     migrated = _store(clean_postgres_database)
     await migrated.initialize()
     try:
-        assert await migrated.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 10
+        assert await migrated.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 11
         async with migrated.foundation.transaction() as connection:
             cursor = await connection.execute(
                 """
@@ -274,7 +274,7 @@ async def test_schema_v9_adds_reaction_storage(clean_postgres_database: str) -> 
     migrated = _store(clean_postgres_database)
     await migrated.initialize()
     try:
-        assert await migrated.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 10
+        assert await migrated.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 11
         async with migrated.foundation.transaction() as connection:
             cursor = await connection.execute(
                 """
@@ -503,6 +503,89 @@ async def test_postgres_reactions_are_atomic_bounded_and_tombstone_safe(store: P
     assert scrubbed_reactions
     assert all(event.payload["reactor"] == "[deleted]" for event in scrubbed_reactions)
     assert all(event.payload["message"]["reactions"] == [] for event in scrubbed_reactions)
+
+
+@pytest.mark.asyncio
+async def test_postgres_pins_are_atomic_paginated_and_tombstone_safe(store: PostgresChatStore) -> None:
+    await store.foundation.register_instance("pin-observer", lease_seconds=30)
+    await store.create_room(RoomCreate(id="general", name="General"))
+    messages = []
+    for content in ("Runbook", "Decision", "Resolution"):
+        message, _ = await store.create_message(
+            room_id="general",
+            sender="author",
+            content=content,
+            client_message_id=None,
+            allow_frozen=False,
+            author_subject="author",
+        )
+        messages.append(message)
+
+    pinned_messages = []
+    for index, message in enumerate(messages):
+        mutation = await store.set_message_pin(
+            room_id="general",
+            message_id=message.id,
+            pinner=f"lead-{index}",
+            actor=f"lead-{index}",
+            pinned=True,
+            allow_frozen=False,
+            member_subject=f"lead-{index}",
+        )
+        assert mutation.changed and mutation.message.pinned_by == f"lead-{index}"
+        pinned_messages.append(mutation.message)
+    replay = await store.set_message_pin(
+        room_id="general",
+        message_id=messages[-1].id,
+        pinner="lead-2",
+        actor="lead-2",
+        pinned=True,
+        allow_frozen=False,
+        member_subject="lead-2",
+    )
+    assert not replay.changed
+
+    expected_ids = [
+        message.id
+        for message in sorted(
+            pinned_messages,
+            key=lambda item: (item.pinned_at, item.id),
+            reverse=True,
+        )
+    ]
+    first_page, cursor = await store.list_pinned_messages("general", limit=2)
+    assert [message.id for message in first_page] == expected_ids[:2]
+    assert cursor == expected_ids[1]
+    second_page, cursor = await store.list_pinned_messages("general", limit=2, before=cursor)
+    assert [message.id for message in second_page] == expected_ids[2:]
+    assert cursor is None
+
+    events = await store.foundation.read_events("pin-observer")
+    assert len([event for event in events if event.event_type == "message.pin.updated"]) == 3
+    deleted, changed = await store.delete_message(
+        room_id="general",
+        message_id=messages[0].id,
+        actor="author",
+        is_admin=False,
+        member_subject="author",
+    )
+    assert changed and deleted.pinned_at is None and deleted.pinned_by is None
+    with pytest.raises(MessageDeletedError):
+        await store.set_message_pin(
+            room_id="general",
+            message_id=messages[0].id,
+            pinner="lead-0",
+            actor="lead-0",
+            pinned=True,
+            allow_frozen=False,
+        )
+    scrubbed = await store.foundation.read_events("pin-observer")
+    pin_events = [event for event in scrubbed if event.event_type == "message.pin.updated"]
+    deleted_pin = next(event for event in pin_events if event.payload["message"]["id"] == messages[0].id)
+    assert deleted_pin.payload["pinner"] == "[deleted]"
+    assert deleted_pin.payload["message"]["content"] == ""
+    assert deleted_pin.payload["message"]["pinned_at"] is None
+    assert deleted_pin.payload["message"]["pinned_by"] is None
 
 
 @pytest.mark.asyncio

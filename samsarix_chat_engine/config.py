@@ -24,6 +24,7 @@ WEBHOOK_EVENT_TYPES = frozenset(
         "member.moderation.updated",
         "message.created",
         "message.deleted",
+        "message.pin.updated",
         "message.reaction.updated",
         "message.updated",
     }

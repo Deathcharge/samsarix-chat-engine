@@ -37,6 +37,10 @@ export interface ChatMessage {
   parent_message_id?: string | null;
   /** Present on servers with message reactions; released 0.12 servers omit it. */
   reactions?: ReactionSummary[];
+  /** Present on servers with shared room pins; released 0.12 servers omit it. */
+  pinned_at?: string | null;
+  /** Stable subject or operator-supplied actor that created the current pin. */
+  pinned_by?: string | null;
   edited_at: string | null;
   deleted_at: string | null;
 }
@@ -51,6 +55,14 @@ export interface ReactionMutation {
   key: string;
   reactor: string;
   present: boolean;
+  changed: boolean;
+  updated_at: string;
+}
+
+export interface PinMutation {
+  message: ChatMessage;
+  pinner: string;
+  pinned: boolean;
   changed: boolean;
   updated_at: string;
 }
@@ -122,6 +134,10 @@ export interface MessageReactionUpdatedEvent extends ReactionMutation {
   type: "message.reaction.updated";
 }
 
+export interface MessagePinUpdatedEvent extends PinMutation {
+  type: "message.pin.updated";
+}
+
 export interface PresenceEvent {
   type: "presence.joined" | "presence.left";
   username: string;
@@ -172,6 +188,7 @@ export type RoomEvent =
   | MessageCreatedEvent
   | MessageUpdatedEvent
   | MessageDeletedEvent
+  | MessagePinUpdatedEvent
   | MessageReactionUpdatedEvent
   | PresenceEvent
   | RoomStateEvent

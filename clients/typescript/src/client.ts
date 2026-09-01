@@ -11,6 +11,7 @@ import type {
   MemberModerationUpdate,
   MessageCreate,
   MessagePage,
+  PinMutation,
   ReadState,
   ReactionMutation,
   Room,
@@ -117,6 +118,18 @@ export class SamsarixChatClient {
     return this.request<MessagePage>(`/v1/rooms/${encodeURIComponent(roomId)}/messages?${query}`);
   }
 
+  async listPinnedMessages(
+    roomId: string,
+    options: { limit?: number; before?: string } = {},
+  ): Promise<MessagePage> {
+    const query = new URLSearchParams();
+    query.set("limit", String(boundedInteger(options.limit ?? 50, 1, 100, "limit")));
+    if (options.before !== undefined) {
+      query.set("before", options.before);
+    }
+    return this.request<MessagePage>(`/v1/rooms/${encodeURIComponent(roomId)}/messages/pins?${query}`);
+  }
+
   async listReplies(
     roomId: string,
     parentMessageId: string,
@@ -196,6 +209,14 @@ export class SamsarixChatClient {
     return this.mutateReaction("DELETE", roomId, messageId, key, reactor);
   }
 
+  async pinMessage(roomId: string, messageId: string, pinner?: string): Promise<PinMutation> {
+    return this.mutatePin("PUT", roomId, messageId, pinner);
+  }
+
+  async unpinMessage(roomId: string, messageId: string, pinner?: string): Promise<PinMutation> {
+    return this.mutatePin("DELETE", roomId, messageId, pinner);
+  }
+
   async updateMemberModeration(
     roomId: string,
     subject: string,
@@ -227,6 +248,21 @@ export class SamsarixChatClient {
     return this.request<ReactionMutation>(
       `/v1/rooms/${encodeURIComponent(roomId)}/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(key)}`,
       { method, body: reactor === undefined ? {} : { reactor } },
+    );
+  }
+
+  private async mutatePin(
+    method: "PUT" | "DELETE",
+    roomId: string,
+    messageId: string,
+    pinner?: string,
+  ): Promise<PinMutation> {
+    if (pinner !== undefined && (pinner.trim().length === 0 || pinner.length > 64)) {
+      throw new RangeError("pinner must be between 1 and 64 non-blank characters");
+    }
+    return this.request<PinMutation>(
+      `/v1/rooms/${encodeURIComponent(roomId)}/messages/${encodeURIComponent(messageId)}/pin`,
+      { method, body: pinner === undefined ? {} : { pinner } },
     );
   }
 

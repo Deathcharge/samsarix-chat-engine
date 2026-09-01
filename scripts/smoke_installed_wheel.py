@@ -217,6 +217,12 @@ def main() -> int:
                 "wheel-user",
                 "--room",
                 "wheel-room",
+                "--permission",
+                "room:read",
+                "--permission",
+                "room:write",
+                "--permission",
+                "room:pin",
                 "--expires-in",
                 "300",
             ],
@@ -240,6 +246,7 @@ def main() -> int:
                 "member.moderation.updated",
                 "message.created",
                 "message.deleted",
+                "message.pin.updated",
                 "message.reaction.updated",
                 "message.updated",
             ),
@@ -335,6 +342,16 @@ def main() -> int:
                 credential=("Authorization", f"Bearer {token}"),
                 body={},
             )
+            pin = _request(
+                base_url + f"/v1/rooms/wheel-room/messages/{reply['id']}/pin",
+                method="PUT",
+                credential=("Authorization", f"Bearer {token}"),
+                body={},
+            )
+            pins = _request(
+                base_url + "/v1/rooms/wheel-room/messages/pins",
+                credential=("Authorization", f"Bearer {token}"),
+            )
             websocket_sender = asyncio.run(_websocket_round_trip(base_url, token))
             if (
                 room["id"] != "wheel-room"
@@ -344,16 +361,18 @@ def main() -> int:
                 or reply["parent_message_id"] != message["id"]
                 or [item["id"] for item in replies["items"]] != [reply["id"]]
                 or reaction["message"]["reactions"] != [{"key": "ack", "count": 1}]
+                or pin["message"]["pinned_by"] != "wheel-user"
+                or [item["id"] for item in pins["items"]] != [reply["id"]]
             ):
                 raise RuntimeError("installed-wheel HTTP journey mismatch")
-            _wait_for_webhooks(base_url, operator_key, 5)
+            _wait_for_webhooks(base_url, operator_key, 6)
             edited = _request(
                 base_url + f"/v1/rooms/wheel-room/messages/{message['id']}",
                 method="PATCH",
                 credential=("Authorization", f"Bearer {token}"),
                 body={"content": "installed wheel edited"},
             )
-            _wait_for_webhooks(base_url, operator_key, 6)
+            _wait_for_webhooks(base_url, operator_key, 7)
             deleted_message = _request(
                 base_url + f"/v1/rooms/wheel-room/messages/{message['id']}",
                 method="DELETE",
@@ -395,7 +414,7 @@ def main() -> int:
                 raise RuntimeError("installed-wheel mute control mismatch")
             if cleared["muted_until"] is not None:
                 raise RuntimeError("installed-wheel clear-control mismatch")
-            _wait_for_webhooks(base_url, operator_key, 9)
+            _wait_for_webhooks(base_url, operator_key, 10)
             webhook_types = sorted(delivery["type"] for delivery in _WebhookReceiver.deliveries)
             if webhook_types != sorted(
                 [
@@ -405,6 +424,7 @@ def main() -> int:
                     "message.created",
                     "message.updated",
                     "message.deleted",
+                    "message.pin.updated",
                     "message.reaction.updated",
                     "member.moderation.updated",
                     "member.moderation.updated",
@@ -417,11 +437,12 @@ def main() -> int:
             )
             export_lines = [json.loads(line) for line in exported.splitlines()]
             if (
-                export_lines[0]["schema_version"] != 4
+                export_lines[0]["schema_version"] != 5
                 or export_lines[1]["message"]["content"] != ""
                 or export_lines[1]["message"]["deleted_at"] is None
                 or export_lines[3]["message"]["parent_message_id"] != message["id"]
                 or export_lines[3]["message"]["reactions"] != [{"key": "ack", "count": 1}]
+                or export_lines[3]["message"]["pinned_by"] != "wheel-user"
             ):
                 raise RuntimeError("installed-wheel export journey mismatch")
             backup = Path(temporary) / "smoke-backup.db"
@@ -449,7 +470,7 @@ def main() -> int:
             if not database.is_file() or database.stat().st_size == 0:
                 raise RuntimeError("installed-wheel database was not persisted")
             print(
-                f"http=ok search=ok threads=ok reactions=ok websocket=ok read_state=ok typing=ok controls=ok "
+                f"http=ok search=ok threads=ok reactions=ok pins=ok websocket=ok read_state=ok typing=ok controls=ok "
                 f"webhook=ok export=ok "
                 f"lifecycle=ok backup=ok "
                 f"sender={websocket_sender} history={len(history['items'])}"

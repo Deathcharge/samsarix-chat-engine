@@ -3,7 +3,7 @@
 Version 0.12 supports two credential classes with deliberately different jobs:
 
 - `SAMSARIX_CHAT_API_KEY` is the deployment-wide operator credential. It can create and list rooms, inspect process statistics, and access every room. Keep it on trusted servers and administration workstations.
-- A signed access token represents one application user. It contains a subject, an expiry, allowed room IDs, and `room:read`, `room:write`, or `admin` permissions. Give ordinary clients only short-lived room tokens.
+- A signed access token represents one application user. It contains a subject, an expiry, allowed room IDs, and `room:read`, `room:write`, `room:pin`, or `admin` permissions. Give ordinary clients only short-lived room tokens.
 
 The engine does not implement signup, passwords, sessions, or an identity database. Your host application authenticates its user, decides which rooms they may access, and issues a token with `AccessTokenService` or a compatible JWT implementation. The engine can either share an HS256 signing secret or hold only a static public JWKS for verification.
 
@@ -113,6 +113,7 @@ The persisted message sender and WebSocket presence name are derived from the si
 | Get, advance, or clear personal read state | stable signed subject, room listed in token, plus `room:read` |
 | Connect WebSocket and receive events | room listed in token plus `room:read` |
 | Post or send typing state over WebSocket | room listed in token plus `room:write` |
+| Pin or unpin a shared message | room listed in token plus both `room:read` and `room:pin` |
 
 A read-only WebSocket remains connected when it attempts to publish and receives an `authorization_denied` event. Authorization is checked on every HTTP operation and every WebSocket publish command.
 

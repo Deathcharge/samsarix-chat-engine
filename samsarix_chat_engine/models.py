@@ -90,8 +90,18 @@ class Message(APIModel):
     client_message_id: str | None = None
     parent_message_id: str | None = None
     reactions: list[ReactionSummary] = Field(default_factory=list)
+    pinned_at: datetime | None = None
+    pinned_by: str | None = Field(default=None, min_length=1, max_length=64)
     edited_at: datetime | None = None
     deleted_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def require_complete_pin_metadata(self) -> Message:
+        if (self.pinned_at is None) != (self.pinned_by is None):
+            raise ValueError("pinned_at and pinned_by must both be set or both be null")
+        if self.deleted_at is not None and self.pinned_at is not None:
+            raise ValueError("deleted messages cannot remain pinned")
+        return self
 
 
 class MessageUpdate(_MessageContentPayload):
@@ -111,6 +121,22 @@ class ReactionMutation(APIModel):
     key: str = Field(min_length=1, max_length=30, pattern=REACTION_KEY_PATTERN)
     reactor: str = Field(min_length=1, max_length=64)
     present: bool
+    changed: bool
+    updated_at: datetime
+
+
+class PinActor(APIModel):
+    """Optional actor identity for operator/local pin mutations."""
+
+    pinner: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class PinMutation(APIModel):
+    """Result of an idempotent room-wide pin or unpin operation."""
+
+    message: Message
+    pinner: str = Field(min_length=1, max_length=64)
+    pinned: bool
     changed: bool
     updated_at: datetime
 

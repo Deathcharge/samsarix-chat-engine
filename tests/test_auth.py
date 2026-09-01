@@ -49,6 +49,10 @@ def test_token_round_trip_and_principal_permissions() -> None:
     assert not principal.allows("room:read", "other")
     assert not principal.is_admin
 
+    pinner = service.verify(_token(service, permissions=["room:read", "room:pin"]))
+    assert pinner.allows("room:pin", "alpha")
+    assert not pinner.allows("room:write", "alpha")
+
     admin = service.verify(_token(service, rooms=[], permissions=["admin"]))
     assert admin.is_admin
     assert admin.allows("room:write", "any-room")

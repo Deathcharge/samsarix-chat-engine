@@ -22,6 +22,7 @@ const EVENT_TYPES = new Set([
   "member.banned",
   "message.created",
   "message.deleted",
+  "message.pin.updated",
   "message.reaction.updated",
   "message.updated",
   "pong",
@@ -436,6 +437,15 @@ function isRoomEvent(value: unknown): value is RoomEvent {
     case "message.deleted":
     case "message.updated":
       return "message" in value && isChatMessage(value.message);
+    case "message.pin.updated":
+      return (
+        "message" in value &&
+        isChatMessage(value.message) &&
+        isStringField(value, "pinner") &&
+        typeof value.pinned === "boolean" &&
+        typeof value.changed === "boolean" &&
+        isStringField(value, "updated_at")
+      );
     case "message.reaction.updated":
       return (
         "message" in value &&
@@ -530,6 +540,8 @@ function isChatMessage(value: unknown): boolean {
             Number.isInteger(item.count) &&
             item.count > 0,
         ))) &&
+    (!("pinned_at" in value) || isNullableStringField(value, "pinned_at")) &&
+    (!("pinned_by" in value) || isNullableStringField(value, "pinned_by")) &&
     isNullableStringField(value, "edited_at") &&
     isNullableStringField(value, "deleted_at")
   );

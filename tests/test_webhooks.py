@@ -153,6 +153,82 @@ async def test_outbox_is_transactional_idempotent_and_covers_committed_events(tm
 
 
 @pytest.mark.asyncio
+async def test_pin_webhook_is_idempotent_and_tombstone_scrubbed(tmp_path: Path) -> None:
+    store = ChatStore(
+        tmp_path / "pin-outbox.db",
+        max_rooms=10,
+        max_stored_messages=100,
+        max_stored_messages_per_room=100,
+        webhook_events=("message.pin.updated",),
+        max_webhook_deliveries=10,
+    )
+    await store.initialize()
+    await store.create_room(RoomCreate(id="support", name="Support"))
+    message, _ = await store.create_message(
+        room_id="support",
+        sender="agent",
+        content="Resolution",
+        client_message_id=None,
+        allow_frozen=False,
+        author_subject="agent",
+    )
+    pinned = await store.set_message_pin(
+        room_id="support",
+        message_id=message.id,
+        pinner="agent",
+        actor="agent",
+        pinned=True,
+        allow_frozen=False,
+        member_subject="agent",
+    )
+    replay = await store.set_message_pin(
+        room_id="support",
+        message_id=message.id,
+        pinner="agent",
+        actor="agent",
+        pinned=True,
+        allow_frozen=False,
+        member_subject="agent",
+    )
+    assert pinned.changed and not replay.changed
+    pending = await store.next_webhook_delivery(datetime.now(timezone.utc) + timedelta(seconds=1))
+    assert pending is not None
+    envelope = json.loads(pending.payload)
+    assert envelope["type"] == "message.pin.updated"
+    assert envelope["data"]["pinner"] == "agent"
+    assert envelope["data"]["message"]["pinned_by"] == "agent"
+    await store.record_webhook_attempt(
+        pending.delivery.id,
+        attempted_at=datetime.now(timezone.utc),
+        status_code=204,
+        error=None,
+        next_attempt_at=None,
+        delivered=True,
+        failed=False,
+    )
+    await store.set_message_pin(
+        room_id="support",
+        message_id=message.id,
+        pinner="agent",
+        actor="agent",
+        pinned=False,
+        allow_frozen=False,
+        member_subject="agent",
+    )
+    await store.delete_message(
+        room_id="support",
+        message_id=message.id,
+        actor="agent",
+        is_admin=False,
+        member_subject="agent",
+    )
+    deliveries, _ = await store.list_webhook_deliveries(limit=10)
+    assert len(deliveries) == 1
+    assert deliveries[0].event_type == "message.pin.updated"
+    assert deliveries[0].replayable is False
+
+
+@pytest.mark.asyncio
 async def test_pending_outbox_cap_rolls_back_the_chat_write(tmp_path: Path) -> None:
     store = _store(tmp_path / "capacity.db", max_deliveries=1)
     await store.initialize()
