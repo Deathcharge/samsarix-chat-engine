@@ -35,6 +35,7 @@ _BROADCAST_EVENT_TYPES = frozenset(
         "message.deleted",
         "message.pin.updated",
         "message.reaction.updated",
+        "read.updated",
         "room.frozen",
         "room.unfrozen",
         "presence.joined",
@@ -55,6 +56,7 @@ class RealtimeTarget(Protocol):
         *,
         exclude_connection_id: str | None = None,
         event_sequence: int | None = None,
+        required_permission: str | None = None,
     ) -> None: ...
 
     async def close_room(
@@ -325,12 +327,13 @@ class PostgresRealtimeRelay:
             origin_connection_id = payload.pop("origin_connection_id", None)
             if event.event_type == "message.created":
                 payload.setdefault("idempotent_replay", False)
-            await self.target.broadcast(
-                event.room_id,
-                payload,
-                exclude_connection_id=(str(origin_connection_id) if origin_connection_id is not None else None),
-                event_sequence=event.sequence,
-            )
+            broadcast_kwargs: dict[str, Any] = {
+                "exclude_connection_id": str(origin_connection_id) if origin_connection_id is not None else None,
+                "event_sequence": event.sequence,
+            }
+            if event.event_type == "read.updated":
+                broadcast_kwargs["required_permission"] = "room:read-receipts"
+            await self.target.broadcast(event.room_id, payload, **broadcast_kwargs)
             return
         if event.event_type == "room.archived":
             await self.target.close_room(event.room_id, event.payload, event_sequence=event.sequence)

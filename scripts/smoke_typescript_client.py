@@ -116,6 +116,8 @@ def main() -> int:
                     "room:write",
                     "--permission",
                     "room:pin",
+                    "--permission",
+                    "room:read-receipts",
                     "--expires-in",
                     "300",
                 ],

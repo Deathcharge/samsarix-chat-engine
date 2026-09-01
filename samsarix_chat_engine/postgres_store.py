@@ -26,11 +26,13 @@ from .models import (
     PinMutation,
     ReactionMutation,
     ReactionSummary,
+    ReadReceipt,
     ReadState,
     ReadStateSummary,
     Room,
     RoomCreate,
     WebhookDelivery,
+    validate_read_receipt_query_subjects,
     validate_read_state_query_room_ids,
 )
 from .postgres import POSTGRES_SCHEMA_VERSION, PostgresFoundation, PostgresFoundationError
@@ -47,6 +49,7 @@ from .store import (
     PendingWebhook,
     ReactionCapacityError,
     ReadStateCapacityError,
+    ReadStateMutation,
     RetentionNotConfiguredError,
     RoomAlreadyExistsError,
     RoomArchivedError,
@@ -1090,7 +1093,38 @@ class PostgresChatStore:
             )
         return summaries
 
-    async def mark_read(self, room_id: str, subject: str, message_id: str | None) -> ReadState:
+    async def query_read_receipts(self, room_id: str, subjects: list[str]) -> list[ReadReceipt]:
+        """Return input-ordered read progress without enumerating room participants."""
+
+        subjects = validate_read_receipt_query_subjects(subjects)
+        async with self.foundation.transaction() as connection:
+            await _require_room(connection, room_id)
+            cursor = await connection.execute(
+                """
+                WITH requested(subject, ordinal) AS (
+                    SELECT subject, ordinal
+                    FROM unnest(%s::text[]) WITH ORDINALITY AS input(subject, ordinal)
+                )
+                SELECT requested.subject, read_state.message_id, read_state.message_created_at, read_state.updated_at
+                FROM requested
+                LEFT JOIN public.samsarix_room_read_states AS read_state
+                  ON read_state.room_id = %s AND read_state.subject = requested.subject
+                ORDER BY requested.ordinal
+                """,
+                (subjects, room_id),
+            )
+            rows = await cursor.fetchall()
+        return [
+            ReadReceipt(
+                subject=str(row[0]),
+                last_read_message_id=str(row[1]) if row[1] is not None else None,
+                last_read_message_at=row[2] if row[1] is not None else None,
+                last_read_at=row[3],
+            )
+            for row in rows
+        ]
+
+    async def mark_read(self, room_id: str, subject: str, message_id: str | None) -> ReadStateMutation:
         """Advance a room cursor using database ordering without allowing regression."""
 
         async with self.foundation.transaction() as connection:
@@ -1142,7 +1176,8 @@ class PostgresChatStore:
                     raise ReadStateCapacityError(room_id)
             existing_key = (existing[1], str(existing[0] or "")) if existing is not None else None
             candidate_key = (candidate_created_at, candidate_message_id or "")
-            if existing_key is None or candidate_key > existing_key:
+            changed = existing_key is None or candidate_key > existing_key
+            if changed:
                 await connection.execute(
                     """
                     INSERT INTO public.samsarix_room_read_states (
@@ -1155,9 +1190,32 @@ class PostgresChatStore:
                     """,
                     (room_id, subject, candidate_message_id, candidate_created_at, now),
                 )
-            return await _read_state_from_connection(connection, room_id, subject)
+            state = await _read_state_from_connection(connection, room_id, subject)
+            if changed:
+                receipt = ReadReceipt(
+                    subject=subject,
+                    last_read_message_id=state.last_read_message_id,
+                    last_read_message_at=candidate_created_at if state.last_read_message_id is not None else None,
+                    last_read_at=state.last_read_at,
+                )
+                await self.foundation.append_event(
+                    connection,
+                    room_id=room_id,
+                    event_type="read.updated",
+                    payload={"type": "read.updated", "receipt": receipt.model_dump(mode="json")},
+                )
+            else:
+                if existing is None:
+                    raise RuntimeError("unchanged read state requires an existing cursor")
+                receipt = ReadReceipt(
+                    subject=subject,
+                    last_read_message_id=state.last_read_message_id,
+                    last_read_message_at=existing[1] if state.last_read_message_id is not None else None,
+                    last_read_at=state.last_read_at,
+                )
+            return ReadStateMutation(state=state, receipt=receipt, changed=changed)
 
-    async def clear_read_state(self, room_id: str, subject: str) -> None:
+    async def clear_read_state(self, room_id: str, subject: str) -> bool:
         """Remove one subject's persisted cursor after verifying the room."""
 
         async with self.foundation.transaction() as connection:
@@ -1167,10 +1225,25 @@ class PostgresChatStore:
             )
             if await cursor.fetchone() is None:
                 raise RoomNotFoundError(room_id)
-            await connection.execute(
+            cursor = await connection.execute(
                 "DELETE FROM public.samsarix_room_read_states WHERE room_id = %s AND subject = %s",
                 (room_id, subject),
             )
+            changed = cursor.rowcount > 0
+            if changed:
+                receipt = ReadReceipt(
+                    subject=subject,
+                    last_read_message_id=None,
+                    last_read_message_at=None,
+                    last_read_at=None,
+                )
+                await self.foundation.append_event(
+                    connection,
+                    room_id=room_id,
+                    event_type="read.updated",
+                    payload={"type": "read.updated", "receipt": receipt.model_dump(mode="json")},
+                )
+            return changed
 
     async def list_audit_events(
         self,

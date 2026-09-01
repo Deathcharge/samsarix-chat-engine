@@ -11,7 +11,7 @@ X-API-Key: <secret>
 Authorization: Bearer <secret>
 ```
 
-When `SAMSARIX_CHAT_TOKEN_SIGNING_SECRET` or `SAMSARIX_CHAT_TOKEN_VERIFICATION_JWKS_FILE` is configured, application clients send a signed token as `Authorization: Bearer <token>`. Tokens bind a `sub` identity to room IDs and `room:read`, `room:write`, `room:pin`, or `admin`. Room creation/listing and `/v1/stats` require operator/admin access. Room lookup/history require read access; posting requires write access; shared pin changes require read plus pin access. Health and readiness remain unauthenticated. See [Identity and room authorization](AUTHORIZATION.md) for issuance, static-JWKS rotation, and the strict claim profile.
+When `SAMSARIX_CHAT_TOKEN_SIGNING_SECRET` or `SAMSARIX_CHAT_TOKEN_VERIFICATION_JWKS_FILE` is configured, application clients send a signed token as `Authorization: Bearer <token>`. Tokens bind a `sub` identity to room IDs and `room:read`, `room:write`, `room:pin`, `room:read-receipts`, or `admin`. Room creation/listing and `/v1/stats` require operator/admin access. Room lookup/history require read access; posting requires write access; shared pin changes require read plus pin access; participant receipt visibility requires read plus read-receipts access. Health and readiness remain unauthenticated. See [Identity and room authorization](AUTHORIZATION.md) for issuance, static-JWKS rotation, and the strict claim profile.
 
 ## HTTP endpoints
 
@@ -210,6 +210,28 @@ Send `{}` to advance through the room's latest current position. The operation i
 
 Deletes the signed caller's stored cursor and returns 204. Repeating the request is idempotent. It never affects another subject.
 
+### `POST /v1/rooms/{room_id}/read-receipts/query`
+
+Requires both `room:read` and `room:read-receipts`. The caller supplies 1–100 unique stable subjects; the engine preserves that order and returns null cursor fields for a supplied subject with no stored state:
+
+```json
+{"subjects":["customer-42","agent-7"]}
+```
+
+```json
+{
+  "room_id":"support-42",
+  "items":[
+    {"subject":"customer-42","last_read_message_id":"message-6","last_read_message_at":"2026-09-01T12:05:00Z","last_read_at":"2026-09-01T12:05:03Z"},
+    {"subject":"agent-7","last_read_message_id":null,"last_read_message_at":null,"last_read_at":null}
+  ]
+}
+```
+
+The message timestamp and ID form the exact server ordering cursor; `last_read_at` is when that cursor advanced. The endpoint does not enumerate membership or validate supplied subjects against a host directory. Empty, duplicate, padded, malformed, or oversized subject sets return `422 invalid_request`. Snapshot queries and read-state updates have independent per-caller budgets derived from `SAMSARIX_CHAT_READ_STATE_QUERIES_PER_MINUTE`; excess returns `429 read_receipt_query_rate_limit_exceeded` or `read_receipt_update_rate_limit_exceeded`.
+
+A real monotonic advance emits `read.updated` with the same receipt object; a real clear emits null cursor fields. Idempotent and regressive writes emit nothing. Only WebSocket principals with `room:read-receipts` (or `admin`) receive the event. Because delivery is at-most-once, query a fresh snapshot after every connect/reconnect and then apply live updates. See [Participant read receipts](READ_RECEIPTS.md) for privacy and retention boundaries.
+
 ### `PATCH /v1/rooms/{room_id}/members/{subject}/moderation`
 
 Admin-only. Applies relative durations of up to one year to a stable signed-token subject. Omit one field to preserve it; use zero to clear it.
@@ -330,6 +352,7 @@ Live events are:
 - `message.deleted`: contains the committed message tombstone.
 - `message.pin.updated`: contains the complete current `message`, action actor `pinner`, desired `pinned` state, `changed: true`, and `updated_at`. Replace the message by ID and refresh the pinned list if its ordering matters.
 - `message.reaction.updated`: contains the complete current `message`, reaction `key`, `reactor`, desired `present` state, `changed: true`, and `updated_at`. Replace the message by ID; do not increment a cached count independently.
+- `read.updated`: contains one participant receipt after a real cursor advance or clear and is sent only to sockets with `room:read-receipts` (or admin). Replace that subject's receipt; reload an explicit HTTP snapshot after reconnect.
 - `presence.joined` / `presence.left`: contains `username` and the room connection count when the event was produced; best effort only. Queued or delayed events can predate the count in `ready`, so their counts are not fresh measurements at receipt and are never an authorization input.
 - `typing.started`: contains `username` and `expires_in`; sent to other connections only when a user transitions to typing.
 - `typing.stopped`: contains `username`; sent after an explicit stop, successful publish, disconnect, or server timeout.

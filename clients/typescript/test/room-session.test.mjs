@@ -127,6 +127,19 @@ test("capable sessions wait for explicit snapshot synchronization and reconcile 
   assert.equal(session.timeline.snapshot.status, "synchronized");
   assert.equal(session.timeline.snapshot.generation, 1);
   assert.equal(session.timeline.snapshot.items[0].content, "buffered edit");
+  const received = [];
+  session.onEvent((event) => received.push(event));
+  sockets[0].receive({
+    type: "read.updated",
+    receipt: {
+      subject: "customer-9",
+      last_read_message_id: "message-1",
+      last_read_message_at: "2026-09-01T00:00:00Z",
+      last_read_at: "2026-09-01T00:01:00Z",
+    },
+  });
+  assert.equal(received.at(-1).type, "read.updated");
+  assert.equal(received.at(-1).receipt.subject, "customer-9");
   session.close();
   assert.equal(session.timeline.snapshot.status, "stale");
 });

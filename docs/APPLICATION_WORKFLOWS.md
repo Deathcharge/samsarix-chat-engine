@@ -15,6 +15,7 @@ const chat = new SamsarixChatClient({
 });
 
 const inbox = await chat.queryReadStates(["support-case-42", "support-case-43"]);
+const participants = await chat.queryReadReceipts("support-case-42", ["customer-42", "agent-7"]);
 const before = inbox.items.find((item) => item.room_id === "support-case-42");
 await chat.createMessage("support-case-42", {
   content: "Payment failed after the upgrade",
@@ -43,6 +44,9 @@ const session = chat.roomSession("support-case-42");
 const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 session.onEvent((event) => {
+  if (event.type === "read.updated") {
+    updateParticipantReceipt(event.receipt);
+  }
   if (event.type === "typing.started") {
     clearTimeout(typingTimers.get(event.username));
     showTyping(event.username);
@@ -61,6 +65,9 @@ session.onEvent((event) => {
   }
 });
 await session.connect();
+replaceParticipantReceipts(
+  (await chat.queryReadReceipts("support-case-42", ["customer-42", "agent-7"])).items,
+);
 session.setTyping(true);
 if (original) session.sendReply(original.id, "I am checking that transaction now", crypto.randomUUID());
 ```
@@ -68,6 +75,8 @@ if (original) session.sendReply(original.id, "I am checking that transaction now
 Threads are a presentation aid, not a separate authorization or delivery boundary. Only a non-deleted top-level message can receive new replies, nesting is rejected, and every reply still appears in chronological room history, search, exports, webhooks, and ordinary `message.created` events. Existing replies remain readable if their parent is later tombstoned. If physical count/age retention removes the parent, surviving replies are promoted by clearing their parent ID.
 
 Reactions are low-noise state signals, not replacement messages or workflow authority. Use a small product-owned vocabulary such as `ack`, `resolved`, `needs_attention`, or `helpful`; show the server's grouped counts and replace a message from each `message.reaction.updated` event. The host application still decides whether a reaction should transition a ticket or notify a human. Each actor/key pair is unique, distinct keys are capped at 20 per message, and tombstoning a message removes its reaction actors and counts.
+
+Participant receipts are an optional acknowledgement affordance, not proof of human attention. Supply the small visible participant set from the host's case assignment/membership model and grant `room:read-receipts` only to clients covered by the product's privacy policy. Query the snapshot after every connection or reconnection, then replace one subject from each `read.updated` event. Samsarix does not enumerate members or retain per-message receipt history.
 
 Pins are shared room curation, not private bookmarks or workflow authority. Give `room:pin` only to agents, teachers, moderators, or incident leads that may elevate an accepted answer, runbook, decision, guideline, or announcement for everyone with room read access. Pin mutations also require `room:read`, are metadata-audited, and emit `message.pin.updated`; refresh the newest-first pin list after reconnect or concurrent changes. Tombstoning clears the pin. The host application still decides whether a pinned resolution should close a case or trigger another side effect.
 

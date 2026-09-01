@@ -44,6 +44,7 @@ class ConnectionMetadata:
     room_id: str
     username: str
     subject: str | None
+    permissions: frozenset[str]
     connection_id: str | None
     operation_lock: asyncio.Lock
     broadcast_ready: bool
@@ -89,6 +90,7 @@ class ConnectionManager:
         username: str,
         subject: str | None = None,
         *,
+        permissions: frozenset[str] = frozenset(),
         connection_id: str | None = None,
         broadcast_ready: bool = True,
         after_sequence: int | None = None,
@@ -109,13 +111,14 @@ class ConnectionManager:
                 return False
             self._rooms[room_id].add(websocket)
             self._metadata[websocket] = ConnectionMetadata(
-                room_id,
-                username,
-                subject,
-                connection_id,
-                asyncio.Lock(),
-                broadcast_ready,
-                after_sequence,
+                room_id=room_id,
+                username=username,
+                subject=subject,
+                permissions=permissions,
+                connection_id=connection_id,
+                operation_lock=asyncio.Lock(),
+                broadcast_ready=broadcast_ready,
+                after_sequence=after_sequence,
             )
             return True
 
@@ -221,6 +224,7 @@ class ConnectionManager:
         exclude: WebSocket | None = None,
         exclude_connection_id: str | None = None,
         event_sequence: int | None = None,
+        required_permission: str | None = None,
     ) -> None:
         """Send to active peers; queue bounded snapshots for initializing peers."""
 
@@ -233,6 +237,12 @@ class ConnectionManager:
             for connection in tuple(self._rooms.get(room_id, ())):
                 metadata = self._metadata[connection]
                 if not _accepts_sequence(metadata, event_sequence):
+                    continue
+                if (
+                    required_permission is not None
+                    and required_permission not in metadata.permissions
+                    and "admin" not in metadata.permissions
+                ):
                     continue
                 if connection is exclude or (
                     exclude_connection_id is not None and metadata.connection_id == exclude_connection_id

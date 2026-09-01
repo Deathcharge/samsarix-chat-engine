@@ -83,6 +83,12 @@ assert.equal(markedRead.unread_count, 0);
 await client.clearReadState("sdk-room");
 assert.equal((await client.getReadState("sdk-room")).unread_count, 1);
 await client.markRead("sdk-room");
+const receiptSnapshot = await client.queryReadReceipts("sdk-room", ["missing-user", "sdk-user"]);
+assert.deepEqual(receiptSnapshot.items.map((receipt) => receipt.subject), ["missing-user", "sdk-user"]);
+assert.equal(receiptSnapshot.items[0].last_read_message_id, null);
+assert.ok(receiptSnapshot.items[1].last_read_message_id);
+assert.ok(receiptSnapshot.items[1].last_read_message_at);
+assert.ok(receiptSnapshot.items[1].last_read_at);
 
 const session = client.roomSession("sdk-room", {
   reconnect: { initialDelayMs: 10, maxDelayMs: 50, maxAttempts: 2, jitter: 0 },
@@ -95,6 +101,17 @@ assert.ok(events.some((event) => event.type === "history"));
 assert.ok(events.some((event) => event.type === "sync.completed"));
 assert.equal(session.timeline.snapshot.status, "synchronized");
 assert.equal(session.timeline.snapshot.generation, 1);
+
+const clearedReceiptEvent = nextEvent(session, "read.updated");
+await client.clearReadState("sdk-room");
+const clearedReceipt = (await clearedReceiptEvent).receipt;
+assert.equal(clearedReceipt.subject, "sdk-user");
+assert.equal(clearedReceipt.last_read_message_id, null);
+const advancedReceiptEvent = nextEvent(session, "read.updated");
+await client.markRead("sdk-room");
+const advancedReceipt = (await advancedReceiptEvent).receipt;
+assert.ok(advancedReceipt.last_read_message_id);
+assert.ok(advancedReceipt.last_read_message_at);
 
 const websocketCreated = nextEvent(session, "message.created");
 session.sendMessage("", "sdk-ws-1", { source: "sdk-smoke" }, [{
@@ -204,7 +221,7 @@ session.sendMessage("Live after reconnect", "sdk-resumed-1");
 assert.equal((await resumed).message.client_message_id, "sdk-resumed-1");
 session.close();
 
-console.log("typescript_client_http=ok metadata=ok attachments=ok mentions=ok inbox=ok threads=ok reactions=ok pins=ok search=ok websocket=ok activation=ok sync_timeline=ok reconnect_history=ok resumed_delivery=ok edit_delete=ok");
+console.log("typescript_client_http=ok metadata=ok attachments=ok mentions=ok inbox=ok read_receipts=ok threads=ok reactions=ok pins=ok search=ok websocket=ok activation=ok sync_timeline=ok reconnect_history=ok resumed_delivery=ok edit_delete=ok");
 
 function nextEvent(roomSession, type) {
   return new Promise((resolve, reject) => {
