@@ -2,7 +2,7 @@
 
 Samsarix Chat Engine is a small, local-first room chat service from Samsarix LLC for developers who need persisted messages and live WebSocket delivery without adopting a full collaboration platform. It runs as a standalone FastAPI service or as an embeddable ASGI application, stores data in SQLite, and has no dependency on Redis, an LLM provider, or any private package.
 
-Version 0.12.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, verification-only asymmetric authentication, accountable data lifecycle, practical conversation controls, typed TypeScript client, support workflow and retrieval, durable application webhooks, and hardened container deployment are implemented and tested. The development branch additionally includes unreleased one-depth threaded replies, bounded message reactions, shared room pins, application message metadata, and a guarded PostgreSQL multi-instance preview. The project is licensed under the standard Mozilla Public License 2.0.
+Version 0.12.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, verification-only asymmetric authentication, accountable data lifecycle, practical conversation controls, typed TypeScript client, support workflow and retrieval, durable application webhooks, and hardened container deployment are implemented and tested. The development branch additionally includes unreleased one-depth threaded replies, bounded message reactions, shared room pins, application message metadata, host-owned attachment references, and a guarded PostgreSQL multi-instance preview. The project is licensed under the standard Mozilla Public License 2.0.
 
 ## What works
 
@@ -26,12 +26,13 @@ Version 0.12.0 is an alpha release candidate. Its core single-instance journey, 
 - Create integrity-checked SQLite backups and restore them through the CLI.
 - Add bounded durable reactions for acknowledgement, resolution, and lightweight feedback without extra message noise.
 - Curate important answers, runbooks, decisions, and announcements with paginated shared message pins and a least-privilege `room:pin` capability.
+- Associate up to five host-owned file descriptors with a message without putting blobs, expiring signed URLs, or object-store credentials in the chat database.
 - Deliver selected committed message/moderation/reaction/pin events through a signed, durable, retrying webhook outbox.
 - Deploy one non-root process with a hardened Compose profile, mounted secret files, persistent SQLite volume, and readiness health check.
 - Bound message size, send rate, connections, room count, and retained history.
 - Check liveness at `/healthz`, storage readiness at `/readyz`, and OpenAPI docs at `/docs`.
 
-It deliberately does not provide user registration, password storage, attachments, end-to-end encryption, federation, multi-instance fan-out, or AI agents.
+It deliberately does not provide user registration, password storage, file upload/download hosting, end-to-end encryption, federation, supported multi-instance operation, or AI agents.
 
 ## Quick start
 
@@ -77,7 +78,7 @@ python examples/01_rest_chat.py
 python examples/02_websocket_chat.py
 ```
 
-See [Getting started](docs/GETTING_STARTED.md) for authentication and browser examples, [Conversation controls](docs/CONVERSATION_CONTROLS.md) for moderation workflows, and [Data lifecycle operations](docs/OPERATIONS.md) for export, deletion, retention, backup, and restore.
+See [Getting started](docs/GETTING_STARTED.md) for authentication and browser examples, [Host-owned attachment references](docs/ATTACHMENTS.md) for the safe external-file boundary, [Conversation controls](docs/CONVERSATION_CONTROLS.md) for moderation workflows, and [Data lifecycle operations](docs/OPERATIONS.md) for export, deletion, retention, backup, and restore.
 
 The development branch also contains a guarded, unreleased PostgreSQL multi-instance mode. It is fully wired through the application, and CI rehearses both a native logical dump into a fresh database and physical base-backup/WAL recovery to a named point with application-level verification. A pinned disposable kind gate executes the structurally verified [Kubernetes evaluation manifest](deploy/kubernetes/README.md): it proves two distinct StatefulSet identities, cross-replica HTTP/WebSocket delivery over TLS-verified PostgreSQL, and same-version Pod replacement with retained state. Five independent [measured workload profiles](docs/POSTGRES_LOAD.md) cover steady delivery, count/age/retained-gap fencing, and a bounded all-client reconnect storm during continued writes and lifecycle changes. Provider failover, external old-primary fencing/cutover, controlled-host capacity, sustained soak, and owner-environment acceptance remain open gates. See [PostgreSQL multi-instance preview](docs/POSTGRES_PREVIEW.md) and [PostgreSQL recovery contract](docs/POSTGRES_BACKUP.md); SQLite remains the default and the supported v0.12 deployment.
 
@@ -105,7 +106,7 @@ The profile publishes only to host loopback, runs as UID/GID 10001, mounts `/dat
 
 The framework-neutral [`@samsarix/chat-client`](clients/typescript/README.md) source ships in `clients/typescript`. It wraps authenticated HTTP operations and browser-safe first-message WebSocket authentication, emits generated declarations, refreshes credentials on reconnect, and applies bounded exponential backoff without runtime dependencies. The package is verified and packable but is not yet published to npm.
 
-Unpublished SDK 0.8.0 adds bounded message metadata to HTTP and WebSocket helpers alongside pins, reactions, and threaded replies, while retaining the 0.4 connection contract: it waits for initial history and a post-history activation reply before `connect()` resolves. Attempts have a configurable deadline; retry budgets reset only after a stable activated connection, not merely `ready`. See the [migration and recovery contract](clients/typescript/README.md#reconnect-behavior), including browser-legal close codes and caller-owned history reconciliation.
+Unpublished SDK 0.9.0 adds bounded host-owned attachment references to HTTP and WebSocket helpers alongside metadata, pins, reactions, and threaded replies, while retaining the 0.4 connection contract: it waits for initial history and a post-history activation reply before `connect()` resolves. Attempts have a configurable deadline; retry budgets reset only after a stable activated connection, not merely `ready`. See the [migration and recovery contract](clients/typescript/README.md#reconnect-behavior), including browser-legal close codes and caller-owned history reconciliation.
 
 ## WebSocket protocol
 
@@ -119,6 +120,12 @@ The server sends `ready` and `history`, then accepts these JSON commands:
 
 ```json
 {"type":"message","content":"Hello","client_message_id":"browser-42","metadata":{"ticket.id":"SUP-42"}}
+```
+
+An attachment-only message carries opaque host-owned descriptors, never file bytes or download credentials:
+
+```json
+{"type":"message","attachments":[{"id":"upload:SUP-42:trace","name":"trace.json","media_type":"application/json","size_bytes":256}]}
 ```
 
 To reply to a top-level message, add its ID:
@@ -218,6 +225,7 @@ HTTP / WebSocket clients
 - A message is persisted before `message.created` is broadcast. An HTTP success therefore means the local database committed it.
 - Reaction actor rows and grouped message counts commit atomically. Keys are sorted, capped at 20 distinct values per message, and removed with a tombstone.
 - Shared pin metadata, audit records, optional webhooks, and realtime events commit atomically; tombstones clear the pin and retained PostgreSQL events redact its actor.
+- Attachment descriptors commit with the message and follow history/export/realtime/webhook semantics; tombstones clear them and PostgreSQL scrubs retained message events. The engine never fetches or authorizes the referenced file.
 - Selected webhook rows commit in the same transaction as their message/moderation change, then deliver at least once in the background. Receivers deduplicate the stable delivery ID.
 - Signed users can persist a monotonic per-room read cursor and retrieve a current unread count that excludes their own and deleted messages.
 - Search is room-authorized, current-state Unicode-normalized substring matching over at most the configured retained messages for that room; it is not global, fuzzy, or externally indexed.
@@ -234,7 +242,7 @@ HTTP / WebSocket clients
 
 The default loopback bind avoids accidental network exposure. The API key is an all-room operator credential; do not ship it to browsers. Host applications authenticate users and issue short-lived room tokens whose subject becomes the server-enforced sender identity. Production deployments can give the engine only public verification keys so private signing authority remains in the host application. Configure TLS at a reverse proxy and exact allowed browser origins for any network deployment.
 
-Messages and display names are stored as plaintext in the configured SQLite file. The engine does not collect telemetry or put message bodies or API keys in its administrative audit trail. When explicitly configured, webhook payloads send selected message content and identifiers to the operator's endpoint and retain a payload copy in the bounded outbox. Backups, exports, webhook receivers, filesystem permissions, retention policy, user consent, and legal obligations remain the deployment owner's responsibility. Default operation has no metered API cost; its operating costs are compute, disk, backup, webhook requests, and network transfer only.
+Messages, display names, application metadata, and opaque attachment descriptors are stored as plaintext in the configured SQLite file. The engine does not collect telemetry or put message bodies or API keys in its administrative audit trail. When explicitly configured, webhook payloads send selected message content and identifiers to the operator's endpoint and retain a payload copy in the bounded outbox. File bytes, upload validation/scanning, short-lived download authorization, object cleanup, and storage/egress cost remain host responsibilities; do not store signed URLs as descriptors. Backups, exports, webhook receivers, filesystem permissions, retention policy, user consent, and legal obligations remain the deployment owner's responsibility. Default operation has no metered API cost; its operating costs are compute, disk, backup, webhook requests, and network transfer only.
 
 ## Development and release checks
 
@@ -257,7 +265,7 @@ Tagged releases use a tag-only, least-privilege workflow that builds the wheel a
 
 ## Limitations and project status
 
-This is a coherent single-instance MVP, not a hosted chat platform. The Compose profile supports exactly one SQLite process and replica. The container also includes the guarded PostgreSQL extra so the checked [Kubernetes evaluation manifest](deploy/kubernetes/README.md) can run reviewed development images. The [PostgreSQL preview](docs/POSTGRES_PREVIEW.md) wires the accepted [multi-instance architecture](docs/MULTI_INSTANCE_ARCHITECTURE.md) through real application instances, but remains explicitly unreleased until its remaining process-failure, failover, and deployment-acceptance gates pass. Attachments with explicit storage policy follow. Those are intentionally not presented as current supported capabilities.
+This is a coherent single-instance MVP, not a hosted chat platform. The Compose profile supports exactly one SQLite process and replica. The container also includes the guarded PostgreSQL extra so the checked [Kubernetes evaluation manifest](deploy/kubernetes/README.md) can run reviewed development images. The [PostgreSQL preview](docs/POSTGRES_PREVIEW.md) wires the accepted [multi-instance architecture](docs/MULTI_INSTANCE_ARCHITECTURE.md) through real application instances, but remains explicitly unreleased until its remaining process-failure, failover, and deployment-acceptance gates pass. Attachment descriptors are implemented; binary upload/download hosting and object lifecycle remain deliberately external.
 
 ## License
 

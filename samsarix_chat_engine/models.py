@@ -18,6 +18,11 @@ MESSAGE_METADATA_KEY_PATTERN = r"^[a-z][a-z0-9_.-]{0,63}$"
 MESSAGE_METADATA_MAX_KEYS = 20
 MESSAGE_METADATA_MAX_BYTES = 4_096
 MESSAGE_METADATA_MAX_SAFE_INTEGER = 9_007_199_254_740_991
+ATTACHMENT_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+ATTACHMENT_MEDIA_TYPE_PATTERN = r"^[a-z0-9][a-z0-9!#$&^_.+\-]{0,62}/[a-z0-9][a-z0-9!#$&^_.+\-]{0,62}$"
+ATTACHMENT_SHA256_PATTERN = r"^[a-f0-9]{64}$"
+MESSAGE_ATTACHMENTS_MAX_COUNT = 5
+MESSAGE_ATTACHMENTS_MAX_BYTES = 8_192
 
 MessageMetadataValue = str | int | float | bool | None
 MessageMetadata = dict[str, MessageMetadataValue]
@@ -70,6 +75,43 @@ class APIModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+class AttachmentReference(APIModel):
+    """A bounded opaque reference to one host-application-owned file."""
+
+    id: str = Field(min_length=1, max_length=128, pattern=ATTACHMENT_ID_PATTERN)
+    name: str = Field(min_length=1, max_length=255)
+    media_type: str = Field(min_length=3, max_length=127, pattern=ATTACHMENT_MEDIA_TYPE_PATTERN)
+    size_bytes: int = Field(ge=0, le=MESSAGE_METADATA_MAX_SAFE_INTEGER)
+    sha256: str | None = Field(default=None, pattern=ATTACHMENT_SHA256_PATTERN)
+
+    @field_validator("name")
+    @classmethod
+    def reject_control_characters(cls, value: str) -> str:
+        if any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError("attachment names must not contain control characters")
+        return value
+
+
+def validate_attachment_references(value: list[AttachmentReference]) -> list[AttachmentReference]:
+    """Return ordered attachment references after enforcing their aggregate bounds."""
+
+    if len(value) > MESSAGE_ATTACHMENTS_MAX_COUNT:
+        raise ValueError(f"attachments must contain at most {MESSAGE_ATTACHMENTS_MAX_COUNT} items")
+    identifiers = [attachment.id for attachment in value]
+    if len(identifiers) != len(set(identifiers)):
+        raise ValueError("attachment IDs must be unique within a message")
+    encoded = json.dumps(
+        [attachment.model_dump(mode="json") for attachment in value],
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(encoded) > MESSAGE_ATTACHMENTS_MAX_BYTES:
+        raise ValueError(f"attachments must not exceed {MESSAGE_ATTACHMENTS_MAX_BYTES} UTF-8 JSON bytes")
+    return value
+
+
 class _MessageContentPayload(APIModel):
     """Shared message-content validation for every write transport."""
 
@@ -115,15 +157,24 @@ class RoomUpdate(APIModel):
         return self
 
 
-class MessageCreate(_MessageContentPayload):
+class MessageCreate(APIModel):
     """Payload for posting a message over HTTP."""
 
+    content: str = Field(default="", max_length=100_000)
     sender: str | None = Field(default=None, min_length=1, max_length=64)
     client_message_id: str | None = Field(default=None, min_length=1, max_length=128)
     parent_message_id: str | None = Field(default=None, min_length=1, max_length=128)
     metadata: MessageMetadata = Field(default_factory=dict)
+    attachments: list[AttachmentReference] = Field(default_factory=list)
 
     _validate_metadata = field_validator("metadata")(validate_message_metadata)
+    _validate_attachments = field_validator("attachments")(validate_attachment_references)
+
+    @model_validator(mode="after")
+    def require_content_or_attachment(self) -> MessageCreate:
+        if not self.content.strip() and not self.attachments:
+            raise ValueError("content or at least one attachment is required")
+        return self
 
 
 class ReactionSummary(APIModel):
@@ -147,10 +198,12 @@ class Message(APIModel):
     pinned_at: datetime | None = None
     pinned_by: str | None = Field(default=None, min_length=1, max_length=64)
     metadata: MessageMetadata = Field(default_factory=dict)
+    attachments: list[AttachmentReference] = Field(default_factory=list)
     edited_at: datetime | None = None
     deleted_at: datetime | None = None
 
     _validate_metadata = field_validator("metadata")(validate_message_metadata)
+    _validate_attachments = field_validator("attachments")(validate_attachment_references)
 
     @model_validator(mode="after")
     def require_complete_pin_metadata(self) -> Message:
@@ -160,6 +213,8 @@ class Message(APIModel):
             raise ValueError("deleted messages cannot remain pinned")
         if self.deleted_at is not None and self.metadata:
             raise ValueError("deleted messages cannot retain application metadata")
+        if self.deleted_at is not None and self.attachments:
+            raise ValueError("deleted messages cannot retain attachment references")
         return self
 
 
@@ -299,15 +354,24 @@ class MemberModeration(APIModel):
     updated_at: datetime
 
 
-class WebSocketMessage(_MessageContentPayload):
+class WebSocketMessage(APIModel):
     """Client-to-server WebSocket message command."""
 
     type: Literal["message"]
+    content: str = Field(default="", max_length=100_000)
     client_message_id: str | None = Field(default=None, min_length=1, max_length=128)
     parent_message_id: str | None = Field(default=None, min_length=1, max_length=128)
     metadata: MessageMetadata = Field(default_factory=dict)
+    attachments: list[AttachmentReference] = Field(default_factory=list)
 
     _validate_metadata = field_validator("metadata")(validate_message_metadata)
+    _validate_attachments = field_validator("attachments")(validate_attachment_references)
+
+    @model_validator(mode="after")
+    def require_content_or_attachment(self) -> WebSocketMessage:
+        if not self.content.strip() and not self.attachments:
+            raise ValueError("content or at least one attachment is required")
+        return self
 
 
 class WebSocketPing(APIModel):

@@ -102,7 +102,7 @@ def test_message_failures_do_not_echo_private_input(client: TestClient, room: di
     )
     oversized_body = client.post(
         "/v1/rooms/general/messages",
-        content=b'{"padding":"' + b"x" * 17_000 + b'"}',
+        content=b'{"padding":"' + b"x" * 25_000 + b'"}',
         headers={"Content-Type": "application/json"},
     )
 

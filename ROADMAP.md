@@ -166,6 +166,17 @@ This milestone serves accepted support resolutions, classroom resources, inciden
 
 This milestone lets a host application associate messages with support tickets, classroom assignments, incident severity/runbooks, or safe action identifiers without adding an arbitrary nested document store. Metadata is untrusted display/integration data and never grants access, changes server routing, injects HTML, or names executable UI components.
 
+## v0.18 — host-owned attachment references
+
+- [x] add up to five ordered opaque file descriptors to HTTP and WebSocket message creation;
+- [x] allow attachment-only messages while retaining the ordinary content limit when text is present;
+- [x] reject URLs, unknown fields, duplicate IDs, unsafe names/types/sizes/digests, and descriptors over an 8192-byte aggregate bound;
+- [x] persist descriptors through SQLite, PostgreSQL, history, replies, search, pins, export, realtime and selected webhooks;
+- [x] preserve references through content/metadata edits and clear them from tombstones, retained PostgreSQL events and terminal webhook bodies;
+- [x] expose client-side validation through unpublished TypeScript SDK 0.9.0 and document the host upload/download/lifecycle boundary.
+
+This milestone serves support evidence, classroom resources and incident artifacts without making the chat engine a blob store. The host application authenticates uploads, validates/scans bytes, owns quotas and object lifecycle, resolves opaque IDs, and issues fresh authorized downloads. Samsarix never stores a signed URL or fetches file content.
+
 ## Deliberate non-goals
 
 - no built-in password database, social graph, billing, or end-user frontend;

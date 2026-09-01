@@ -144,6 +144,14 @@ test("browser authentication, typed events, publish, ping, and close", async () 
 
   session.sendMessage("hello", "client-1", { "ticket.id": "SUP-42", priority: 2 });
   session.sendReply("parent-1", "answer", "reply-1", { action: "escalate" });
+  session.sendMessage("", "attachment-1", undefined, [
+    {
+      id: "upload:SUP-42:trace",
+      name: "trace.json",
+      media_type: "application/json",
+      size_bytes: 256,
+    },
+  ]);
   session.ping();
   session.setTyping(true);
   session.setTyping(false);
@@ -168,6 +176,20 @@ test("browser authentication, typed events, publish, ping, and close", async () 
       parent_message_id: "parent-1",
       client_message_id: "reply-1",
       metadata: { action: "escalate" },
+    },
+    {
+      type: "message",
+      content: "",
+      client_message_id: "attachment-1",
+      attachments: [
+        {
+          id: "upload:SUP-42:trace",
+          name: "trace.json",
+          media_type: "application/json",
+          size_bytes: 256,
+          sha256: null,
+        },
+      ],
     },
     { type: "ping" },
     { type: "typing", active: true },

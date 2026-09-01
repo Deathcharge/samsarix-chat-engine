@@ -587,7 +587,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     application.add_middleware(
         RequestBodyLimitMiddleware,
-        max_body_bytes=max(16_384, resolved.max_message_chars * 12 + 8_192),
+        max_body_bytes=max(24_576, resolved.max_message_chars * 12 + 20_480),
     )
 
     if resolved.allowed_origins:
@@ -764,7 +764,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         def export_lines() -> Iterator[str]:
             metadata = {
                 "type": "samsarix.room_export",
-                "schema_version": 6,
+                "schema_version": 7,
                 "exported_at": exported_at.isoformat(),
                 "room": room.model_dump(mode="json"),
             }
@@ -965,6 +965,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 sender=sender,
                 content=payload.content,
                 metadata=payload.metadata,
+                attachments=payload.attachments,
                 client_message_id=idempotency_key or payload.client_message_id,
                 parent_message_id=payload.parent_message_id,
                 allow_frozen=principal.is_admin,
@@ -1860,6 +1861,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         sender=username,
                         content=command.content,
                         metadata=command.metadata,
+                        attachments=command.attachments,
                         client_message_id=command.client_message_id,
                         parent_message_id=command.parent_message_id,
                         allow_frozen=principal.is_admin,

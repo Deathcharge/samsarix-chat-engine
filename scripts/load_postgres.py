@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import gc
 import inspect
 import json
 import math
@@ -186,9 +187,8 @@ class World:
         started = time.monotonic()
         self.sent[index, version] = started
         phase = self.phase
-        allowed_control_rejection = self.control_active and (
-            room == "load-0" or self.profile.scenario == "reconnect-storm"
-        )
+        affected_control_room = room == "load-0" or self.profile.scenario == "reconnect-storm"
+        control_active_at_start = self.control_active
         self.counts[f"http_{method}_attempts"] += 1
         try:
             response = await http.request(
@@ -205,7 +205,12 @@ class World:
         self.counts[f"http_status_{response.status_code}"] += 1
         if response.status_code != (201, 200, 204)[version]:
             error = response.json().get("error", {}).get("code")
-            if allowed_control_rejection and error in {"room_frozen", "room_archived"}:
+            # A request can enter immediately before the fault controller flips
+            # the room and receive its 409 immediately after. Treat a lifecycle
+            # rejection as expected when the request overlaps either edge of the
+            # intentional control window, but never excuse another room or code.
+            overlaps_control = control_active_at_start or self.control_active
+            if affected_control_room and overlaps_control and error in {"room_frozen", "room_archived"}:
                 self.counts["http_control_rejections"] += 1
             else:
                 self.counts["http_unexpected_rejections"] += 1
@@ -728,13 +733,30 @@ async def exercise(world: World, conninfo: str, observer: Any) -> None:
                 fault = asyncio.create_task(world.inject_fault(http, observer))
                 tasks.extend((sampler, fault))
                 try:
-                    await arrivals(
-                        p,
-                        lambda index, due: world.cycle(http, index, due),
-                        world.counts,
-                        lambda delay: world.measure("start_delay_ms", delay),
-                        record_drop=world.record_drop,
-                    )
+                    # A generational collection in this client process can pause
+                    # every coroutine long enough to impersonate a missed open-
+                    # arrival slot during the intentionally dense recovery burst.
+                    # The workload is bounded and CPython reference counting stays
+                    # active; restore the caller's GC state before reconciliation.
+                    collect_started = time.monotonic()
+                    gc.collect()
+                    world.fault["driver_gc_collect_before_arrivals_ms"] = (time.monotonic() - collect_started) * 1000
+                    driver_gc_enabled = gc.isenabled()
+                    if driver_gc_enabled:
+                        gc.disable()
+                    world.fault["driver_cyclic_gc_was_enabled"] = driver_gc_enabled
+                    world.fault["driver_cyclic_gc_disabled_during_arrivals"] = not gc.isenabled()
+                    try:
+                        await arrivals(
+                            p,
+                            lambda index, due: world.cycle(http, index, due),
+                            world.counts,
+                            lambda delay: world.measure("start_delay_ms", delay),
+                            record_drop=world.record_drop,
+                        )
+                    finally:
+                        if driver_gc_enabled:
+                            gc.enable()
                     await fault
                     require(not sampler.done(), "sampler_stopped_early")
                     require(not world.failures, "subscriber_failed")

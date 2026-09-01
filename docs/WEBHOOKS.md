@@ -53,6 +53,13 @@ The minified UTF-8 body has a stable envelope:
       "pinned_at": null,
       "pinned_by": null,
       "metadata": {"ticket.id":"SUP-42"},
+      "attachments": [{
+        "id": "support-upload-SUP-42-trace",
+        "name": "payment-trace.txt",
+        "media_type": "text/plain",
+        "size_bytes": 1842,
+        "sha256": null
+      }],
       "edited_at": null,
       "deleted_at": null
     }
@@ -60,9 +67,9 @@ The minified UTF-8 body has a stable envelope:
 }
 ```
 
-For a threaded reply, `data.message.parent_message_id` is the top-level message ID; top-level messages use null. Application `metadata` is the same untrusted bounded scalar object returned by history. `message.updated` and `message.deleted` add `data.actor`; the deleted message is the committed empty-content, metadata-free, reaction-free, unpinned tombstone. `message.reaction.updated` contains the complete current message plus `key`, `reactor`, `present`, `changed`, and `updated_at`. `message.pin.updated` contains the complete current message plus `pinner`, `pinned`, `changed`, and `updated_at`. Only real state changes enqueue either mutation event. `member.moderation.updated` contains `data.actor` plus `data.moderation` with the room, subject, nullable mute/ban expiries, and update time. Event selection happens before outbox insertion, so unselected events consume no delivery storage.
+For a threaded reply, `data.message.parent_message_id` is the top-level message ID; top-level messages use null. Application `metadata` is the same untrusted bounded scalar object returned by history. `attachments` contains the same bounded host-owned descriptors and never file bytes or a download URL. `message.updated` and `message.deleted` add `data.actor`; the deleted message is the committed empty-content, metadata-free, attachment-free, reaction-free, unpinned tombstone. `message.reaction.updated` contains the complete current message plus `key`, `reactor`, `present`, `changed`, and `updated_at`. `message.pin.updated` contains the complete current message plus `pinner`, `pinned`, `changed`, and `updated_at`. Only real state changes enqueue either mutation event. `member.moderation.updated` contains `data.actor` plus `data.moderation` with the room, subject, nullable mute/ban expiries, and update time. Event selection happens before outbox insertion, so unselected events consume no delivery storage.
 
-Webhook payloads contain message content and stable subject/display identifiers. Configure a destination only when that transfer fits the deployment's privacy policy, retention rules, and user disclosures. Payload copies remain in the bounded SQLite outbox until pruning or resource deletion; the operations API intentionally returns metadata only.
+Webhook payloads contain message content, attachment descriptors, and stable subject/display identifiers. Names, media types, sizes, and digests can themselves be sensitive even though no file bytes or access URLs are included. Configure a destination only when that transfer fits the deployment's privacy policy, retention rules, and user disclosures. Payload copies remain in the bounded SQLite outbox until pruning or resource deletion; the operations API intentionally returns metadata only.
 
 ## Verify before processing
 

@@ -285,6 +285,34 @@ def test_count_fault_limit_admits_its_population_before_injected_lag() -> None:
     assert large.effective["POSTGRES_RELAY_MAX_PENDING_EVENTS"] == "256"
 
 
+@pytest.mark.parametrize(
+    ("index", "expected_counter"),
+    [(0, "http_control_rejections"), (1, "http_unexpected_rejections")],
+)
+async def test_request_classifies_lifecycle_transition_race_only_in_affected_room(
+    index: int, expected_counter: str
+) -> None:
+    world = World(Profile(scenario="retained-gap"))
+    world.ports = [8000, 8001]
+
+    class Response:
+        status_code = 409
+
+        @staticmethod
+        def json() -> dict[str, Any]:
+            return {"error": {"code": "room_frozen"}}
+
+    class FaultTransitionHttp:
+        async def request(self, *_args: Any, **_kwargs: Any) -> Response:
+            world.control_active = True
+            return Response()
+
+    assert not await world.request(FaultTransitionHttp(), index, 0, None)  # type: ignore[arg-type]
+    assert world.counts[expected_counter] == 1
+    other = "http_unexpected_rejections" if expected_counter == "http_control_rejections" else "http_control_rejections"
+    assert world.counts[other] == 0
+
+
 def test_deleted_message_may_scrub_unread_prior_event_content_only() -> None:
     world = World(Profile())
     world.sent = {(0, version): 1 for version in range(3)}
