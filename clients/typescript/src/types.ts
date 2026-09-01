@@ -141,6 +141,8 @@ export interface ReadyEvent {
   username: string;
   active_connections: number;
   max_message_chars: number;
+  /** Optional protocol extensions advertised by the connected server. */
+  capabilities?: string[];
 }
 
 export interface HistoryEvent {
@@ -194,6 +196,13 @@ export interface PongEvent {
   type: "pong";
 }
 
+export interface SyncCompletedEvent {
+  type: "sync.completed";
+  strategy: "snapshot";
+  history_count: number;
+  next_before: string | null;
+}
+
 export interface TypingStartedEvent {
   type: "typing.started";
   username: string;
@@ -229,12 +238,33 @@ export type RoomEvent =
   | RoomStateEvent
   | MemberBannedEvent
   | PongEvent
+  | SyncCompletedEvent
   | TypingStartedEvent
   | TypingStoppedEvent
   | ErrorEvent
   | AuthRequiredEvent;
 
 export type ConnectionState = "idle" | "connecting" | "connected" | "reconnecting" | "closed";
+
+export type RoomTimelineStatus = "empty" | "synchronizing" | "synchronized" | "stale";
+
+export interface RoomTimelineSnapshot {
+  status: RoomTimelineStatus;
+  /** Increments after each successful initial connection or reconnect synchronization. */
+  generation: number;
+  /** The bounded newest history/live window, in chronological order. */
+  items: readonly ChatMessage[];
+  /** True after older messages were evicted to enforce the configured client-side limit. */
+  truncated: boolean;
+  /** Cursor for fetching messages older than the retained window. */
+  nextBefore: string | null;
+}
+
+export interface RoomTimelineOptions {
+  /** Maximum retained messages. Default 1000; allowed range 1-10000. */
+  maxMessages?: number;
+  onListenerError?: (error: unknown) => void;
+}
 
 export interface ReconnectOptions {
   enabled?: boolean;
@@ -248,8 +278,10 @@ export interface ReconnectOptions {
 
 export interface RoomSessionOptions {
   username?: string;
-  /** Deadline per attempt, including credentials, ready/history and activation pong. Default 10000 ms. */
+  /** Deadline per attempt, including credentials, ready/history and the activation reply. Default 10000 ms. */
   handshakeTimeoutMs?: number;
+  /** Maximum messages retained by the in-memory timeline. Default 1000; allowed range 1-10000. */
+  timelineMaxMessages?: number;
   reconnect?: ReconnectOptions;
   onListenerError?: (error: unknown) => void;
 }

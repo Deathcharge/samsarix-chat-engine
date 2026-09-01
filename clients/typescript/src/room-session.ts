@@ -5,6 +5,7 @@ import { isAttachmentReferences, normalizeAttachmentReferences } from "./attachm
 import { SamsarixConnectionError } from "./errors.js";
 import { isMessageMetadata, normalizeMessageMetadata } from "./metadata.js";
 import { isMentionedSubjects, normalizeMentionedSubjects } from "./mentions.js";
+import { RoomTimeline } from "./room-timeline.js";
 import type { SamsarixChatClient } from "./client.js";
 import type {
   AttachmentReference,
@@ -37,6 +38,7 @@ const EVENT_TYPES = new Set([
   "room.archived",
   "room.frozen",
   "room.unfrozen",
+  "sync.completed",
   "typing.started",
   "typing.stopped",
 ]);
@@ -55,6 +57,7 @@ interface ReconnectPolicy {
 
 export class RoomSession {
   readonly roomId: string;
+  readonly timeline: RoomTimeline;
   private readonly client: SamsarixChatClient;
   private readonly username?: string;
   private readonly reconnect: ReconnectPolicy;
@@ -75,6 +78,9 @@ export class RoomSession {
   private manuallyClosed = false;
   private currentState: ConnectionState = "idle";
   private maxMessageChars: number | undefined;
+  private supportsSnapshotSync = false;
+  private synchronizationHistoryCount = 0;
+  private synchronizationNextBefore: string | null = null;
 
   constructor(client: SamsarixChatClient, roomId: string, options: RoomSessionOptions) {
     if (roomId.length === 0) {
@@ -88,6 +94,10 @@ export class RoomSession {
     this.reconnect = reconnectPolicy(options.reconnect);
     this.handshakeTimeoutMs = boundedDuration(options.handshakeTimeoutMs ?? 10_000, "handshakeTimeoutMs");
     this.onListenerError = options.onListenerError ?? (() => undefined);
+    this.timeline = new RoomTimeline({
+      ...(options.timelineMaxMessages === undefined ? {} : { maxMessages: options.timelineMaxMessages }),
+      onListenerError: this.onListenerError,
+    });
   }
 
   get state(): ConnectionState {
@@ -123,6 +133,7 @@ export class RoomSession {
       throw new RangeError("close reason must not exceed 123 UTF-8 bytes");
     }
     this.manuallyClosed = true;
+    this.timeline.markStale();
     if (this.reconnectTimer !== undefined) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = undefined;
@@ -222,6 +233,9 @@ export class RoomSession {
     const generation = ++this.generation;
     this.phase = "opening";
     this.maxMessageChars = undefined;
+    this.supportsSnapshotSync = false;
+    this.synchronizationHistoryCount = 0;
+    this.synchronizationNextBefore = null;
     this.handshakeTimer = setTimeout(() => {
       this.failAttempt(generation, new SamsarixConnectionError("WebSocket handshake timed out", 4008), 4008);
     }, this.handshakeTimeoutMs);
@@ -287,6 +301,7 @@ export class RoomSession {
       return;
     }
     const event = parsed;
+    let timelineApplied = false;
     if (event.type === "auth.required") {
       if (this.phase !== "opening") {
         this.protocolError(generation, "Unexpected authentication challenge");
@@ -302,13 +317,25 @@ export class RoomSession {
       }
       this.phase = "ready";
       this.maxMessageChars = event.max_message_chars;
+      this.supportsSnapshotSync = event.capabilities?.includes("snapshot_sync_v1") ?? false;
     } else if (event.type === "history") {
       if (this.phase !== "ready") {
         this.protocolError(generation, "Unexpected history event");
         return;
       }
       this.phase = "history";
-    } else if (event.type === "pong" && this.phase === "history") {
+      this.synchronizationHistoryCount = event.items.length;
+      this.synchronizationNextBefore = event.next_before;
+    } else if ((event.type === "sync.completed" || event.type === "pong") && this.phase === "history") {
+      if (
+        event.type === "sync.completed" &&
+        (!this.supportsSnapshotSync ||
+          event.history_count !== this.synchronizationHistoryCount ||
+          event.next_before !== this.synchronizationNextBefore)
+      ) {
+        this.protocolError(generation, "Invalid synchronization boundary");
+        return;
+      }
       this.phase = "active";
       clearTimeout(this.handshakeTimer);
       this.handshakeTimer = undefined;
@@ -319,19 +346,24 @@ export class RoomSession {
           this.attempts = 0;
         }
       }, this.reconnect.stableConnectionMs);
+      this.timeline.apply(event);
+      timelineApplied = true;
+      if (!this.isCurrent(generation)) return;
       const resolve = this.resolveConnect;
       this.clearPending();
       resolve?.();
       this.setState("connected");
     }
+    if (!timelineApplied) this.timeline.apply(event);
     for (const listener of this.eventListeners) {
       if (!this.isCurrent(generation)) return;
       this.notifyListener(() => listener(event));
     }
     if (event.type === "history" && this.isCurrent(generation)) {
       // The server enters its receive loop only after flushing the initial
-      // history handoff. Its reply confirms that activation, not durable replay.
-      socket.send(JSON.stringify({ type: "ping" }));
+      // history handoff. New servers expose that boundary explicitly; ping is
+      // retained as the compatible activation probe for older servers.
+      socket.send(JSON.stringify({ type: this.supportsSnapshotSync ? "sync" : "ping" }));
     }
   }
 
@@ -361,6 +393,7 @@ export class RoomSession {
   private failAttempt(generation: number, error: SamsarixConnectionError, wireCode: number, retry = true): void {
     if (!this.isCurrent(generation)) return;
     const socket = this.detachAttempt();
+    this.timeline.markStale();
     this.rejectPending(error);
     this.scheduleReconnect(retry);
     closeTransport(socket, wireCode, "Client connection ended");
@@ -490,6 +523,12 @@ function isRoomEvent(value: unknown): value is RoomEvent {
       );
     case "pong":
       return true;
+    case "sync.completed":
+      return (
+        value.strategy === "snapshot" &&
+        isNonNegativeIntegerField(value, "history_count") &&
+        isNullableStringField(value, "next_before")
+      );
     case "presence.joined":
     case "presence.left":
       return isStringField(value, "username") && isNonNegativeIntegerField(value, "active_connections");
@@ -502,7 +541,9 @@ function isRoomEvent(value: unknown): value is RoomEvent {
         "max_message_chars" in value &&
         typeof value.max_message_chars === "number" &&
         Number.isInteger(value.max_message_chars) &&
-        value.max_message_chars > 0
+        value.max_message_chars > 0 &&
+        (!("capabilities" in value) ||
+          (Array.isArray(value.capabilities) && value.capabilities.every((capability) => typeof capability === "string")))
       );
     case "room.archived":
     case "room.frozen":

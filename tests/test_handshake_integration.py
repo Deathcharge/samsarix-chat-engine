@@ -57,10 +57,13 @@ def _exercise_snapshot_gap(settings, monkeypatch):
                 assert client.delete(f"/v1/rooms/room/messages/{message_id}", headers=headers).status_code == 204
                 assert dispatched.wait(5), "committed delete did not reach the pending socket"
                 client.portal.call(resume.set)
-                assert websocket.receive_json()["type"] == "ready"
+                ready = websocket.receive_json()
+                assert ready["type"] == "ready"
+                assert ready["capabilities"] == ["snapshot_sync_v1"]
                 initial = websocket.receive_json()
                 assert initial["type"] == "history"
                 assert initial["items"] == [original_message.json()]
+                websocket.send_json({"type": "sync"})
                 # The original create predates admission and is excluded. Only
                 # the three mutations committed during the pause can follow.
                 merged = {item["id"]: item for item in initial["items"]}
@@ -71,14 +74,18 @@ def _exercise_snapshot_gap(settings, monkeypatch):
                     merged[event["message"]["id"]] = event["message"]
                     seen.append(event["type"])
                 assert seen == ["message.created", "message.updated", "message.deleted"]
+                assert websocket.receive_json() == {
+                    "type": "sync.completed",
+                    "strategy": "snapshot",
+                    "history_count": 1,
+                    "next_before": None,
+                }
                 monkeypatch.setattr(store, "list_messages", history)
                 durable = client.get("/v1/rooms/room/messages", headers=headers).json()["items"]
                 assert merged == {item["id"]: item for item in durable}
                 assert merged[message_id]["content"] == ""
                 assert merged[message_id]["deleted_at"] is not None
                 assert merged[created.json()["id"]]["content"] == "during history"
-                websocket.send_json({"type": "ping"})
-                assert websocket.receive_json() == {"type": "pong"}
             assert connections._pending_bytes == 0
             assert connections.active_connections == 0
             if application.state.postgres_runtime is not None:

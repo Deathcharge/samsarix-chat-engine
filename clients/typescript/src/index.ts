@@ -5,4 +5,5 @@ export { SamsarixChatClient } from "./client.js";
 export type { SamsarixClientOptions } from "./client.js";
 export { SamsarixApiError, SamsarixConnectionError } from "./errors.js";
 export { RoomSession } from "./room-session.js";
+export { RoomTimeline } from "./room-timeline.js";
 export type * from "./types.js";

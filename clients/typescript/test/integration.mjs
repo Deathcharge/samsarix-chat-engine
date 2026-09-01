@@ -92,7 +92,9 @@ session.onEvent((event) => events.push(event));
 await session.connect();
 assert.equal(session.state, "connected");
 assert.ok(events.some((event) => event.type === "history"));
-assert.ok(events.some((event) => event.type === "pong"));
+assert.ok(events.some((event) => event.type === "sync.completed"));
+assert.equal(session.timeline.snapshot.status, "synchronized");
+assert.equal(session.timeline.snapshot.generation, 1);
 
 const websocketCreated = nextEvent(session, "message.created");
 session.sendMessage("", "sdk-ws-1", { source: "sdk-smoke" }, [{
@@ -178,6 +180,7 @@ await Promise.race([
   }),
 ]);
 assert.equal(session.state, "reconnecting");
+assert.equal(session.timeline.snapshot.status, "stale");
 const writer = new SamsarixChatClient({ baseUrl, credential: { token } });
 const offlineCreated = await writer.createMessage("sdk-room", { content: "Written during reconnect" });
 const offlineEdited = await writer.updateMessage("sdk-room", createdEvent.message.id, "Edited during reconnect");
@@ -189,15 +192,19 @@ const recovered = await recoveredHistory;
 await reconnected;
 assert.equal(sockets.length, 2);
 assert.equal(session.state, "connected");
+assert.equal(session.timeline.snapshot.status, "synchronized");
+assert.equal(session.timeline.snapshot.generation, 2);
 assert.deepEqual(recovered.items.find((message) => message.id === offlineCreated.id), offlineCreated);
 assert.deepEqual(recovered.items.find((message) => message.id === offlineEdited.id), offlineEdited);
 assert.ok(recovered.items.find((message) => message.id === created.id)?.deleted_at);
+assert.deepEqual(session.timeline.snapshot.items.find((message) => message.id === offlineCreated.id), offlineCreated);
+assert.deepEqual(session.timeline.snapshot.items.find((message) => message.id === offlineEdited.id), offlineEdited);
 const resumed = nextEvent(session, "message.created");
 session.sendMessage("Live after reconnect", "sdk-resumed-1");
 assert.equal((await resumed).message.client_message_id, "sdk-resumed-1");
 session.close();
 
-console.log("typescript_client_http=ok metadata=ok attachments=ok mentions=ok inbox=ok threads=ok reactions=ok pins=ok search=ok websocket=ok activation=ok reconnect_history=ok resumed_delivery=ok edit_delete=ok");
+console.log("typescript_client_http=ok metadata=ok attachments=ok mentions=ok inbox=ok threads=ok reactions=ok pins=ok search=ok websocket=ok activation=ok sync_timeline=ok reconnect_history=ok resumed_delivery=ok edit_delete=ok");
 
 function nextEvent(roomSession, type) {
   return new Promise((resolve, reject) => {

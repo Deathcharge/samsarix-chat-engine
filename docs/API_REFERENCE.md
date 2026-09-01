@@ -295,7 +295,9 @@ From successful registration until activation, room broadcasts are queued rather
 
 The application uses `ConnectionManager` defaults of **64 events and 262144 serialized UTF-8 JSON bytes per pending connection**, with an **8388608-byte aggregate budget**. Payloads in an activation send remain charged until that send finishes, even if the socket has detached. These are retained-payload bounds, not a claim about total process RSS or sustainable traffic capacity. Embedded callers can set `max_pending_events`, `max_pending_bytes`, and `max_total_pending_bytes` to positive integers. Normal active delivery does not use this queue.
 
-Activation has one deadline equal to `SAMSARIX_CHAT_WS_SEND_TIMEOUT`, including time waiting for its per-socket operation lock. New arrivals do not reset it. Queue overflow or failed/timed-out activation attempts close **1013**; activation cancellation attempts **1012**. Clients reconnect with backoff and reload history; they must not treat an interrupted initialization as a complete stream. Buffering adds no durable client cursor, end-of-catch-up marker, or exactly-once guarantee. Events after admission may still overlap the later history snapshot: merge messages by ID, apply edits/tombstones, and reload current state after reconnect. One measured PostgreSQL profile combines lifecycle changes, a paused/lag-fenced replica and a bounded reconnect storm; arbitrary outage timing, device networks and sustained capacity remain separate gates.
+Activation has one deadline equal to `SAMSARIX_CHAT_WS_SEND_TIMEOUT`, including time waiting for its per-socket operation lock. New arrivals do not reset it. Queue overflow or failed/timed-out activation attempts close **1013**; activation cancellation attempts **1012**. Clients reconnect with backoff and reload history; they must not treat an interrupted initialization as a complete stream. Events after admission may overlap the later history snapshot: replace the newest page from `history`, then upsert complete message objects from subsequent events by ID.
+
+The `ready` event advertises `snapshot_sync_v1`. A capable client sends `{"type":"sync"}` only after consuming `history`. The server cannot read that command until activation has flushed every event then queued on this process; it responds with `sync.completed`, echoing the snapshot item count and older-page cursor. Receiving the marker therefore completes the **local snapshot handoff**. It does not add a durable client cursor, replay missed ephemeral events, provide exactly-once delivery, or prove that a different PostgreSQL process has polled through the global event head. A failed connection before the marker leaves the snapshot incomplete. One measured PostgreSQL profile combines lifecycle changes, a paused/lag-fenced replica and a bounded reconnect storm; arbitrary outage timing, device networks and sustained capacity remain separate gates.
 
 After authentication and room validation, events begin with:
 
@@ -305,12 +307,20 @@ After authentication and room validation, events begin with:
   "room": {"id":"general","name":"General","description":"","created_at":"...","archived_at":null,"frozen_at":null},
   "username": "Andrew",
   "active_connections": 1,
-  "max_message_chars": 4000
+  "max_message_chars": 4000,
+  "capabilities": ["snapshot_sync_v1"]
 }
 ```
 
 ```json
 {"type":"history","items":[],"next_before":null}
+```
+
+After consuming history, capable clients request and receive:
+
+```json
+{"type":"sync"}
+{"type":"sync.completed","strategy":"snapshot","history_count":0,"next_before":null}
 ```
 
 Live events are:
@@ -324,6 +334,7 @@ Live events are:
 - `typing.started`: contains `username` and `expires_in`; sent to other connections only when a user transitions to typing.
 - `typing.stopped`: contains `username`; sent after an explicit stop, successful publish, disconnect, or server timeout.
 - `pong`: response to an application-level ping command.
+- `sync.completed`: response to a post-history `sync` command after the local initialization buffer has drained; `history_count` and `next_before` bind it to the preceding snapshot.
 - `error`: contains a stable `code` and human-readable `message`.
 - `room.archived`: final room metadata before the server closes the connection with 4409.
 - `room.frozen` / `room.unfrozen`: current room metadata; connections remain open.
@@ -344,6 +355,10 @@ Live events are:
 ```
 
 ```json
+{"type":"sync"}
+```
+
+```json
 {"type":"typing","active":true}
 ```
 
@@ -351,7 +366,7 @@ Every WebSocket publish and typing command checks `room:write` and the current r
 
 ## Delivery semantics
 
-Message create/update/delete events are emitted only after the configured storage transaction commits. Replies use the same events and carry `message.parent_message_id`; no separate thread event stream exists. In supported v0.12 SQLite mode, broadcast, presence, and typing are in-process and at-most-once. In the guarded v0.13 PostgreSQL preview, application events commit to an ordered database log and are relayed across instances; connection leases and expiring typing state also live in PostgreSQL. Delivery to each WebSocket remains at-most-once, and slow or failed clients are removed after the configured send timeout. Clients must honor `expires_in` even if a typing stop event is missed. Reconnecting clients recover current edits and tombstones from history and current unread state over HTTP rather than relying on missed events. They should reconnect with backoff, consume the initial history event, and use the HTTP message cursor endpoint for older messages or the replies endpoint for a selected thread.
+Message create/update/delete events are emitted only after the configured storage transaction commits. Replies use the same events and carry `message.parent_message_id`; no separate thread event stream exists. In supported v0.12 SQLite mode, broadcast, presence, and typing are in-process and at-most-once. In the guarded v0.13 PostgreSQL preview, application events commit to an ordered database log and are relayed across instances; connection leases and expiring typing state also live in PostgreSQL. Delivery to each WebSocket remains at-most-once, and slow or failed clients are removed after the configured send timeout. Clients must honor `expires_in` even if a typing stop event is missed. Reconnecting clients recover current edits and tombstones from the newest history snapshot and current unread state over HTTP rather than relying on missed events. They should reconnect with backoff, complete the advertised snapshot-sync handshake, and use the HTTP message cursor endpoint for older messages or the replies endpoint for a selected thread.
 
 When configured, selected application webhook rows commit atomically with message/moderation state and deliver later with at-least-once semantics. Retries and manual replay keep the same `webhook-id`; each attempt gets a new signed timestamp. Delivery can be duplicated or reordered, so receivers validate the Standard Webhooks signature/timestamp and durably deduplicate IDs before side effects. See [Reliable application webhooks](WEBHOOKS.md) for the exact envelope, verification procedure, retry schedule, rotation, network policy, and recovery runbook.
 

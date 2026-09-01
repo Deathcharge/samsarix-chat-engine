@@ -68,6 +68,7 @@ from .models import (
     WebSocketAuth,
     WebSocketMessage,
     WebSocketPing,
+    WebSocketSync,
     WebSocketTyping,
 )
 from .store import (
@@ -102,8 +103,8 @@ from .webhooks import WebhookDispatcher
 from .websocket_manager import ConnectionManager, _finish_connection_cleanup
 
 logger = logging.getLogger(__name__)
-_WS_COMMAND: TypeAdapter[WebSocketMessage | WebSocketPing | WebSocketTyping] = TypeAdapter(
-    WebSocketMessage | WebSocketPing | WebSocketTyping
+_WS_COMMAND: TypeAdapter[WebSocketMessage | WebSocketPing | WebSocketSync | WebSocketTyping] = TypeAdapter(
+    WebSocketMessage | WebSocketPing | WebSocketSync | WebSocketTyping
 )
 _WS_AUTH: TypeAdapter[WebSocketAuth] = TypeAdapter(WebSocketAuth)
 _API_KEY_SCHEME = APIKeyHeader(name="X-API-Key", scheme_name="OperatorKey", auto_error=False)
@@ -1657,6 +1658,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 username=username,
                 active_connections=active_connections,
                 max_message_chars=resolved.max_message_chars,
+                capabilities=["snapshot_sync_v1"],
             ),
         )
         if not ready_sent:
@@ -1800,7 +1802,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     invalid_commands += 1
                     await manager.send(
                         websocket,
-                        _event("error", code="invalid_command", message="Expected a message, ping, or typing command"),
+                        _event(
+                            "error",
+                            code="invalid_command",
+                            message="Expected a message, ping, sync, or typing command",
+                        ),
                     )
                     if invalid_commands >= 3:
                         await manager.close(websocket, code=1008, reason="Too many invalid commands")
@@ -1810,6 +1816,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 invalid_commands = 0
                 if isinstance(command, WebSocketPing):
                     await manager.send(websocket, _event("pong"))
+                    continue
+                if isinstance(command, WebSocketSync):
+                    await manager.send(
+                        websocket,
+                        _event(
+                            "sync.completed",
+                            strategy="snapshot",
+                            history_count=len(history),
+                            next_before=next_before,
+                        ),
+                    )
                     continue
                 if isinstance(command, WebSocketTyping):
                     if not principal.allows("room:write", room_id):

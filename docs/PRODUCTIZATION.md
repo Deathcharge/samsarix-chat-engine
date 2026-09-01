@@ -2,7 +2,19 @@
 
 Last updated: 2026-09-01
 
-## Current v0.20 engineering status
+## Current v0.21 engineering status
+
+The reconnect-synchronization slice starts from clean synchronized `main` at merged PR #64 (`937c424`) and its successful 19-job exact-main run: **748 Python tests with two platform skips and 90.28% coverage**, all **127 live PostgreSQL tests**, 64 SDK tests, dependency/package/container/Kubernetes/restore/PITR gates, and five bounded load/recovery profiles. No PR or issue was open at the new baseline.
+
+Current provider documentation treats reconnect recovery as an explicit lifecycle rather than assuming a socket resumes perfectly: Ably distinguishes discontinuity and recommends an authoritative history-before-subscribe handoff, Stream exposes recovered connection state, Sendbird documents local cache/background sync, and Twilio exposes synchronization completion. Samsarix now formalizes its already-buffered initialization boundary without copying a hosted provider's durable device cache.
+
+The server advertises `snapshot_sync_v1` in the backward-compatible optional `ready.capabilities` array. A capable client consumes `history`, sends `{"type":"sync"}`, and receives `sync.completed` only after this process has drained every event queued during admission and history initialization. The response echoes `history_count` and `next_before` so SDK 0.12.0 can reject a marker that does not bind to its preceding snapshot. Older clients ignore the added ready field and keep ping/pong; the new SDK falls back to that path when an older server advertises no capability.
+
+`RoomSession.timeline` keeps a bounded newest window in memory, marks it stale during loss, replaces it from every new history snapshot, then upserts complete create/edit/tombstone/reaction/pin message states before declaring the generation synchronized. It retains 1000 messages by default, accepts a validated 1-10000 host override, evicts oldest entries deterministically, and exposes `truncated` plus an advanced older-page cursor. Returned snapshots and incoming nested collections are cloned, and listener failures route through the existing error hook rather than breaking recovery. The helper does not persist an offline database, automatically load older pages, maintain pin ordering/read state, replay presence/typing, expose the internal PostgreSQL sequence, provide exactly-once delivery, or prove another replica has polled through the global head.
+
+Primary references checked on 2026-09-01: [Ably discontinuity recovery](https://ably.com/docs/chat/guides/handling-discontinuity), [Ably history-before-subscribe](https://ably.com/docs/chat/rooms/messages), [Stream connection recovery events](https://getstream.io/chat/docs/node/event-object/), [Sendbird JavaScript SDK overview](https://sendbird.com/docs/chat/sdk/v4/javascript/overview), [Sendbird SyncManager](https://sendbird.com/docs/syncmanager/sdk/v1/javascript/getting-started/about-syncmanager), and [Twilio client synchronization](https://www.twilio.com/docs/conversations-classic/initializing-conversations-sdk-clients). These references establish familiar recovery/integration shape, not demand, parity, or product-market fit.
+
+## Previous v0.20 engineering status
 
 The host-resolved mention slice starts from clean synchronized `main` at merged PR #63 (`c4b2cdc`). Its exact-main run finished **19/19 jobs successful** on unchanged-sha attempt 2: the first steady-load attempt correctly rejected nine concurrency-cap arrival drops during one bounded runner-pressure episode while every started write committed, persisted and converged; the rerun accepted all 3600/3600 cycles at 20 creates/second with zero drops, unknown outcomes, committed-without-ack writes or leaked leases. The merge also retained **734 Python tests with two skips and 90.21% coverage**, all **125 live PostgreSQL tests**, 63 SDK tests, package/container/Kubernetes/restore/PITR and five load/recovery gates.
 

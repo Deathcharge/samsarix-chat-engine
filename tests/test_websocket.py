@@ -16,6 +16,7 @@ def test_websocket_message_is_broadcast_and_recovered(client: TestClient, room: 
 
     assert ready["type"] == "ready"
     assert ready["room"]["id"] == "general"
+    assert ready["capabilities"] == ["snapshot_sync_v1"]
     assert history == {"type": "history", "items": [], "next_before": None}
     assert message["type"] == "message.created"
     assert message["message"]["content"] == "Hello room"
@@ -53,6 +54,13 @@ def test_websocket_ping_invalid_input_and_idempotent_replay(client: TestClient, 
     with client.websocket_connect("/v1/rooms/general/ws?username=Tester") as websocket:
         websocket.receive_json()
         websocket.receive_json()
+        websocket.send_json({"type": "sync"})
+        assert websocket.receive_json() == {
+            "type": "sync.completed",
+            "strategy": "snapshot",
+            "history_count": 0,
+            "next_before": None,
+        }
         websocket.send_json({"type": "ping"})
         assert websocket.receive_json() == {"type": "pong"}
         websocket.send_text("not json")
