@@ -31,6 +31,7 @@ test("REST methods authenticate, encode identifiers, and preserve idempotency", 
         content: "hello",
         created_at: "2026-08-01T00:00:00Z",
         client_message_id: "request-1",
+        parent_message_id: null,
         edited_at: null,
         deleted_at: null,
       });
@@ -151,6 +152,28 @@ test("message search encodes normalized queries and pagination", async () => {
   assert.equal(new URL(requests[2].url).searchParams.get("q"), "ß".repeat(100));
 });
 
+test("thread reply listing encodes parent identifiers and pagination", async () => {
+  const requests = [];
+  const page = { items: [], next_before: null };
+  const client = new SamsarixChatClient({
+    baseUrl: "https://chat.example",
+    credential: { token: "support-token" },
+    fetch: async (url, init) => {
+      requests.push({ url: String(url), init });
+      return jsonResponse(page);
+    },
+  });
+
+  assert.deepEqual(
+    await client.listReplies("support/eu", "parent/1", { limit: 25, before: "reply-9" }),
+    page,
+  );
+  const url = new URL(requests[0].url);
+  assert.equal(url.pathname, "/v1/rooms/support%2Feu/messages/parent%2F1/replies");
+  assert.equal(url.searchParams.get("limit"), "25");
+  assert.equal(url.searchParams.get("before"), "reply-9");
+});
+
 test("room exports preserve the streaming response for operator-controlled consumption", async () => {
   const requests = [];
   const client = new SamsarixChatClient({
@@ -158,7 +181,7 @@ test("room exports preserve the streaming response for operator-controlled consu
     credential: { apiKey: "operator-key" },
     fetch: async (url, init) => {
       requests.push({ url: String(url), init });
-      return new Response('{"type":"samsarix.room_export","schema_version":2}\n', {
+      return new Response('{"type":"samsarix.room_export","schema_version":3}\n', {
         headers: { "Content-Type": "application/x-ndjson" },
       });
     },
@@ -202,6 +225,7 @@ test("list limits and credential shapes fail before transport", async () => {
   });
   await assert.rejects(client.listRooms(101), RangeError);
   await assert.rejects(client.listMessages("general", { limit: 0 }), RangeError);
+  await assert.rejects(client.listReplies("general", "parent", { limit: 0 }), RangeError);
   await assert.rejects(client.searchMessages("general", " "), RangeError);
   await assert.rejects(client.searchMessages("general", "𝑎"), RangeError);
   await assert.rejects(client.searchMessages("general", "valid", { limit: 101 }), RangeError);

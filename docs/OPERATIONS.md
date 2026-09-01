@@ -15,7 +15,7 @@ curl --fail-with-body \
   http://127.0.0.1:8000/v1/rooms/general/export
 ```
 
-Line 1 has `type: samsarix.room_export`, `schema_version: 2`, an export timestamp, and room metadata. Each later line has `type: message` and one complete current message or tombstone. Export schema 2 adds room `frozen_at` and message `edited_at`/`deleted_at`; readers should reject unknown major schema values. The audit action is `room.export_requested`: it records that the export request was accepted, not that the client received every byte.
+Line 1 has `type: samsarix.room_export`, `schema_version: 3`, an export timestamp, and room metadata. Each later line has `type: message` and one complete current message or tombstone. Export schema 3 retains room `frozen_at` and message `edited_at`/`deleted_at` from schema 2 and adds nullable `parent_message_id`; readers should reject unknown major schema values. The audit action is `room.export_requested`: it records that the export request was accepted, not that the client received every byte.
 
 Exports contain plaintext message bodies and sender identifiers. Protect them like the database, transmit them over TLS, and delete working copies according to your policy.
 
@@ -54,7 +54,7 @@ curl --fail-with-body -X POST \
   http://127.0.0.1:8000/v1/admin/retention/run
 ```
 
-The response reports the UTC cutoff and deleted row count. Retention is permanent for the live database but does not rewrite backups. Count caps still apply independently.
+The response reports the UTC cutoff and deleted row count. Retention is permanent for the live database but does not rewrite backups. Count caps still apply independently. If retention removes an older thread parent while newer replies survive, those replies are retained with `parent_message_id: null` and become ordinary top-level messages; retention never cascades the parent's physical deletion into newer content.
 
 ## Review the administrative audit trail
 
@@ -111,6 +111,8 @@ Restoring replaces the live database state with the snapshot state. Messages, au
 ## Upgrade and rollback
 
 Opening an older supported database with v0.12 migrates it to schema version 5. The migration preserves existing rooms/messages, lifecycle metadata, moderation controls, read state, and audit records, then creates an empty webhook outbox. Upgrading from v0.9, v0.10, or v0.11 makes no schema change. Legacy and operator/local messages still have no authenticated author and therefore count as other-authored for signed-user unread state. The engine refuses a schema version newer than it understands.
+
+The unreleased threaded-replies development build advances SQLite to schema 6 by adding an indexed nullable self-reference with `ON DELETE SET NULL`. Existing messages remain top level. Take a verified backup before first opening a database with this build; released binaries that understand only schema 5 will refuse the upgraded database, so rollback requires restoring the matching pre-upgrade backup.
 
 Take a verified backup before upgrade. Releases before v0.9 do not understand schema 5. A v0.12-to-v0.11 rollback needs no database downgrade, but asymmetric JWKS authentication must be replaced with v0.11-compatible HS256 or operator-key configuration before restart. A v0.11-to-v0.10 rollback additionally translates `_FILE` secret settings to protected direct variables; v0.10-to-v0.9 removes `SAMSARIX_CHAT_SEARCHES_PER_MINUTE`. For a rollback to an earlier schema, restore the corresponding pre-upgrade backup. Removing webhook environment variables stops new outbox insertion and delivery but is not a database downgrade.
 

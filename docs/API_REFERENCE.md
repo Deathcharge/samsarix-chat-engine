@@ -51,7 +51,7 @@ Admin-only. Send `{"archived":true}` to make a room read-only and close active c
 
 ### `GET /v1/rooms/{room_id}/export`
 
-Admin-only. Streams `application/x-ndjson`: a `samsarix.room_export` metadata record with `schema_version: 2`, followed by one current `message` record or tombstone per line in chronological order. Schema 2 adds room freeze and message edit/delete timestamps. The response is an attachment and the operation records `room.export_requested`.
+Admin-only. Streams `application/x-ndjson`: a `samsarix.room_export` metadata record with `schema_version: 3`, followed by one current `message` record or tombstone per line in chronological order. Schema 3 retains room freeze and message edit/delete timestamps from schema 2 and adds nullable message `parent_message_id`. The response is an attachment and the operation records `room.export_requested`.
 
 ### `DELETE /v1/rooms/{room_id}`
 
@@ -65,11 +65,14 @@ Persists a message, broadcasts it to the room, and returns 201:
 {
   "sender": "Andrew",
   "content": "Hello",
-  "client_message_id": "client-generated-id"
+  "client_message_id": "client-generated-id",
+  "parent_message_id": null
 }
 ```
 
-`sender` is 1–64 characters for operator or local access. Token clients may omit it; the signed subject is persisted. A conflicting value returns `403 identity_mismatch`. `content` is nonblank and subject to `SAMSARIX_CHAT_MAX_MESSAGE_CHARS`. `client_message_id` is optional and at most 128 characters. `Idempotency-Key` can be used instead; if both are present, they must match. Replaying an ID returns the first persisted message with HTTP 200 and does not broadcast it again. Archived rooms reject new messages with `409 room_archived`; frozen rooms reject member writes with `409 room_frozen`; active controls return `403 room_muted` or `403 room_banned`.
+`sender` is 1–64 characters for operator or local access. Token clients may omit it; the signed subject is persisted. A conflicting value returns `403 identity_mismatch`. `content` is nonblank and subject to `SAMSARIX_CHAT_MAX_MESSAGE_CHARS`. `client_message_id` is optional and at most 128 characters. `Idempotency-Key` can be used instead; if both are present, they must match. Replaying an ID returns the first persisted message with HTTP 200 and does not broadcast it again.
+
+Set `parent_message_id` to a non-deleted top-level message in the same room to create a reply. Threads are exactly one level deep: replying to a reply returns `409 thread_depth_exceeded`; a deleted parent returns `409 parent_message_deleted`; an unknown or cross-room parent returns `404 parent_message_not_found`. Archived rooms reject new messages with `409 room_archived`; frozen rooms reject member writes with `409 room_frozen`; active controls return `403 room_muted` or `403 room_banned`.
 
 ### `PATCH /v1/rooms/{room_id}/messages/{message_id}`
 
@@ -94,7 +97,11 @@ Returns messages in chronological order:
 }
 ```
 
-Pages contain the newest matching messages. Message objects include nullable `edited_at` and `deleted_at`; a deleted message has empty `content`. When `next_before` is non-null, pass it as `before` to fetch the next older page. An unknown or cross-room cursor returns `400 invalid_cursor`.
+Pages contain the newest matching messages. Message objects include nullable `parent_message_id`, `edited_at`, and `deleted_at`; a deleted message has empty `content`. Top-level history intentionally includes replies in the same flat chronological stream for backward compatibility. When `next_before` is non-null, pass it as `before` to fetch the next older page. An unknown or cross-room cursor returns `400 invalid_cursor`.
+
+### `GET /v1/rooms/{room_id}/messages/{parent_message_id}/replies?limit=50&before={message_id}`
+
+Requires `room:read` and returns the normal chronological `MessagePage` shape containing only direct replies to one top-level message. The parent may be a tombstone so clients can still recover its surviving replies. Passing a reply as the parent returns `409 thread_depth_exceeded`; an unknown or cross-room parent returns `404 parent_message_not_found`. A cursor must identify a reply in this exact thread or the server returns `400 invalid_cursor`.
 
 ### `GET /v1/rooms/{room_id}/messages/search?q={query}&limit=50&before={message_id}`
 
@@ -260,6 +267,10 @@ Live events are:
 ```
 
 ```json
+{"type":"message","content":"Follow-up","parent_message_id":"top-level-message-id","client_message_id":"optional-id"}
+```
+
+```json
 {"type":"ping"}
 ```
 
@@ -271,7 +282,7 @@ Every WebSocket publish and typing command checks `room:write` and the current r
 
 ## Delivery semantics
 
-Message create/update/delete events are emitted only after the configured storage transaction commits. In supported v0.12 SQLite mode, broadcast, presence, and typing are in-process and at-most-once. In the guarded v0.13 PostgreSQL preview, application events commit to an ordered database log and are relayed across instances; connection leases and expiring typing state also live in PostgreSQL. Delivery to each WebSocket remains at-most-once, and slow or failed clients are removed after the configured send timeout. Clients must honor `expires_in` even if a typing stop event is missed. Reconnecting clients recover current edits and tombstones from history and current unread state over HTTP rather than relying on missed events. They should reconnect with backoff, consume the initial history event, and use the HTTP message cursor endpoint for older messages.
+Message create/update/delete events are emitted only after the configured storage transaction commits. Replies use the same events and carry `message.parent_message_id`; no separate thread event stream exists. In supported v0.12 SQLite mode, broadcast, presence, and typing are in-process and at-most-once. In the guarded v0.13 PostgreSQL preview, application events commit to an ordered database log and are relayed across instances; connection leases and expiring typing state also live in PostgreSQL. Delivery to each WebSocket remains at-most-once, and slow or failed clients are removed after the configured send timeout. Clients must honor `expires_in` even if a typing stop event is missed. Reconnecting clients recover current edits and tombstones from history and current unread state over HTTP rather than relying on missed events. They should reconnect with backoff, consume the initial history event, and use the HTTP message cursor endpoint for older messages or the replies endpoint for a selected thread.
 
 When configured, selected application webhook rows commit atomically with message/moderation state and deliver later with at-least-once semantics. Retries and manual replay keep the same `webhook-id`; each attempt gets a new signed timestamp. Delivery can be duplicated or reordered, so receivers validate the Standard Webhooks signature/timestamp and durably deduplicate IDs before side effects. See [Reliable application webhooks](WEBHOOKS.md) for the exact envelope, verification procedure, retry schedule, rotation, network policy, and recovery runbook.
 

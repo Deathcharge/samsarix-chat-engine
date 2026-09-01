@@ -46,6 +46,7 @@ from .store import (
     RoomFrozenError,
     RoomNotArchivedError,
     RoomNotFoundError,
+    ThreadDepthError,
     WebhookCapacityError,
     WebhookDeliveryNotFoundError,
     WebhookPayloadUnavailableError,
@@ -362,6 +363,7 @@ class PostgresChatStore:
         sender: str,
         content: str,
         client_message_id: str | None,
+        parent_message_id: str | None = None,
         allow_frozen: bool,
         member_subject: str | None = None,
         author_subject: str | None = None,
@@ -381,7 +383,25 @@ class PostgresChatStore:
                 existing = await cursor.fetchone()
                 if existing is not None:
                     return _message_from_row(existing), False
+            # Retention and message mutation take this lock before touching message rows.
+            # Keep the same order here so parent validation cannot deadlock with pruning.
             await connection.execute("SELECT pg_advisory_xact_lock(%s)", (POSTGRES_MESSAGE_CAP_LOCK_ID,))
+            if parent_message_id is not None:
+                cursor = await connection.execute(
+                    """
+                    SELECT parent_message_id, deleted_at
+                    FROM public.samsarix_messages
+                    WHERE room_id = %s AND id = %s FOR SHARE
+                    """,
+                    (room_id, parent_message_id),
+                )
+                parent = await cursor.fetchone()
+                if parent is None:
+                    raise MessageNotFoundError(parent_message_id)
+                if parent[1] is not None:
+                    raise MessageDeletedError(parent_message_id)
+                if parent[0] is not None:
+                    raise ThreadDepthError(parent_message_id)
             message_id = uuid.uuid4().hex
             cursor = await connection.execute(
                 _CREATE_MESSAGE_SQL,
@@ -393,11 +413,17 @@ class PostgresChatStore:
                     content,
                     _normalize_search_text(content),
                     client_message_id,
+                    parent_message_id,
                 ),
             )
             row = await cursor.fetchone()
             message = _message_from_row(_required_row(row, "message creation"))
             await self._trim_messages(connection, room_id=room_id, now=message.created_at)
+            cursor = await connection.execute(f"{_MESSAGE_SELECT} WHERE id = %s", (message.id,))
+            persisted = await cursor.fetchone()
+            if persisted is None:  # pragma: no cover - newest inserts are retained by every configured cap
+                raise RuntimeError("newly created message was not retained")
+            message = _message_from_row(persisted)
             await self._insert_webhook(
                 connection,
                 event_type="message.created",
@@ -433,7 +459,7 @@ class PostgresChatStore:
             )
             await connection.execute("SELECT pg_advisory_xact_lock(%s)", (POSTGRES_MESSAGE_CAP_LOCK_ID,))
             row = await self._lock_message(connection, room_id, message_id)
-            if row[7] is not None:
+            if row[8] is not None:
                 raise MessageDeletedError(message_id)
             if not is_admin and str(row[2]) != actor:
                 raise MessageOwnershipError(message_id)
@@ -487,7 +513,7 @@ class PostgresChatStore:
             row = await self._lock_message(connection, room_id, message_id)
             if not is_admin and str(row[2]) != actor:
                 raise MessageOwnershipError(message_id)
-            if row[7] is not None:
+            if row[8] is not None:
                 return _message_from_row(row), False
             cursor = await connection.execute(
                 _DELETE_MESSAGE_SQL,
@@ -645,6 +671,64 @@ class PostgresChatStore:
                     """,
                     (room_id, cursor_key[0], cursor_key[0], cursor_key[1], limit + 1),
                 )
+            rows = await cursor.fetchall()
+        page_rows, next_before = _page_rows(rows, limit, chronological=True)
+        return [_message_from_row(row) for row in page_rows], next_before
+
+    async def list_replies(
+        self,
+        room_id: str,
+        parent_message_id: str,
+        *,
+        limit: int = 50,
+        before: str | None = None,
+    ) -> tuple[list[Message], str | None]:
+        _validate_page_limit(limit)
+        async with self.foundation.transaction() as connection:
+            await _require_room(connection, room_id)
+            cursor = await connection.execute(
+                """
+                SELECT parent_message_id FROM public.samsarix_messages
+                WHERE room_id = %s AND id = %s
+                """,
+                (room_id, parent_message_id),
+            )
+            parent = await cursor.fetchone()
+            if parent is None:
+                raise MessageNotFoundError(parent_message_id)
+            if parent[0] is not None:
+                raise ThreadDepthError(parent_message_id)
+
+            cursor_key: tuple[datetime, str] | None = None
+            if before is not None:
+                cursor = await connection.execute(
+                    """
+                    SELECT created_at, id FROM public.samsarix_messages
+                    WHERE room_id = %s AND parent_message_id = %s AND id = %s
+                    """,
+                    (room_id, parent_message_id, before),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    raise InvalidCursorError(before)
+                cursor_key = (row[0], str(row[1]))
+            cursor = await connection.execute(
+                f"""
+                {_MESSAGE_SELECT}
+                WHERE room_id = %s AND parent_message_id = %s
+                  AND (%s::timestamptz IS NULL OR created_at < %s OR (created_at = %s AND id < %s))
+                ORDER BY created_at DESC, id DESC LIMIT %s
+                """,
+                (
+                    room_id,
+                    parent_message_id,
+                    cursor_key[0] if cursor_key else None,
+                    cursor_key[0] if cursor_key else None,
+                    cursor_key[0] if cursor_key else None,
+                    cursor_key[1] if cursor_key else None,
+                    limit + 1,
+                ),
+            )
             rows = await cursor.fetchall()
         page_rows, next_before = _page_rows(rows, limit, chronological=True)
         return [_message_from_row(row) for row in page_rows], next_before
@@ -1312,12 +1396,14 @@ class PostgresChatStore:
         )
 
 
-_MESSAGE_COLUMNS = "id, room_id, sender, content, created_at, client_message_id, edited_at, deleted_at"
+_MESSAGE_COLUMNS = (
+    "id, room_id, sender, content, created_at, client_message_id, parent_message_id, edited_at, deleted_at"
+)
 _MESSAGE_SELECT = f"SELECT {_MESSAGE_COLUMNS} FROM public.samsarix_messages"  # noqa: S608 - internal constant
 _CREATE_MESSAGE_SQL = f"""
 INSERT INTO public.samsarix_messages (
-    id, room_id, sender, author_subject, content, search_content, client_message_id
-) VALUES (%s, %s, %s, %s, %s, %s, %s)
+    id, room_id, sender, author_subject, content, search_content, client_message_id, parent_message_id
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
 RETURNING {_MESSAGE_COLUMNS}
 """  # noqa: S608 - internal constant
 _UPDATE_MESSAGE_SQL = f"""
@@ -1444,8 +1530,9 @@ def _message_from_row(row: tuple[Any, ...]) -> Message:
         content=str(row[3]),
         created_at=row[4],
         client_message_id=str(row[5]) if row[5] is not None else None,
-        edited_at=row[6],
-        deleted_at=row[7],
+        parent_message_id=str(row[6]) if row[6] is not None else None,
+        edited_at=row[7],
+        deleted_at=row[8],
     )
 
 

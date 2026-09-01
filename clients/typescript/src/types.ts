@@ -33,6 +33,8 @@ export interface ChatMessage {
   content: string;
   created_at: string;
   client_message_id: string | null;
+  /** Present on servers with threaded replies; released 0.12 servers omit it. */
+  parent_message_id?: string | null;
   edited_at: string | null;
   deleted_at: string | null;
 }
@@ -41,6 +43,7 @@ export interface MessageCreate {
   sender?: string;
   content: string;
   client_message_id?: string;
+  parent_message_id?: string;
 }
 
 export interface MessagePage {

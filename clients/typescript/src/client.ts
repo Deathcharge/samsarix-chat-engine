@@ -116,6 +116,21 @@ export class SamsarixChatClient {
     return this.request<MessagePage>(`/v1/rooms/${encodeURIComponent(roomId)}/messages?${query}`);
   }
 
+  async listReplies(
+    roomId: string,
+    parentMessageId: string,
+    options: { limit?: number; before?: string } = {},
+  ): Promise<MessagePage> {
+    const query = new URLSearchParams();
+    query.set("limit", String(boundedInteger(options.limit ?? 50, 1, 100, "limit")));
+    if (options.before !== undefined) {
+      query.set("before", options.before);
+    }
+    return this.request<MessagePage>(
+      `/v1/rooms/${encodeURIComponent(roomId)}/messages/${encodeURIComponent(parentMessageId)}/replies?${query}`,
+    );
+  }
+
   async searchMessages(
     roomId: string,
     search: string,

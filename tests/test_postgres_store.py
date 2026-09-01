@@ -20,12 +20,15 @@ from samsarix_chat_engine.store import (  # noqa: E402
     InvalidCursorError,
     MemberBannedError,
     MemberMutedError,
+    MessageDeletedError,
+    MessageNotFoundError,
     MessageOwnershipError,
     ReadStateCapacityError,
     RetentionNotConfiguredError,
     RoomArchivedError,
     RoomCapacityError,
     RoomNotArchivedError,
+    ThreadDepthError,
     WebhookCapacityError,
     WebhookDeliveryNotFoundError,
     WebhookPayloadUnavailableError,
@@ -96,7 +99,7 @@ async def test_schema_v2_migrates_transactionally_and_widens_event_payloads(
     service = _store(clean_postgres_database)
     await service.initialize()
     try:
-        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 8
+        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 9
         assert await service.check_ready()
         assert await service.list_rooms() == []
         async with service.foundation.transaction() as connection:
@@ -191,7 +194,7 @@ async def test_schema_v6_backfills_matching_instance_generations(
     service = _store(clean_postgres_database)
     await service.initialize()
     try:
-        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 8
+        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 9
         async with service.foundation.transaction() as connection:
             cursor = await connection.execute(
                 """
@@ -219,6 +222,164 @@ async def test_schema_v6_backfills_matching_instance_generations(
         assert generations is not None
         assert generations[0] is not None and generations[0] == generations[1]
         assert lease_indexes == ["samsarix_connection_leases_instance_generation"]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_schema_v8_adds_thread_parent_column_and_index(clean_postgres_database: str) -> None:
+    initial = _store(clean_postgres_database)
+    await initial.initialize()
+    await initial.close()
+    async with await psycopg.AsyncConnection.connect(clean_postgres_database, autocommit=True) as connection:
+        await connection.execute("DROP INDEX public.samsarix_messages_thread_order")
+        await connection.execute("ALTER TABLE public.samsarix_messages DROP COLUMN parent_message_id")
+        await connection.execute("UPDATE public.samsarix_schema_metadata SET version = 8")
+
+    migrated = _store(clean_postgres_database)
+    await migrated.initialize()
+    try:
+        assert await migrated.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 9
+        async with migrated.foundation.transaction() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT column_name FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'samsarix_messages'
+                  AND column_name = 'parent_message_id'
+                """
+            )
+            assert await cursor.fetchone() == ("parent_message_id",)
+            cursor = await connection.execute(
+                """
+                SELECT indexname FROM pg_indexes
+                WHERE schemaname = 'public' AND indexname = 'samsarix_messages_thread_order'
+                """
+            )
+            assert await cursor.fetchone() == ("samsarix_messages_thread_order",)
+    finally:
+        await migrated.close()
+
+
+@pytest.mark.asyncio
+async def test_threaded_replies_have_postgres_parity(store: PostgresChatStore) -> None:
+    await store.create_room(RoomCreate(id="general", name="General"))
+    parent, _ = await store.create_message(
+        room_id="general",
+        sender="alice",
+        content="Question",
+        client_message_id=None,
+        allow_frozen=False,
+        member_subject="alice",
+        author_subject="alice",
+    )
+    first, _ = await store.create_message(
+        room_id="general",
+        sender="bob",
+        content="First answer",
+        client_message_id="reply-1",
+        parent_message_id=parent.id,
+        allow_frozen=False,
+        member_subject="bob",
+        author_subject="bob",
+    )
+    second, _ = await store.create_message(
+        room_id="general",
+        sender="carol",
+        content="Second answer",
+        client_message_id=None,
+        parent_message_id=parent.id,
+        allow_frozen=False,
+        member_subject="carol",
+        author_subject="carol",
+    )
+
+    page, before = await store.list_replies("general", parent.id, limit=1)
+    assert page == [second]
+    assert before == second.id
+    older, before = await store.list_replies("general", parent.id, limit=1, before=before)
+    assert older == [first]
+    assert before is None
+    with pytest.raises(ThreadDepthError):
+        await store.create_message(
+            room_id="general",
+            sender="alice",
+            content="Nested",
+            client_message_id=None,
+            parent_message_id=first.id,
+            allow_frozen=False,
+        )
+    with pytest.raises(MessageNotFoundError):
+        await store.create_message(
+            room_id="general",
+            sender="alice",
+            content="Missing",
+            client_message_id=None,
+            parent_message_id="unknown",
+            allow_frozen=False,
+        )
+
+    await store.delete_message(
+        room_id="general",
+        message_id=parent.id,
+        actor="alice",
+        is_admin=False,
+        member_subject="alice",
+    )
+    with pytest.raises(MessageDeletedError):
+        await store.create_message(
+            room_id="general",
+            sender="alice",
+            content="Too late",
+            client_message_id=None,
+            parent_message_id=parent.id,
+            allow_frozen=False,
+        )
+    replay, created = await store.create_message(
+        room_id="general",
+        sender="bob",
+        content="Ignored",
+        client_message_id="reply-1",
+        parent_message_id=parent.id,
+        allow_frozen=False,
+    )
+    assert not created
+    assert replay == first
+
+
+@pytest.mark.asyncio
+async def test_postgres_retention_promotes_reply_when_parent_expires(clean_postgres_database: str) -> None:
+    service = _store(clean_postgres_database, max_stored_messages=2, max_stored_messages_per_room=2)
+    await service.initialize()
+    try:
+        await service.create_room(RoomCreate(id="general", name="General"))
+        parent, _ = await service.create_message(
+            room_id="general",
+            sender="alice",
+            content="Parent",
+            client_message_id=None,
+            allow_frozen=False,
+        )
+        reply, _ = await service.create_message(
+            room_id="general",
+            sender="bob",
+            content="Reply",
+            client_message_id=None,
+            parent_message_id=parent.id,
+            allow_frozen=False,
+        )
+        await service.create_message(
+            room_id="general",
+            sender="carol",
+            content="Newest",
+            client_message_id=None,
+            allow_frozen=False,
+        )
+
+        history, _ = await service.list_messages("general")
+        retained_reply = next(message for message in history if message.id == reply.id)
+        assert retained_reply.parent_message_id is None
+        with pytest.raises(MessageNotFoundError):
+            await service.list_replies("general", parent.id)
     finally:
         await service.close()
 

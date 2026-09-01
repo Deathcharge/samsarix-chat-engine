@@ -25,7 +25,7 @@ from psycopg.conninfo import conninfo_to_dict
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
-POSTGRES_SCHEMA_VERSION = 8
+POSTGRES_SCHEMA_VERSION = 9
 POSTGRES_MIGRATION_LOCK_ID = 7_495_346_927_831_819_041
 POSTGRES_EVENT_SEQUENCE_LOCK_ID = 7_495_346_927_831_819_042
 POSTGRES_EVENT_RETENTION_LOCK_ID = 7_495_346_927_831_819_043
@@ -1161,6 +1161,7 @@ class PostgresFoundation:
                         client_message_id TEXT CHECK (
                             client_message_id IS NULL OR char_length(client_message_id) BETWEEN 1 AND 128
                         ),
+                        parent_message_id TEXT REFERENCES public.samsarix_messages(id) ON DELETE SET NULL,
                         edited_at TIMESTAMPTZ,
                         deleted_at TIMESTAMPTZ,
                         UNIQUE (room_id, client_message_id)
@@ -1177,6 +1178,19 @@ class PostgresFoundation:
                     """
                     CREATE INDEX IF NOT EXISTS samsarix_messages_global_order
                     ON public.samsarix_messages (created_at DESC, id DESC)
+                    """
+                )
+                await connection.execute(
+                    """
+                    ALTER TABLE public.samsarix_messages
+                    ADD COLUMN IF NOT EXISTS parent_message_id TEXT
+                        REFERENCES public.samsarix_messages(id) ON DELETE SET NULL
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS samsarix_messages_thread_order
+                    ON public.samsarix_messages (room_id, parent_message_id, created_at DESC, id DESC)
                     """
                 )
                 await connection.execute(

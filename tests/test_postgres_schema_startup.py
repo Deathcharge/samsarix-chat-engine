@@ -73,7 +73,7 @@ async def test_future_schema_rejection_does_not_attempt_ddl():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version", [None, 0, 2, 6, 7])
+@pytest.mark.parametrize("version", [None, 0, 2, 6, 7, 8])
 async def test_missing_or_older_schema_still_runs_migration_before_recording_version(version):
     service, statements = _service(version)
     await service.open()

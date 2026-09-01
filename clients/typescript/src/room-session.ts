@@ -144,6 +144,27 @@ export class RoomSession {
     });
   }
 
+  sendReply(parentMessageId: string, content: string, clientMessageId?: string): void {
+    if (parentMessageId.length === 0 || parentMessageId.length > 128) {
+      throw new RangeError("parentMessageId must be between 1 and 128 characters");
+    }
+    if (content.trim().length === 0) {
+      throw new TypeError("content must not be blank");
+    }
+    if (this.maxMessageChars !== undefined && content.length > this.maxMessageChars) {
+      throw new RangeError(`content exceeds the ${this.maxMessageChars}-character room limit`);
+    }
+    if (clientMessageId !== undefined && (clientMessageId.length === 0 || clientMessageId.length > 128)) {
+      throw new RangeError("clientMessageId must be between 1 and 128 characters");
+    }
+    this.send({
+      type: "message",
+      content,
+      parent_message_id: parentMessageId,
+      ...(clientMessageId === undefined ? {} : { client_message_id: clientMessageId }),
+    });
+  }
+
   ping(): void {
     this.send({ type: "ping" });
   }
@@ -486,6 +507,7 @@ function isChatMessage(value: unknown): boolean {
     isStringField(value, "content") &&
     isStringField(value, "created_at") &&
     isNullableStringField(value, "client_message_id") &&
+    (!("parent_message_id" in value) || isNullableStringField(value, "parent_message_id")) &&
     isNullableStringField(value, "edited_at") &&
     isNullableStringField(value, "deleted_at")
   );

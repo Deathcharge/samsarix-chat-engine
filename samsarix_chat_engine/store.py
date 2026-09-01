@@ -32,7 +32,7 @@ from .models import (
 )
 
 T = TypeVar("T")
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 logger = logging.getLogger(__name__)
 
 
@@ -149,6 +149,10 @@ class MessageNotFoundError(StoreError):
 
 class MessageDeletedError(StoreError):
     """Raised when an update targets a deleted message tombstone."""
+
+
+class ThreadDepthError(StoreError):
+    """Raised when a reply targets another reply instead of a top-level message."""
 
 
 class MessageOwnershipError(StoreError):
@@ -337,6 +341,7 @@ class ChatStorage(Protocol):
         sender: str,
         content: str,
         client_message_id: str | None,
+        parent_message_id: str | None,
         allow_frozen: bool,
         member_subject: str | None = None,
         author_subject: str | None = None,
@@ -377,6 +382,15 @@ class ChatStorage(Protocol):
     async def list_messages(
         self,
         room_id: str,
+        *,
+        limit: int = 50,
+        before: str | None = None,
+    ) -> tuple[list[Message], str | None]: ...
+
+    async def list_replies(
+        self,
+        room_id: str,
+        parent_message_id: str,
         *,
         limit: int = 50,
         before: str | None = None,
@@ -539,6 +553,7 @@ class ChatStore:
         sender: str,
         content: str,
         client_message_id: str | None,
+        parent_message_id: str | None = None,
         allow_frozen: bool,
         member_subject: str | None = None,
         author_subject: str | None = None,
@@ -550,6 +565,7 @@ class ChatStore:
                 sender,
                 content,
                 client_message_id,
+                parent_message_id,
                 allow_frozen,
                 member_subject,
                 author_subject,
@@ -628,6 +644,18 @@ class ChatStore:
     ) -> tuple[list[Message], str | None]:
         return await asyncio.to_thread(self._list_messages_sync, room_id, limit, before)
 
+    async def list_replies(
+        self,
+        room_id: str,
+        parent_message_id: str,
+        *,
+        limit: int = 50,
+        before: str | None = None,
+    ) -> tuple[list[Message], str | None]:
+        """List one level of replies to a top-level message in chronological order."""
+
+        return await asyncio.to_thread(self._list_replies_sync, room_id, parent_message_id, limit, before)
+
     async def search_messages(
         self,
         room_id: str,
@@ -668,7 +696,8 @@ class ChatStore:
             connection.execute("BEGIN")
             cursor = connection.execute(
                 """
-                SELECT id, room_id, sender, content, created_at, client_message_id, edited_at, deleted_at
+                SELECT id, room_id, sender, content, created_at, client_message_id,
+                       parent_message_id, edited_at, deleted_at
                 FROM messages WHERE room_id = ? ORDER BY created_at, id
                 """,
                 (room_id,),
@@ -784,6 +813,7 @@ class ChatStore:
                     content TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     client_message_id TEXT,
+                    parent_message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
                     UNIQUE(room_id, client_message_id)
                 );
 
@@ -805,6 +835,14 @@ class ChatStore:
                 connection.execute("ALTER TABLE messages ADD COLUMN deleted_at TEXT")
             if "author_subject" not in message_columns:
                 connection.execute("ALTER TABLE messages ADD COLUMN author_subject TEXT")
+            if "parent_message_id" not in message_columns:
+                connection.execute(
+                    "ALTER TABLE messages ADD COLUMN parent_message_id TEXT REFERENCES messages(id) ON DELETE SET NULL"
+                )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS messages_thread_order "
+                "ON messages(room_id, parent_message_id, created_at DESC, id DESC)"
+            )
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS audit_events (
@@ -959,6 +997,7 @@ class ChatStore:
         sender: str,
         content: str,
         client_message_id: str | None,
+        parent_message_id: str | None,
         allow_frozen: bool,
         member_subject: str | None,
         author_subject: str | None,
@@ -977,13 +1016,29 @@ class ChatStore:
             if client_message_id:
                 existing = connection.execute(
                     """
-                    SELECT id, room_id, sender, content, created_at, client_message_id, edited_at, deleted_at
+                    SELECT id, room_id, sender, content, created_at, client_message_id,
+                           parent_message_id, edited_at, deleted_at
                     FROM messages WHERE room_id = ? AND client_message_id = ?
                     """,
                     (room_id, client_message_id),
                 ).fetchone()
                 if existing:
                     return self._message_from_row(existing), False
+
+            if parent_message_id is not None:
+                parent = connection.execute(
+                    """
+                    SELECT parent_message_id, deleted_at FROM messages
+                    WHERE room_id = ? AND id = ?
+                    """,
+                    (room_id, parent_message_id),
+                ).fetchone()
+                if parent is None:
+                    raise MessageNotFoundError(parent_message_id)
+                if parent["deleted_at"] is not None:
+                    raise MessageDeletedError(parent_message_id)
+                if parent["parent_message_id"] is not None:
+                    raise ThreadDepthError(parent_message_id)
 
             message = Message(
                 id=uuid.uuid4().hex,
@@ -992,11 +1047,13 @@ class ChatStore:
                 content=content,
                 created_at=datetime.now(timezone.utc),
                 client_message_id=client_message_id,
+                parent_message_id=parent_message_id,
             )
             connection.execute(
                 """
-                INSERT INTO messages (id, room_id, sender, author_subject, content, created_at, client_message_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO messages (
+                    id, room_id, sender, author_subject, content, created_at, client_message_id, parent_message_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message.id,
@@ -1006,9 +1063,21 @@ class ChatStore:
                     message.content,
                     message.created_at.isoformat(),
                     message.client_message_id,
+                    message.parent_message_id,
                 ),
             )
             self._trim_messages(connection, room_id, now=message.created_at)
+            persisted = connection.execute(
+                """
+                SELECT id, room_id, sender, content, created_at, client_message_id,
+                       parent_message_id, edited_at, deleted_at
+                FROM messages WHERE id = ?
+                """,
+                (message.id,),
+            ).fetchone()
+            if persisted is None:  # pragma: no cover - newest inserts are retained by every configured cap
+                raise RuntimeError("newly created message was not retained")
+            message = self._message_from_row(persisted)
             self._insert_webhook(
                 connection,
                 event_type="message.created",
@@ -1040,7 +1109,8 @@ class ChatStore:
             self._enforce_member_write_sync(connection, room_id, member_subject)
             row = connection.execute(
                 """
-                SELECT id, room_id, sender, content, created_at, client_message_id, edited_at, deleted_at
+                SELECT id, room_id, sender, content, created_at, client_message_id,
+                       parent_message_id, edited_at, deleted_at
                 FROM messages WHERE room_id = ? AND id = ?
                 """,
                 (room_id, message_id),
@@ -1065,7 +1135,8 @@ class ChatStore:
             )
             row = connection.execute(
                 """
-                SELECT id, room_id, sender, content, created_at, client_message_id, edited_at, deleted_at
+                SELECT id, room_id, sender, content, created_at, client_message_id,
+                       parent_message_id, edited_at, deleted_at
                 FROM messages WHERE id = ?
                 """,
                 (message_id,),
@@ -1101,7 +1172,8 @@ class ChatStore:
             self._enforce_member_write_sync(connection, room_id, member_subject)
             row = connection.execute(
                 """
-                SELECT id, room_id, sender, content, created_at, client_message_id, edited_at, deleted_at
+                SELECT id, room_id, sender, content, created_at, client_message_id,
+                       parent_message_id, edited_at, deleted_at
                 FROM messages WHERE room_id = ? AND id = ?
                 """,
                 (room_id, message_id),
@@ -1126,7 +1198,8 @@ class ChatStore:
             )
             row = connection.execute(
                 """
-                SELECT id, room_id, sender, content, created_at, client_message_id, edited_at, deleted_at
+                SELECT id, room_id, sender, content, created_at, client_message_id,
+                       parent_message_id, edited_at, deleted_at
                 FROM messages WHERE id = ?
                 """,
                 (message_id,),
@@ -1310,7 +1383,8 @@ class ChatStore:
                     raise InvalidCursorError(before)
                 rows = connection.execute(
                     """
-                    SELECT id, room_id, sender, content, created_at, client_message_id, edited_at, deleted_at
+                    SELECT id, room_id, sender, content, created_at, client_message_id,
+                           parent_message_id, edited_at, deleted_at
                     FROM messages
                     WHERE room_id = ? AND (created_at < ? OR (created_at = ? AND id < ?))
                     ORDER BY created_at DESC, id DESC
@@ -1321,7 +1395,8 @@ class ChatStore:
             else:
                 rows = connection.execute(
                     """
-                    SELECT id, room_id, sender, content, created_at, client_message_id, edited_at, deleted_at
+                    SELECT id, room_id, sender, content, created_at, client_message_id,
+                           parent_message_id, edited_at, deleted_at
                     FROM messages
                     WHERE room_id = ?
                     ORDER BY created_at DESC, id DESC
@@ -1333,6 +1408,63 @@ class ChatStore:
         page_rows, next_before = _paginate_rows(rows, limit, chronological=True)
         messages = [self._message_from_row(row) for row in page_rows]
         return messages, next_before
+
+    def _list_replies_sync(
+        self,
+        room_id: str,
+        parent_message_id: str,
+        limit: int,
+        before: str | None,
+    ) -> tuple[list[Message], str | None]:
+        with closing(self._connect()) as connection, connection:
+            if connection.execute("SELECT 1 FROM rooms WHERE id = ?", (room_id,)).fetchone() is None:
+                raise RoomNotFoundError(room_id)
+            parent = connection.execute(
+                "SELECT parent_message_id FROM messages WHERE room_id = ? AND id = ?",
+                (room_id, parent_message_id),
+            ).fetchone()
+            if parent is None:
+                raise MessageNotFoundError(parent_message_id)
+            if parent["parent_message_id"] is not None:
+                raise ThreadDepthError(parent_message_id)
+
+            cursor_created_at: str | None = None
+            cursor_id: str | None = None
+            if before:
+                cursor = connection.execute(
+                    """
+                    SELECT created_at, id FROM messages
+                    WHERE room_id = ? AND parent_message_id = ? AND id = ?
+                    """,
+                    (room_id, parent_message_id, before),
+                ).fetchone()
+                if cursor is None:
+                    raise InvalidCursorError(before)
+                cursor_created_at = cursor["created_at"]
+                cursor_id = cursor["id"]
+            rows = connection.execute(
+                """
+                SELECT id, room_id, sender, content, created_at, client_message_id,
+                       parent_message_id, edited_at, deleted_at
+                FROM messages
+                WHERE room_id = ? AND parent_message_id = ?
+                  AND (? IS NULL OR created_at < ? OR (created_at = ? AND id < ?))
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (
+                    room_id,
+                    parent_message_id,
+                    cursor_created_at,
+                    cursor_created_at,
+                    cursor_created_at,
+                    cursor_id,
+                    limit + 1,
+                ),
+            ).fetchall()
+
+        page_rows, next_before = _paginate_rows(rows, limit, chronological=True)
+        return [self._message_from_row(row) for row in page_rows], next_before
 
     def _search_messages_sync(
         self,
@@ -1359,7 +1491,8 @@ class ChatStore:
                 cursor_id = cursor["id"]
             rows = connection.execute(
                 """
-                SELECT id, room_id, sender, content, created_at, client_message_id, edited_at, deleted_at
+                SELECT id, room_id, sender, content, created_at, client_message_id,
+                       parent_message_id, edited_at, deleted_at
                 FROM messages
                 WHERE room_id = ?
                   AND deleted_at IS NULL
@@ -1872,6 +2005,7 @@ class ChatStore:
             content=row["content"],
             created_at=datetime.fromisoformat(row["created_at"]),
             client_message_id=row["client_message_id"],
+            parent_message_id=row["parent_message_id"],
             edited_at=datetime.fromisoformat(row["edited_at"]) if row["edited_at"] else None,
             deleted_at=datetime.fromisoformat(row["deleted_at"]) if row["deleted_at"] else None,
         )

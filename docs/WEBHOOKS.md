@@ -48,6 +48,7 @@ The minified UTF-8 body has a stable envelope:
       "content": "I need help",
       "created_at": "2026-08-02T12:00:00+00:00",
       "client_message_id": null,
+      "parent_message_id": null,
       "edited_at": null,
       "deleted_at": null
     }
@@ -55,7 +56,7 @@ The minified UTF-8 body has a stable envelope:
 }
 ```
 
-`message.updated` and `message.deleted` add `data.actor`; the deleted message is the committed empty-content tombstone. `member.moderation.updated` contains `data.actor` plus `data.moderation` with the room, subject, nullable mute/ban expiries, and update time. Event selection happens before outbox insertion, so unselected events consume no delivery storage.
+For a threaded reply, `data.message.parent_message_id` is the top-level message ID; top-level messages use null. `message.updated` and `message.deleted` add `data.actor`; the deleted message is the committed empty-content tombstone. `member.moderation.updated` contains `data.actor` plus `data.moderation` with the room, subject, nullable mute/ban expiries, and update time. Event selection happens before outbox insertion, so unselected events consume no delivery storage.
 
 Webhook payloads contain message content and stable subject/display identifiers. Configure a destination only when that transfer fits the deployment's privacy policy, retention rules, and user disclosures. Payload copies remain in the bounded SQLite outbox until pruning or resource deletion; the operations API intentionally returns metadata only.
 
