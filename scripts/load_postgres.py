@@ -187,9 +187,8 @@ class World:
         started = time.monotonic()
         self.sent[index, version] = started
         phase = self.phase
-        allowed_control_rejection = self.control_active and (
-            room == "load-0" or self.profile.scenario == "reconnect-storm"
-        )
+        affected_control_room = room == "load-0" or self.profile.scenario == "reconnect-storm"
+        control_active_at_start = self.control_active
         self.counts[f"http_{method}_attempts"] += 1
         try:
             response = await http.request(
@@ -206,7 +205,12 @@ class World:
         self.counts[f"http_status_{response.status_code}"] += 1
         if response.status_code != (201, 200, 204)[version]:
             error = response.json().get("error", {}).get("code")
-            if allowed_control_rejection and error in {"room_frozen", "room_archived"}:
+            # A request can enter immediately before the fault controller flips
+            # the room and receive its 409 immediately after. Treat a lifecycle
+            # rejection as expected when the request overlaps either edge of the
+            # intentional control window, but never excuse another room or code.
+            overlaps_control = control_active_at_start or self.control_active
+            if affected_control_room and overlaps_control and error in {"room_frozen", "room_archived"}:
                 self.counts["http_control_rejections"] += 1
             else:
                 self.counts["http_unexpected_rejections"] += 1
