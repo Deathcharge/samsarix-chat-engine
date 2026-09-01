@@ -66,6 +66,24 @@ def test_unreleased_content_at_end_of_file_is_rejected(tmp_path: Path, monkeypat
         validate("v0.13.0")
 
 
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        '[project]\nname = "example"\nversion = "0.13.0"\nversion = "0.13.0"\n',
+        "[project]\nname = \"example\"\nversion = '0.13.0'\n",
+        '[build-system]\nversion = "0.13.0"\n',
+    ],
+)
+def test_project_version_metadata_must_be_one_unambiguous_literal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, metadata: str
+) -> None:
+    root = release_tree(tmp_path)
+    (root / "pyproject.toml").write_text(metadata, encoding="utf-8")
+    monkeypatch.setattr(release, "ROOT", root)
+    with pytest.raises(ValueError, match="version"):
+        validate("v0.13.0")
+
+
 def test_release_workflow_is_tag_only_pinned_and_least_privilege() -> None:
     workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
     assert 'tags:\n      - "v*.*.*"' in workflow

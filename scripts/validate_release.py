@@ -9,10 +9,26 @@ import ast
 import re
 from pathlib import Path
 
-import tomllib
-
 ROOT = Path(__file__).resolve().parents[1]
 TAG = re.compile(r"v(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))")
+PROJECT_VERSION = re.compile(r'^version\s*=\s*"(?P<version>[^"]+)"\s*(?:#.*)?$')
+
+
+def _project_version() -> str:
+    in_project = False
+    versions: list[str] = []
+    for raw_line in (ROOT / "pyproject.toml").read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            in_project = line == "[project]"
+        elif in_project and line.startswith("version"):
+            match = PROJECT_VERSION.fullmatch(line)
+            if match is None:
+                raise ValueError("[project].version must be one double-quoted line")
+            versions.append(match.group("version"))
+    if len(versions) != 1:
+        raise ValueError("pyproject.toml must contain exactly one [project].version")
+    return versions[0]
 
 
 def _package_version() -> str:
@@ -54,8 +70,7 @@ def validate(tag: str) -> str:
     if match is None:
         raise ValueError("release tag must use canonical vMAJOR.MINOR.PATCH syntax")
     version = match.group("version")
-    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
-    if project["version"] != version or _package_version() != version or _service_versions() != {version}:
+    if _project_version() != version or _package_version() != version or _service_versions() != {version}:
         raise ValueError("tag, project metadata, package version, and service versions must match exactly")
 
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
