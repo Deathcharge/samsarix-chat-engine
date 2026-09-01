@@ -1563,7 +1563,7 @@ class PostgresChatStore:
             await connection.execute(
                 """
                 UPDATE public.samsarix_realtime_events
-                SET payload = jsonb_set(jsonb_set(CASE
+                SET payload = jsonb_set(jsonb_set(jsonb_set(CASE
                     WHEN event_type = 'message.reaction.updated' THEN jsonb_set(
                         jsonb_set(
                             jsonb_set(
