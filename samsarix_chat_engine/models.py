@@ -466,6 +466,12 @@ class WebSocketPing(APIModel):
     type: Literal["ping"]
 
 
+class WebSocketSync(APIModel):
+    """Request the initialization catch-up boundary after snapshot history."""
+
+    type: Literal["sync"]
+
+
 class WebSocketTyping(APIModel):
     """Ephemeral typing state that automatically expires on the server."""
 

@@ -1,6 +1,6 @@
 # `@samsarix/chat-client`
 
-Dependency-free TypeScript client for Samsarix Chat Engine's implemented HTTP and WebSocket contracts, including the 0.12 server and guarded PostgreSQL preview. Unpublished SDK 0.11.0 ships ESM and generated declarations, works with browser globals, and accepts injected `fetch`/`WebSocket` implementations for Node runtimes and tests. Node 18 requires an injected WebSocket implementation; the live smoke uses Node's newer native WebSocket.
+Dependency-free TypeScript client for Samsarix Chat Engine's implemented HTTP and WebSocket contracts, including the 0.12 server and guarded PostgreSQL preview. Unpublished SDK 0.12.0 ships ESM and generated declarations, a reconnect-aware bounded in-memory room timeline, works with browser globals, and accepts injected `fetch`/`WebSocket` implementations for Node runtimes and tests. Node 18 requires an injected WebSocket implementation; the live smoke uses Node's newer native WebSocket.
 
 This package is part of the Samsarix Chat Engine repository and is not yet published to npm.
 
@@ -11,7 +11,7 @@ cd clients/typescript
 npm ci
 npm run build
 npm pack
-npm install ./samsarix-chat-client-0.11.0.tgz
+npm install ./samsarix-chat-client-0.12.0.tgz
 ```
 
 ## Token client
@@ -54,11 +54,12 @@ const pinned = await client.listPinnedMessages("support-42");
 
 const room = client.roomSession("support-42");
 room.onStateChange((state) => console.log("chat state", state));
+room.timeline.onChange((snapshot) => {
+  renderMessages(snapshot.items);
+  showOfflineState(snapshot.status === "stale");
+  // Page older history over HTTP when snapshot.nextBefore is non-null.
+});
 room.onEvent((event) => {
-  if (event.type === "history") {
-    // Reconcile event.items by message ID, including edits and tombstones.
-    // Page older history over HTTP when event.next_before is non-null.
-  }
   if (event.type === "message.created") {
     console.log(event.message);
   }
@@ -125,13 +126,17 @@ for await (const chunk of response.body!) {
 
 ## Reconnect behavior
 
-Unexpected transport loss retries with exponential backoff, bounded attempts, and jitter. Authentication, authorization, missing-room, archived-room, protocol, normal-client-close, and policy close codes are terminal. Every successful reconnect produces fresh `ready` and `history` events so the application can reconcile current edits and tombstones.
+Unexpected transport loss retries with exponential backoff, bounded attempts, and jitter. Authentication, authorization, missing-room, archived-room, protocol, normal-client-close, and policy close codes are terminal. Every successful reconnect produces fresh `ready` and `history` events. `RoomSession.timeline` keeps the last known page as `stale` during disconnection, replaces it from the new history snapshot, applies complete created/updated/deleted/reaction/pin message objects by ID, and becomes `synchronized` only at the activation boundary. Its generation increments once per completed initial connection or reconnect. It sorts by `created_at` then ID and exposes `nextBefore` for older HTTP pagination.
 
-**0.4.0 contract change:** `connect()` resolves and state becomes `connected` only after `ready`, `history`, and the reply to an SDK-generated post-history `ping`. The server processes that ping after its initialization buffer has flushed. The handshake's `pong` is also delivered to event listeners. Register listeners before calling `connect()`; do not send from a `ready`/`history` listener while synchronization is pending. Await `connect()` or observe `connected` before sending. There is no new server frame, durable client cursor, exactly-once guarantee or claim that other replicas have caught up. Continue reconciling live events by message ID.
+The timeline retains at most 1000 messages by default. Set `timelineMaxMessages` from 1 through 10000 on `roomSession()` to choose another bound, or construct a standalone `RoomTimeline({ maxMessages })`. When the bound evicts older entries, `snapshot.truncated` becomes true and `nextBefore` advances to the oldest retained message so the host can load older state over HTTP. The cursor can still expire under server retention; reload current history after `invalid_cursor`.
+
+**0.12.0 contract change:** current servers advertise `snapshot_sync_v1` in `ready.capabilities`. The SDK sends a post-history `sync` command and waits for `sync.completed`, whose count/cursor must match that history snapshot. The server processes the command only after its local initialization buffer has flushed. Against an older server that does not advertise the capability, the SDK retains the 0.4.0 post-history ping/pong fallback. Both activation replies are delivered to event listeners. Register listeners before calling `connect()`; do not send from a `ready`/`history` listener while synchronization is pending. Await `connect()` or observe `connected` before sending.
+
+The marker completes a local snapshot handoff, not durable event replay. There is no public event cursor, exactly-once guarantee, recovery of missed ephemeral presence/typing, or claim that a different PostgreSQL replica has polled to the global head. The timeline is an in-memory newest-page reducer, not an offline database: fetch older pages separately, and reload other derived views such as pin ordering and read state when needed.
 
 One `handshakeTimeoutMs` deadline covers each attempt from credential lookup through transport/authentication, initial history, and activation reply. Expiry rejects the pending promise with `SamsarixConnectionError.code === 4008`, detaches that attempt, requests transport closure, and consumes the same bounded retry budget as other transient failures. The SDK cannot cancel arbitrary work inside an application credential provider, abort a WebSocket transport beyond its `close()` API, or guarantee timer execution while a browser tab/event loop is suspended. Late credentials and callbacks cannot revive an expired attempt. A provider that never settles remains shared by that client's credential requests; time-bound the provider in the host application.
 
-`maxAttempts` counts automatic retries after the initial connection. Merely receiving `ready`, history or an activation pong does **not** reset it. Reset occurs only after the activated connection stays locally open for `stableConnectionMs`. This prevents repeated initialization failures or short-lived connections from restoring the retry budget. The stability interval is not an ongoing heartbeat/liveness guarantee. Exhaustion ends in `closed`; a deliberate new `connect()` starts a fresh budget. Avoid implementing an unbounded automatic `connect()` loop in a `closed` listener.
+`maxAttempts` counts automatic retries after the initial connection. Merely receiving `ready`, history or an activation reply does **not** reset it. Reset occurs only after the activated connection stays locally open for `stableConnectionMs`. This prevents repeated initialization failures or short-lived connections from restoring the retry budget. The stability interval is not an ongoing heartbeat/liveness guarantee. Exhaustion ends in `closed`; a deliberate new `connect()` starts a fresh budget. Avoid implementing an unbounded automatic `connect()` loop in a `closed` listener.
 
 A `connect()` promise belongs to its current/next attempt and rejects on that attempt's failure even if automatic retries continue; observe state changes and handle promise rejection. Concurrent callers share the same pending promise. `close()` cancels owned timers, rejects pending connection work and detaches callbacks before requesting transport closure. Listener-driven close/reconnect does not leave stale timers or settle a newer promise.
 
@@ -140,6 +145,7 @@ A synchronous application-send failure throws `SamsarixConnectionError` and star
 ```ts
 const session = client.roomSession("general", {
   handshakeTimeoutMs: 10_000,
+  timelineMaxMessages: 1_000,
   reconnect: {
     initialDelayMs: 250,
     maxDelayMs: 5_000,
@@ -155,9 +161,9 @@ Both new durations are positive integers from 1 to 300000 milliseconds and canno
 
 Public `close(code, reason)` follows the [browser WebSocket close contract](https://websockets.spec.whatwg.org/#dom-websocket-close): code 1000 or 3000–4999, and at most 123 UTF-8 bytes for the reason. Invalid arguments throw before changing session state. SDK protocol errors remain terminal local errors with code 1002, but request browser-legal wire closure 4002; other local transport failures use 4000 and handshake deadlines use 4008. A failing injected transport's close method cannot prevent local cleanup; injected implementations must still honor their physical transport ownership.
 
-The client does not persist tokens, messages, or telemetry. The host application owns UI state and any durable cache.
+The client does not persist tokens, timeline messages, or telemetry. The host application owns any durable/offline cache and should treat `stale` timeline content accordingly. Timeline snapshots clone nested message collections so consumer mutation cannot corrupt subsequent reconciliation; deterministic oldest-first eviction prevents a long-lived room from growing automatic SDK state without limit.
 
-Deterministic fake-clock tests cover flapping, deadlines, recovery-budget reset, late callbacks, cancellation and reentrant listeners. The live smoke uses a real server and native Node WebSocket, deliberately closes one connection with a retryable code, holds credential refresh while another client writes/edits, then verifies history and resumed delivery. This is not a browser compatibility matrix, network-fault simulation or measured reconnect-storm/load benchmark.
+Deterministic fake-clock tests cover flapping, deadlines, recovery-budget reset, late callbacks, cancellation, reentrant listeners, capability fallback, snapshot replacement and buffered mutation reconciliation. The live smoke uses a real server and native Node WebSocket, deliberately closes one connection with a retryable code, holds credential refresh while another client writes/edits, then verifies explicit synchronization, history and resumed delivery. This is not a browser compatibility matrix, network-fault simulation or measured reconnect-storm/load benchmark.
 
 ## Development
 

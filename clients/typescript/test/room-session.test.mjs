@@ -67,6 +67,160 @@ async function waitFor(predicate, message = "condition") {
   throw new Error(`Timed out waiting for ${message}`);
 }
 
+test("capable sessions wait for explicit snapshot synchronization and reconcile buffered mutations", async () => {
+  const sockets = [];
+  const client = new SamsarixChatClient({
+    baseUrl: "https://chat.example",
+    credential: { token: "token-1" },
+    fetch: async () => new Response(),
+    webSocketFactory: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+  });
+  const session = client.roomSession("general", { reconnect: { enabled: false } });
+  const message = {
+    id: "message-1",
+    room_id: "general",
+    sender: "user",
+    content: "snapshot",
+    created_at: "2026-09-01T00:00:00Z",
+    client_message_id: null,
+    parent_message_id: null,
+    reactions: [],
+    pinned_at: null,
+    pinned_by: null,
+    metadata: {},
+    attachments: [],
+    mentioned_subjects: [],
+    edited_at: null,
+    deleted_at: null,
+  };
+
+  const connected = session.connect();
+  await waitFor(() => sockets.length === 1, "socket creation");
+  sockets[0].open();
+  sockets[0].receive({
+    type: "ready",
+    room: ROOM,
+    username: "user",
+    active_connections: 1,
+    max_message_chars: 4000,
+    capabilities: ["snapshot_sync_v1"],
+  });
+  sockets[0].receive({ type: "history", items: [message], next_before: "older" });
+  assert.deepEqual(sockets[0].sent, [{ type: "sync" }]);
+  assert.equal(session.state, "connecting");
+  assert.equal(session.timeline.snapshot.status, "synchronizing");
+
+  sockets[0].receive({ type: "message.updated", message: { ...message, content: "buffered edit" } });
+  sockets[0].receive({
+    type: "sync.completed",
+    strategy: "snapshot",
+    history_count: 1,
+    next_before: "older",
+  });
+  await connected;
+
+  assert.equal(session.state, "connected");
+  assert.equal(session.timeline.snapshot.status, "synchronized");
+  assert.equal(session.timeline.snapshot.generation, 1);
+  assert.equal(session.timeline.snapshot.items[0].content, "buffered edit");
+  session.close();
+  assert.equal(session.timeline.snapshot.status, "stale");
+});
+
+test("room sessions pass a validated timeline retention bound", () => {
+  const client = new SamsarixChatClient({
+    baseUrl: "https://chat.example",
+    credential: { token: "token-1" },
+    fetch: async () => new Response(),
+    webSocketFactory: () => new FakeSocket(),
+  });
+
+  const session = client.roomSession("general", { timelineMaxMessages: 25 });
+  assert.equal(session.timeline.maxMessages, 25);
+  assert.throws(() => client.roomSession("general", { timelineMaxMessages: 0 }), /maxMessages/);
+});
+
+test("capable sessions reject a synchronization marker for a different snapshot", async () => {
+  const sockets = [];
+  const client = new SamsarixChatClient({
+    baseUrl: "https://chat.example",
+    credential: { token: "token-1" },
+    fetch: async () => new Response(),
+    webSocketFactory: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+  });
+  const session = client.roomSession("general", { reconnect: { enabled: false } });
+  const connected = session.connect();
+  await waitFor(() => sockets.length === 1, "socket creation");
+  sockets[0].open();
+  sockets[0].receive({
+    type: "ready",
+    room: ROOM,
+    username: "user",
+    active_connections: 1,
+    max_message_chars: 4000,
+    capabilities: ["snapshot_sync_v1"],
+  });
+  sockets[0].receive({ type: "history", items: [], next_before: null });
+  sockets[0].receive({
+    type: "sync.completed",
+    strategy: "snapshot",
+    history_count: 1,
+    next_before: null,
+  });
+
+  await assert.rejects(connected, /Invalid synchronization boundary/);
+  assert.deepEqual(sockets[0].closes[0], [4002, "Client connection ended"]);
+  assert.equal(session.timeline.snapshot.status, "empty");
+});
+
+test("closing from a synchronized timeline listener rejects the pending connection", async () => {
+  const sockets = [];
+  const client = new SamsarixChatClient({
+    baseUrl: "https://chat.example",
+    credential: { token: "token-1" },
+    fetch: async () => new Response(),
+    webSocketFactory: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+  });
+  const session = client.roomSession("general", { reconnect: { enabled: false } });
+  session.timeline.onChange((snapshot) => {
+    if (snapshot.status === "synchronized") session.close();
+  });
+  const connected = session.connect();
+  await waitFor(() => sockets.length === 1, "socket creation");
+  sockets[0].open();
+  sockets[0].receive({
+    type: "ready",
+    room: ROOM,
+    username: "user",
+    active_connections: 1,
+    max_message_chars: 4000,
+    capabilities: ["snapshot_sync_v1"],
+  });
+  sockets[0].receive({ type: "history", items: [], next_before: null });
+  sockets[0].receive({
+    type: "sync.completed",
+    strategy: "snapshot",
+    history_count: 0,
+    next_before: null,
+  });
+
+  await assert.rejects(connected, /Client closed/);
+  assert.equal(session.state, "closed");
+  assert.equal(session.timeline.snapshot.status, "stale");
+});
+
 test("browser authentication, typed events, publish, ping, and close", async () => {
   const sockets = [];
   const urls = [];

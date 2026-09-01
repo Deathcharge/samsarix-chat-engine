@@ -198,6 +198,17 @@ This milestone makes a host-owned support, classroom or incident inbox practical
 
 This milestone supports support-case escalation, classroom attention and incident-response routing without parsing `@` display text or adding a membership directory, device registry, push/email provider, notification preferences, or delivery-receipt system. Mention IDs are untrusted host-resolved data and never grant access.
 
+## v0.21 — explicit reconnect synchronization
+
+- [x] advertise a backward-compatible `snapshot_sync_v1` WebSocket capability without breaking legacy clients;
+- [x] accept a post-history `sync` command and return `sync.completed` only after the local initialization buffer has drained;
+- [x] bind the marker to the preceding snapshot count and older-page cursor while retaining explicit at-most-once/no-durable-cursor limits;
+- [x] add an SDK room timeline that replaces reconnect history, applies complete message mutations by ID, preserves stale state, bounds retained client state, and isolates consumer mutation/errors;
+- [x] retain ping/pong activation fallback for older servers and verify both paths with deterministic and live integration tests;
+- [x] document raw protocol, SDK usage, PostgreSQL relay-lag boundary, privacy, memory, and offline-cache non-goals.
+
+This milestone gives support, classroom and incident UIs a deterministic newest-page recovery primitive without publishing the internal PostgreSQL relay sequence or introducing a second client-side persistence dependency. It does not recover missed ephemeral presence/typing, provide exactly-once delivery, or claim every replica has reached the global event head.
+
 ## Deliberate non-goals
 
 - no built-in password database, social graph, billing, or end-user frontend;
