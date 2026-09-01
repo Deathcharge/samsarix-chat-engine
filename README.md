@@ -241,6 +241,8 @@ python scripts/smoke_installed_wheel.py  # run with an installed wheel's Python
 
 CI runs the tests on CPython 3.10–3.14 on Linux and CPython 3.12 on Windows, verifies the TypeScript package, and builds/smokes the hardened Linux container. See [Contributing](CONTRIBUTING.md) and the living [productization record](docs/PRODUCTIZATION.md).
 
+Tagged releases use a tag-only, least-privilege workflow that builds the wheel and source archive once, verifies a fresh wheel install, publishes SHA-256 checksums, and creates GitHub/Sigstore provenance attestations before attaching the same files to a versioned GitHub prerelease. It does not publish to PyPI or npm. Maintainers and consumers can follow the [release integrity and verification guide](docs/RELEASING.md).
+
 ## Limitations and project status
 
 This is a coherent single-instance MVP, not a hosted chat platform. The Compose profile supports exactly one SQLite process and replica. The container also includes the guarded PostgreSQL extra so the checked [Kubernetes evaluation manifest](deploy/kubernetes/README.md) can run reviewed development images. The [PostgreSQL preview](docs/POSTGRES_PREVIEW.md) wires the accepted [multi-instance architecture](docs/MULTI_INSTANCE_ARCHITECTURE.md) through real application instances, but remains explicitly unreleased until its remaining process-failure, failover, and deployment-acceptance gates pass. Attachments with explicit storage policy follow. Those are intentionally not presented as current supported capabilities.

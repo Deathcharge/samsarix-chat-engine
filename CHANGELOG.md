@@ -6,6 +6,7 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 
 ### Maintenance
 
+- Add a tag-only, least-privilege GitHub release workflow that validates exact version/changelog readiness, builds and smoke-tests Python distributions once, verifies SHA-256 checksums before and after artifact transfer, records GitHub/Sigstore provenance attestations, and publishes the same files as a prerelease. Package-registry publication remains a separate owner-controlled action.
 - Pin every disposable PostgreSQL 18.6 GitHub Actions service to the reviewed multi-architecture manifest-list digest instead of allowing a mutable tag to select later bytes.
 - Keep SQLite-only test collection working without the optional PostgreSQL driver; the load-harness module explicitly skips in that environment. Add a clean `.[test]` CI job that asserts driver absence and runs the applicable suite, alongside the existing full-driver/live PostgreSQL jobs.
 - Update disposable PostgreSQL CI services from 18.4 to 18.6 after reviewing the official security/bug-fix release. Historical load measurements retain their actual server version; production database upgrades and release-note-specific cleanup remain operator responsibilities.
