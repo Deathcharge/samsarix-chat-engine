@@ -1,6 +1,6 @@
 # `@samsarix/chat-client`
 
-Dependency-free TypeScript client for Samsarix Chat Engine's implemented HTTP and WebSocket contracts, including the 0.12 server and guarded PostgreSQL preview. Unpublished SDK 0.7.0 ships ESM and generated declarations, works with browser globals, and accepts injected `fetch`/`WebSocket` implementations for Node runtimes and tests. Node 18 requires an injected WebSocket implementation; the live smoke uses Node's newer native WebSocket.
+Dependency-free TypeScript client for Samsarix Chat Engine's implemented HTTP and WebSocket contracts, including the 0.12 server and guarded PostgreSQL preview. Unpublished SDK 0.8.0 ships ESM and generated declarations, works with browser globals, and accepts injected `fetch`/`WebSocket` implementations for Node runtimes and tests. Node 18 requires an injected WebSocket implementation; the live smoke uses Node's newer native WebSocket.
 
 This package is part of the Samsarix Chat Engine repository and is not yet published to npm.
 
@@ -11,7 +11,7 @@ cd clients/typescript
 npm ci
 npm run build
 npm pack
-npm install ./samsarix-chat-client-0.7.0.tgz
+npm install ./samsarix-chat-client-0.8.0.tgz
 ```
 
 ## Token client
@@ -26,7 +26,11 @@ const client = new SamsarixChatClient({
 
 const message = await client.createMessage(
   "support-42",
-  { content: "Hello", client_message_id: crypto.randomUUID() },
+  {
+    content: "Hello",
+    client_message_id: crypto.randomUUID(),
+    metadata: { "ticket.id": "SUP-42", priority: 2 },
+  },
   "request-42",
 );
 const reply = await client.createMessage("support-42", {
@@ -63,8 +67,8 @@ console.log("matches", matches.items);
 console.log("unread", unread.unread_count);
 await client.markRead("support-42");
 room.setTyping(true);
-room.sendMessage("Live follow-up", crypto.randomUUID());
-room.sendReply(message.id, "Threaded follow-up", crypto.randomUUID());
+room.sendMessage("Live follow-up", crypto.randomUUID(), { "ticket.id": "SUP-42" });
+room.sendReply(message.id, "Threaded follow-up", crypto.randomUUID(), { action: "escalate" });
 room.setTyping(false);
 ```
 
@@ -77,6 +81,8 @@ Replies are one level deep. `listReplies()` pages one top-level message's replie
 `addReaction()` and `removeReaction()` mutate one validated reaction key for the signed subject and return the complete updated message plus `changed`/`present`. Operator-key callers pass a fourth `reactor` argument because an operator key does not identify an end user. Reaction updates arrive as `message.reaction.updated`; replace the message by ID rather than incrementing counts locally. The `reactions` output is optional in the SDK type so 0.6.0 can still consume released 0.12 messages, while the current development server always returns a sorted array. The server caps distinct keys at 20 per message and accepts lowercase ASCII keys such as `ack`, `resolved`, or `needs_attention`; it does not host emoji assets.
 
 `listPinnedMessages()` returns shared room pins newest-first; `pinMessage()` and `unpinMessage()` require a token with `room:read` plus `room:pin`. Operator-key callers pass the optional third `pinner` argument. A real change arrives as `message.pin.updated`; replace the message by ID and refresh the list when ordering matters. `pinned_at` and `pinned_by` are optional SDK fields for released-0.12 compatibility, while the development server always returns them as a timestamp/actor or null.
+
+Message `metadata` is a flat, bounded object for application context such as ticket IDs, assignment references, incident severity, or action names. Keys and scalar values are validated client-side before HTTP or WebSocket transport; the server remains authoritative. `updateMessage(roomId, messageId, content)` preserves metadata, while a fourth `{}` clears it and a complete object replaces it. The field is optional on `ChatMessage` so this SDK can still consume released 0.12 events. Treat it as untrusted display/integration data, never authorization, HTML, routing, or executable component configuration.
 
 ## Operator session
 

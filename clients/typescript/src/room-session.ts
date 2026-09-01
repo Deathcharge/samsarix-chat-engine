@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import { SamsarixConnectionError } from "./errors.js";
+import { isMessageMetadata, normalizeMessageMetadata } from "./metadata.js";
 import type { SamsarixChatClient } from "./client.js";
 import type {
   ConnectionState,
   Credential,
   RoomEvent,
+  MessageMetadata,
   RoomSessionOptions,
   WebSocketFactory,
   WebSocketLike,
@@ -129,7 +131,7 @@ export class RoomSession {
     closeTransport(socket, code, reason);
   }
 
-  sendMessage(content: string, clientMessageId?: string): void {
+  sendMessage(content: string, clientMessageId?: string, metadata?: MessageMetadata): void {
     if (content.trim().length === 0) {
       throw new TypeError("content must not be blank");
     }
@@ -143,10 +145,16 @@ export class RoomSession {
       type: "message",
       content,
       ...(clientMessageId === undefined ? {} : { client_message_id: clientMessageId }),
+      ...(metadata === undefined ? {} : { metadata: normalizeMessageMetadata(metadata) }),
     });
   }
 
-  sendReply(parentMessageId: string, content: string, clientMessageId?: string): void {
+  sendReply(
+    parentMessageId: string,
+    content: string,
+    clientMessageId?: string,
+    metadata?: MessageMetadata,
+  ): void {
     if (parentMessageId.length === 0 || parentMessageId.length > 128) {
       throw new RangeError("parentMessageId must be between 1 and 128 characters");
     }
@@ -164,6 +172,7 @@ export class RoomSession {
       content,
       parent_message_id: parentMessageId,
       ...(clientMessageId === undefined ? {} : { client_message_id: clientMessageId }),
+      ...(metadata === undefined ? {} : { metadata: normalizeMessageMetadata(metadata) }),
     });
   }
 
@@ -542,6 +551,7 @@ function isChatMessage(value: unknown): boolean {
         ))) &&
     (!("pinned_at" in value) || isNullableStringField(value, "pinned_at")) &&
     (!("pinned_by" in value) || isNullableStringField(value, "pinned_by")) &&
+    (!("metadata" in value) || isMessageMetadata(value.metadata)) &&
     isNullableStringField(value, "edited_at") &&
     isNullableStringField(value, "deleted_at")
   );

@@ -2,12 +2,13 @@
 
 Samsarix Chat Engine is a small, local-first room chat service from Samsarix LLC for developers who need persisted messages and live WebSocket delivery without adopting a full collaboration platform. It runs as a standalone FastAPI service or as an embeddable ASGI application, stores data in SQLite, and has no dependency on Redis, an LLM provider, or any private package.
 
-Version 0.12.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, verification-only asymmetric authentication, accountable data lifecycle, practical conversation controls, typed TypeScript client, support workflow and retrieval, durable application webhooks, and hardened container deployment are implemented and tested. The development branch additionally includes unreleased one-depth threaded replies, bounded message reactions, shared room pins, and a guarded PostgreSQL multi-instance preview. The project is licensed under the standard Mozilla Public License 2.0.
+Version 0.12.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, verification-only asymmetric authentication, accountable data lifecycle, practical conversation controls, typed TypeScript client, support workflow and retrieval, durable application webhooks, and hardened container deployment are implemented and tested. The development branch additionally includes unreleased one-depth threaded replies, bounded message reactions, shared room pins, application message metadata, and a guarded PostgreSQL multi-instance preview. The project is licensed under the standard Mozilla Public License 2.0.
 
 ## What works
 
 - Create and inspect rooms over HTTP.
 - Post validated messages over HTTP or WebSocket.
+- Attach bounded scalar application context such as ticket, assignment, incident, or action identifiers to messages.
 - Persist room history in SQLite and recover it after reconnect or restart.
 - Search the current retained content of one authorized room with Unicode-aware cursor pagination.
 - Keep contextual follow-ups in one-depth threads with authorized reply pagination.
@@ -60,7 +61,7 @@ curl -X POST http://127.0.0.1:8000/v1/rooms \
 curl -X POST http://127.0.0.1:8000/v1/rooms/general/messages \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: getting-started-1" \
-  -d '{"sender":"Andrew","content":"Hello, room"}'
+  -d '{"sender":"Andrew","content":"Hello, room","metadata":{"ticket.id":"SUP-42","priority":2}}'
 
 curl http://127.0.0.1:8000/v1/rooms/general/messages
 
@@ -104,7 +105,7 @@ The profile publishes only to host loopback, runs as UID/GID 10001, mounts `/dat
 
 The framework-neutral [`@samsarix/chat-client`](clients/typescript/README.md) source ships in `clients/typescript`. It wraps authenticated HTTP operations and browser-safe first-message WebSocket authentication, emits generated declarations, refreshes credentials on reconnect, and applies bounded exponential backoff without runtime dependencies. The package is verified and packable but is not yet published to npm.
 
-Unpublished SDK 0.7.0 adds `listPinnedMessages()`, `pinMessage()`, and `unpinMessage()` alongside reactions and threaded replies, while retaining the 0.4 connection contract: it waits for initial history and a post-history activation reply before `connect()` resolves. Attempts have a configurable deadline; retry budgets reset only after a stable activated connection, not merely `ready`. See the [migration and recovery contract](clients/typescript/README.md#reconnect-behavior), including browser-legal close codes and caller-owned history reconciliation.
+Unpublished SDK 0.8.0 adds bounded message metadata to HTTP and WebSocket helpers alongside pins, reactions, and threaded replies, while retaining the 0.4 connection contract: it waits for initial history and a post-history activation reply before `connect()` resolves. Attempts have a configurable deadline; retry budgets reset only after a stable activated connection, not merely `ready`. See the [migration and recovery contract](clients/typescript/README.md#reconnect-behavior), including browser-legal close codes and caller-owned history reconciliation.
 
 ## WebSocket protocol
 
@@ -117,7 +118,7 @@ ws://127.0.0.1:8000/v1/rooms/{room_id}/ws
 The server sends `ready` and `history`, then accepts these JSON commands:
 
 ```json
-{"type":"message","content":"Hello","client_message_id":"browser-42"}
+{"type":"message","content":"Hello","client_message_id":"browser-42","metadata":{"ticket.id":"SUP-42"}}
 ```
 
 To reply to a top-level message, add its ID:

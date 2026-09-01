@@ -15,6 +15,11 @@ const chat = new SamsarixChatClient({
 });
 
 const before = await chat.getReadState("support-case-42");
+await chat.createMessage("support-case-42", {
+  content: "Payment failed after the upgrade",
+  client_message_id: crypto.randomUUID(),
+  metadata: { "ticket.id": "SUP-42", "ticket.channel": "in_product" },
+});
 const messages = await chat.listMessages("support-case-42");
 const paymentContext = await chat.searchMessages("support-case-42", "payment failed");
 const original = paymentContext.items.at(-1);
@@ -57,6 +62,8 @@ Threads are a presentation aid, not a separate authorization or delivery boundar
 Reactions are low-noise state signals, not replacement messages or workflow authority. Use a small product-owned vocabulary such as `ack`, `resolved`, `needs_attention`, or `helpful`; show the server's grouped counts and replace a message from each `message.reaction.updated` event. The host application still decides whether a reaction should transition a ticket or notify a human. Each actor/key pair is unique, distinct keys are capped at 20 per message, and tombstoning a message removes its reaction actors and counts.
 
 Pins are shared room curation, not private bookmarks or workflow authority. Give `room:pin` only to agents, teachers, moderators, or incident leads that may elevate an accepted answer, runbook, decision, guideline, or announcement for everyone with room read access. Pin mutations also require `room:read`, are metadata-audited, and emit `message.pin.updated`; refresh the newest-first pin list after reconnect or concurrent changes. Tombstoning clears the pin. The host application still decides whether a pinned resolution should close a case or trigger another side effect.
+
+Application message metadata connects the room transcript to host-owned records without making chat storage the workflow database. Use bounded scalar references such as `ticket.id`, `assignment.id`, `incident.severity`, `runbook`, or `action`; keep customer records, access decisions, arbitrary nested data, and executable UI configuration in the host application. Every participant with room read access and every selected message webhook receiver can see the metadata. Treat values as untrusted display/integration data, and use the signed token—not metadata—for authorization. Tombstoning clears the object along with message content.
 
 The runnable [support workflow example](../examples/03_support_workflow.py) demonstrates the complete HTTP path with separate customer and agent identities. With a server running and an operator key plus signing secret configured, issue two tokens:
 

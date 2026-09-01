@@ -142,8 +142,8 @@ test("browser authentication, typed events, publish, ping, and close", async () 
     updated_at: "2026-08-31T00:00:02Z",
   });
 
-  session.sendMessage("hello", "client-1");
-  session.sendReply("parent-1", "answer", "reply-1");
+  session.sendMessage("hello", "client-1", { "ticket.id": "SUP-42", priority: 2 });
+  session.sendReply("parent-1", "answer", "reply-1", { action: "escalate" });
   session.ping();
   session.setTyping(true);
   session.setTyping(false);
@@ -153,9 +153,22 @@ test("browser authentication, typed events, publish, ping, and close", async () 
   assert.throws(() => session.sendReply("", "answer"), RangeError);
   assert.throws(() => session.sendReply("parent-1", " "), TypeError);
   assert.throws(() => session.sendReply("parent-1", "more than ten"), RangeError);
+  assert.throws(() => session.sendMessage("hello", undefined, { Bad: "key" }), RangeError);
+  assert.throws(() => session.sendMessage("hello", undefined, { number: Number.POSITIVE_INFINITY }), RangeError);
   assert.deepEqual(sockets[0].sent.slice(2), [
-    { type: "message", content: "hello", client_message_id: "client-1" },
-    { type: "message", content: "answer", parent_message_id: "parent-1", client_message_id: "reply-1" },
+    {
+      type: "message",
+      content: "hello",
+      client_message_id: "client-1",
+      metadata: { priority: 2, "ticket.id": "SUP-42" },
+    },
+    {
+      type: "message",
+      content: "answer",
+      parent_message_id: "parent-1",
+      client_message_id: "reply-1",
+      metadata: { action: "escalate" },
+    },
     { type: "ping" },
     { type: "typing", active: true },
     { type: "typing", active: false },

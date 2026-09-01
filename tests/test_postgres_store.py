@@ -100,7 +100,7 @@ async def test_schema_v2_migrates_transactionally_and_widens_event_payloads(
     service = _store(clean_postgres_database)
     await service.initialize()
     try:
-        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 11
+        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 12
         assert await service.check_ready()
         assert await service.list_rooms() == []
         async with service.foundation.transaction() as connection:
@@ -195,7 +195,7 @@ async def test_schema_v6_backfills_matching_instance_generations(
     service = _store(clean_postgres_database)
     await service.initialize()
     try:
-        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 11
+        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 12
         async with service.foundation.transaction() as connection:
             cursor = await connection.execute(
                 """
@@ -240,7 +240,7 @@ async def test_schema_v8_adds_thread_parent_column_and_index(clean_postgres_data
     migrated = _store(clean_postgres_database)
     await migrated.initialize()
     try:
-        assert await migrated.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 11
+        assert await migrated.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 12
         async with migrated.foundation.transaction() as connection:
             cursor = await connection.execute(
                 """
@@ -274,7 +274,7 @@ async def test_schema_v9_adds_reaction_storage(clean_postgres_database: str) -> 
     migrated = _store(clean_postgres_database)
     await migrated.initialize()
     try:
-        assert await migrated.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 11
+        assert await migrated.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 12
         async with migrated.foundation.transaction() as connection:
             cursor = await connection.execute(
                 """
@@ -286,6 +286,33 @@ async def test_schema_v9_adds_reaction_storage(clean_postgres_database: str) -> 
             assert await cursor.fetchone() == ("reaction_summaries",)
             cursor = await connection.execute("SELECT to_regclass('public.samsarix_message_reactions')")
             assert await cursor.fetchone() == ("samsarix_message_reactions",)
+    finally:
+        await migrated.close()
+
+
+@pytest.mark.asyncio
+async def test_schema_v11_adds_empty_application_metadata(clean_postgres_database: str) -> None:
+    initial = _store(clean_postgres_database)
+    await initial.initialize()
+    await initial.close()
+    async with await psycopg.AsyncConnection.connect(clean_postgres_database, autocommit=True) as connection:
+        await connection.execute("ALTER TABLE public.samsarix_messages DROP COLUMN application_metadata")
+        await connection.execute("UPDATE public.samsarix_schema_metadata SET version = 11")
+
+    migrated = _store(clean_postgres_database)
+    await migrated.initialize()
+    try:
+        assert await migrated.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 12
+        async with migrated.foundation.transaction() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT column_default, is_nullable FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'samsarix_messages'
+                  AND column_name = 'application_metadata'
+                """
+            )
+            row = await cursor.fetchone()
+        assert row is not None and "{}" in str(row[0]) and row[1] == "NO"
     finally:
         await migrated.close()
 
@@ -374,6 +401,84 @@ async def test_threaded_replies_have_postgres_parity(store: PostgresChatStore) -
     )
     assert not created
     assert replay == first
+
+
+@pytest.mark.asyncio
+async def test_message_metadata_has_postgres_parity_and_tombstone_scrubs_events(
+    store: PostgresChatStore,
+) -> None:
+    await store.create_room(RoomCreate(id="general", name="General"))
+    await store.foundation.register_instance("metadata-observer", lease_seconds=30)
+    created, was_created = await store.create_message(
+        room_id="general",
+        sender="alice",
+        content="Investigating",
+        metadata={"ticket.id": "SUP-42", "priority": 2},
+        client_message_id="ticket-42",
+        allow_frozen=False,
+        member_subject="alice",
+        author_subject="alice",
+    )
+    replay, was_replayed = await store.create_message(
+        room_id="general",
+        sender="alice",
+        content="Ignored",
+        metadata={"ticket.id": "OTHER"},
+        client_message_id="ticket-42",
+        allow_frozen=False,
+        member_subject="alice",
+        author_subject="alice",
+    )
+    preserved = await store.update_message(
+        room_id="general",
+        message_id=created.id,
+        actor="alice",
+        content="Still investigating",
+        is_admin=False,
+        member_subject="alice",
+    )
+    replaced = await store.update_message(
+        room_id="general",
+        message_id=created.id,
+        actor="alice",
+        content="Resolved",
+        metadata={"resolution": "cache-flush"},
+        is_admin=False,
+        member_subject="alice",
+    )
+    cleared = await store.update_message(
+        room_id="general",
+        message_id=created.id,
+        actor="alice",
+        content="Closed",
+        metadata={},
+        is_admin=False,
+        member_subject="alice",
+    )
+    await store.update_message(
+        room_id="general",
+        message_id=created.id,
+        actor="alice",
+        content="Closed",
+        metadata={"ticket.id": "SUP-42"},
+        is_admin=False,
+        member_subject="alice",
+    )
+    deleted, changed = await store.delete_message(
+        room_id="general",
+        message_id=created.id,
+        actor="alice",
+        is_admin=False,
+        member_subject="alice",
+    )
+    events = await store.foundation.read_events("metadata-observer")
+
+    assert was_created and not was_replayed and replay == created
+    assert preserved.metadata == {"priority": 2, "ticket.id": "SUP-42"}
+    assert replaced.metadata == {"resolution": "cache-flush"}
+    assert cleared.metadata == {}
+    assert changed and deleted.content == "" and deleted.metadata == {}
+    assert events and all(event.payload["message"]["metadata"] == {} for event in events)
 
 
 @pytest.mark.asyncio
@@ -771,6 +876,7 @@ async def test_age_retention_scrubs_evicted_event_body(clean_postgres_database: 
             room_id="general",
             sender="alice",
             content="expired secret",
+            metadata={"ticket.id": "RETENTION-1"},
             client_message_id=None,
             allow_frozen=False,
         )
@@ -1151,6 +1257,7 @@ async def test_explicit_retention_scrubs_terminal_webhook_and_event_payload(clea
         assert len(deliveries) == 1 and not deliveries[0].replayable
         events = await service.foundation.read_events("retention-observer")
         assert events[0].payload["message"]["content"] == ""
+        assert events[0].payload["message"]["metadata"] == {}
         audits, _ = await service.list_audit_events()
         assert audits[-1].action == "retention.executed"
     finally:

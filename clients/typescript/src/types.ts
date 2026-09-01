@@ -5,6 +5,8 @@ export type TokenCredential = { token: string; apiKey?: never };
 export type ApiKeyCredential = { apiKey: string; token?: never };
 export type Credential = TokenCredential | ApiKeyCredential;
 export type CredentialProvider = Credential | (() => Credential | Promise<Credential>);
+export type MessageMetadataValue = string | number | boolean | null;
+export type MessageMetadata = Record<string, MessageMetadataValue>;
 
 export interface Room {
   id: string;
@@ -41,6 +43,8 @@ export interface ChatMessage {
   pinned_at?: string | null;
   /** Stable subject or operator-supplied actor that created the current pin. */
   pinned_by?: string | null;
+  /** Bounded application context; released 0.12 servers omit it. */
+  metadata?: MessageMetadata;
   edited_at: string | null;
   deleted_at: string | null;
 }
@@ -72,6 +76,7 @@ export interface MessageCreate {
   content: string;
   client_message_id?: string;
   parent_message_id?: string;
+  metadata?: MessageMetadata;
 }
 
 export interface MessagePage {

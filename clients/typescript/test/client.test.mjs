@@ -51,6 +51,42 @@ test("REST methods authenticate, encode identifiers, and preserve idempotency", 
   assert.deepEqual(JSON.parse(requests[0].init.body), { content: "hello" });
 });
 
+test("message metadata is canonicalized, updated, cleared, and bounded before transport", async () => {
+  const requests = [];
+  const client = new SamsarixChatClient({
+    baseUrl: "https://chat.example",
+    credential: { token: "room-token" },
+    fetch: async (url, init) => {
+      requests.push({ url: String(url), init });
+      return jsonResponse({});
+    },
+  });
+
+  await client.createMessage("support", {
+    content: "Investigating",
+    metadata: { "ticket.id": "SUP-42", priority: 2 },
+  });
+  await client.updateMessage("support", "message-1", "Resolved", {});
+  await client.updateMessage("support", "message-1", "Copy edit");
+
+  assert.deepEqual(JSON.parse(requests[0].init.body).metadata, { priority: 2, "ticket.id": "SUP-42" });
+  assert.deepEqual(JSON.parse(requests[1].init.body), { content: "Resolved", metadata: {} });
+  assert.deepEqual(JSON.parse(requests[2].init.body), { content: "Copy edit" });
+  await assert.rejects(
+    client.createMessage("support", { content: "bad", metadata: { Bad: "key" } }),
+    RangeError,
+  );
+  await assert.rejects(
+    client.createMessage("support", { content: "bad", metadata: { number: Number.NaN } }),
+    RangeError,
+  );
+  await assert.rejects(
+    client.createMessage("support", { content: "bad", metadata: { context: "é".repeat(2050) } }),
+    RangeError,
+  );
+  assert.equal(requests.length, 3);
+});
+
 test("concurrent operations share one in-flight credential refresh", async () => {
   let credentials = 0;
   let releaseCredential;

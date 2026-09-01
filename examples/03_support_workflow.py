@@ -62,7 +62,10 @@ status, customer_message = request(
     "POST",
     f"/v1/rooms/{ROOM_ID}/messages",
     credential=CUSTOMER_TOKEN,
-    payload={"content": "My deployment cannot reconnect."},
+    payload={
+        "content": "My deployment cannot reconnect.",
+        "metadata": {"ticket.id": "SUP-DEMO-1", "ticket.channel": "in_product"},
+    },
 )
 if status != 201 or not isinstance(customer_message, dict):
     raise SystemExit(f"Could not create customer message: {status} {customer_message}")
@@ -80,7 +83,10 @@ status, agent_message = request(
     "POST",
     f"/v1/rooms/{ROOM_ID}/messages",
     credential=AGENT_TOKEN,
-    payload={"content": "I found the reconnect configuration issue."},
+    payload={
+        "content": "I found the reconnect configuration issue.",
+        "metadata": {"ticket.id": "SUP-DEMO-1", "action": "provide_resolution"},
+    },
 )
 if status != 201 or not isinstance(agent_message, dict):
     raise SystemExit(f"Could not create agent reply: {status} {agent_message}")

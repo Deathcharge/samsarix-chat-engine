@@ -25,6 +25,7 @@ from .models import (
     MemberModeration,
     MemberModerationUpdate,
     Message,
+    MessageMetadata,
     PinMutation,
     ReactionMutation,
     ReactionSummary,
@@ -35,7 +36,7 @@ from .models import (
 )
 
 T = TypeVar("T")
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 logger = logging.getLogger(__name__)
 
 
@@ -347,6 +348,7 @@ class ChatStorage(Protocol):
         room_id: str,
         sender: str,
         content: str,
+        metadata: MessageMetadata,
         client_message_id: str | None,
         parent_message_id: str | None,
         allow_frozen: bool,
@@ -361,6 +363,7 @@ class ChatStorage(Protocol):
         message_id: str,
         actor: str,
         content: str,
+        metadata: MessageMetadata | None,
         is_admin: bool,
         member_subject: str | None = None,
     ) -> Message: ...
@@ -591,6 +594,7 @@ class ChatStore:
         room_id: str,
         sender: str,
         content: str,
+        metadata: MessageMetadata | None = None,
         client_message_id: str | None,
         parent_message_id: str | None = None,
         allow_frozen: bool,
@@ -603,6 +607,7 @@ class ChatStore:
                 room_id,
                 sender,
                 content,
+                metadata or {},
                 client_message_id,
                 parent_message_id,
                 allow_frozen,
@@ -617,6 +622,7 @@ class ChatStore:
         message_id: str,
         actor: str,
         content: str,
+        metadata: MessageMetadata | None = None,
         is_admin: bool,
         member_subject: str | None = None,
     ) -> Message:
@@ -627,6 +633,7 @@ class ChatStore:
                 message_id,
                 actor,
                 content,
+                metadata,
                 is_admin,
                 member_subject,
             )
@@ -797,7 +804,7 @@ class ChatStore:
             cursor = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
+                       parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json, edited_at, deleted_at
                 FROM messages WHERE room_id = ? ORDER BY created_at, id
                 """,
                 (room_id,),
@@ -917,6 +924,9 @@ class ChatStore:
                     reactions_json TEXT NOT NULL DEFAULT '[]',
                     pinned_at TEXT,
                     pinned_by TEXT CHECK (pinned_by IS NULL OR length(pinned_by) BETWEEN 1 AND 64),
+                    metadata_json TEXT NOT NULL DEFAULT '{}' CHECK (
+                        length(CAST(metadata_json AS BLOB)) <= 4096
+                    ),
                     UNIQUE(room_id, client_message_id)
                 );
 
@@ -948,6 +958,8 @@ class ChatStore:
                 connection.execute("ALTER TABLE messages ADD COLUMN pinned_at TEXT")
             if "pinned_by" not in message_columns:
                 connection.execute("ALTER TABLE messages ADD COLUMN pinned_by TEXT")
+            if "metadata_json" not in message_columns:
+                connection.execute("ALTER TABLE messages ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'")
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS messages_thread_order "
                 "ON messages(room_id, parent_message_id, created_at DESC, id DESC)"
@@ -1129,6 +1141,7 @@ class ChatStore:
         room_id: str,
         sender: str,
         content: str,
+        metadata: MessageMetadata,
         client_message_id: str | None,
         parent_message_id: str | None,
         allow_frozen: bool,
@@ -1150,7 +1163,7 @@ class ChatStore:
                 existing = connection.execute(
                     """
                     SELECT id, room_id, sender, content, created_at, client_message_id,
-                           parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
+                           parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json, edited_at, deleted_at
                     FROM messages WHERE room_id = ? AND client_message_id = ?
                     """,
                     (room_id, client_message_id),
@@ -1181,12 +1194,14 @@ class ChatStore:
                 created_at=datetime.now(timezone.utc),
                 client_message_id=client_message_id,
                 parent_message_id=parent_message_id,
+                metadata=metadata,
             )
             connection.execute(
                 """
                 INSERT INTO messages (
-                    id, room_id, sender, author_subject, content, created_at, client_message_id, parent_message_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    id, room_id, sender, author_subject, content, created_at, client_message_id,
+                    parent_message_id, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message.id,
@@ -1197,13 +1212,20 @@ class ChatStore:
                     message.created_at.isoformat(),
                     message.client_message_id,
                     message.parent_message_id,
+                    json.dumps(
+                        message.metadata,
+                        ensure_ascii=False,
+                        allow_nan=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
                 ),
             )
             self._trim_messages(connection, room_id, now=message.created_at)
             persisted = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
+                       parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json, edited_at, deleted_at
                 FROM messages WHERE id = ?
                 """,
                 (message.id,),
@@ -1227,6 +1249,7 @@ class ChatStore:
         message_id: str,
         actor: str,
         content: str,
+        metadata: MessageMetadata | None,
         is_admin: bool,
         member_subject: str | None,
     ) -> Message:
@@ -1243,7 +1266,7 @@ class ChatStore:
             row = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
+                       parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json, edited_at, deleted_at
                 FROM messages WHERE room_id = ? AND id = ?
                 """,
                 (room_id, message_id),
@@ -1256,8 +1279,22 @@ class ChatStore:
                 raise MessageOwnershipError(message_id)
             edited_at = datetime.now(timezone.utc)
             connection.execute(
-                "UPDATE messages SET content = ?, edited_at = ? WHERE id = ?",
-                (content, edited_at.isoformat(), message_id),
+                "UPDATE messages SET content = ?, metadata_json = COALESCE(?, metadata_json), "
+                "edited_at = ? WHERE id = ?",
+                (
+                    content,
+                    json.dumps(
+                        metadata,
+                        ensure_ascii=False,
+                        allow_nan=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    if metadata is not None
+                    else None,
+                    edited_at.isoformat(),
+                    message_id,
+                ),
             )
             self._insert_audit(
                 connection,
@@ -1269,7 +1306,7 @@ class ChatStore:
             row = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
+                       parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json, edited_at, deleted_at
                 FROM messages WHERE id = ?
                 """,
                 (message_id,),
@@ -1306,7 +1343,7 @@ class ChatStore:
             row = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
+                       parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json, edited_at, deleted_at
                 FROM messages WHERE room_id = ? AND id = ?
                 """,
                 (room_id, message_id),
@@ -1320,7 +1357,7 @@ class ChatStore:
             deleted_at = datetime.now(timezone.utc)
             connection.execute("DELETE FROM message_reactions WHERE message_id = ?", (message_id,))
             connection.execute(
-                "UPDATE messages SET content = '', reactions_json = '[]', pinned_at = NULL, "
+                "UPDATE messages SET content = '', reactions_json = '[]', pinned_at = NULL, metadata_json = '{}', "
                 "pinned_by = NULL, deleted_at = ? WHERE id = ?",
                 (deleted_at.isoformat(), message_id),
             )
@@ -1334,7 +1371,7 @@ class ChatStore:
             row = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
+                       parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json, edited_at, deleted_at
                 FROM messages WHERE id = ?
                 """,
                 (message_id,),
@@ -1375,7 +1412,7 @@ class ChatStore:
             row = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
+                       parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json, edited_at, deleted_at
                 FROM messages WHERE room_id = ? AND id = ?
                 """,
                 (room_id, message_id),
@@ -1436,7 +1473,7 @@ class ChatStore:
                 row = connection.execute(
                     """
                     SELECT id, room_id, sender, content, created_at, client_message_id,
-                           parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
+                           parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json, edited_at, deleted_at
                     FROM messages WHERE id = ?
                     """,
                     (message_id,),
@@ -1485,7 +1522,7 @@ class ChatStore:
             row = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
+                       parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json, edited_at, deleted_at
                 FROM messages WHERE room_id = ? AND id = ?
                 """,
                 (room_id, message_id),
@@ -1511,7 +1548,7 @@ class ChatStore:
                 row = connection.execute(
                     """
                     SELECT id, room_id, sender, content, created_at, client_message_id,
-                           parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
+                           parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json, edited_at, deleted_at
                     FROM messages WHERE id = ?
                     """,
                     (message_id,),
@@ -1703,7 +1740,7 @@ class ChatStore:
                 rows = connection.execute(
                     """
                     SELECT id, room_id, sender, content, created_at, client_message_id,
-                           parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
+                           parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json, edited_at, deleted_at
                     FROM messages
                     WHERE room_id = ? AND (created_at < ? OR (created_at = ? AND id < ?))
                     ORDER BY created_at DESC, id DESC
@@ -1715,7 +1752,7 @@ class ChatStore:
                 rows = connection.execute(
                     """
                     SELECT id, room_id, sender, content, created_at, client_message_id,
-                           parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
+                           parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json, edited_at, deleted_at
                     FROM messages
                     WHERE room_id = ?
                     ORDER BY created_at DESC, id DESC
@@ -1752,7 +1789,7 @@ class ChatStore:
             rows = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
+                       parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json, edited_at, deleted_at
                 FROM messages
                 WHERE room_id = ? AND pinned_at IS NOT NULL
                   AND (? IS NULL OR pinned_at < ? OR (pinned_at = ? AND id < ?))
@@ -1808,7 +1845,7 @@ class ChatStore:
             rows = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
+                       parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json, edited_at, deleted_at
                 FROM messages
                 WHERE room_id = ? AND parent_message_id = ?
                   AND (? IS NULL OR created_at < ? OR (created_at = ? AND id < ?))
@@ -1855,7 +1892,7 @@ class ChatStore:
             rows = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
+                       parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json, edited_at, deleted_at
                 FROM messages
                 WHERE room_id = ?
                   AND deleted_at IS NULL
@@ -2372,6 +2409,7 @@ class ChatStore:
             reactions=[ReactionSummary.model_validate(item) for item in json.loads(row["reactions_json"])],
             pinned_at=datetime.fromisoformat(row["pinned_at"]) if row["pinned_at"] else None,
             pinned_by=row["pinned_by"],
+            metadata=json.loads(row["metadata_json"]),
             edited_at=datetime.fromisoformat(row["edited_at"]) if row["edited_at"] else None,
             deleted_at=datetime.fromisoformat(row["deleted_at"]) if row["deleted_at"] else None,
         )
