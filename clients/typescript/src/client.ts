@@ -15,6 +15,7 @@ import type {
   MessagePage,
   PinMutation,
   ReadState,
+  ReadStateQueryResult,
   ReactionMutation,
   Room,
   RoomCreate,
@@ -22,6 +23,9 @@ import type {
   RoomUpdate,
   WebSocketFactory,
 } from "./types.js";
+
+const ROOM_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const READ_STATE_QUERY_MAX_ROOMS = 100;
 
 export interface SamsarixClientOptions {
   baseUrl: string;
@@ -186,6 +190,22 @@ export class SamsarixChatClient {
 
   async getReadState(roomId: string): Promise<ReadState> {
     return this.request<ReadState>(`/v1/rooms/${encodeURIComponent(roomId)}/read-state`);
+  }
+
+  async queryReadStates(roomIds: readonly string[]): Promise<ReadStateQueryResult> {
+    if (!Array.isArray(roomIds) || roomIds.length === 0 || roomIds.length > READ_STATE_QUERY_MAX_ROOMS) {
+      throw new TypeError(`roomIds must contain between 1 and ${READ_STATE_QUERY_MAX_ROOMS} items`);
+    }
+    if (roomIds.some((roomId) => typeof roomId !== "string" || !ROOM_ID_PATTERN.test(roomId))) {
+      throw new TypeError("roomIds must contain valid room IDs");
+    }
+    if (new Set(roomIds).size !== roomIds.length) {
+      throw new TypeError("roomIds must not contain duplicates");
+    }
+    return this.request<ReadStateQueryResult>("/v1/read-states/query", {
+      method: "POST",
+      body: { room_ids: [...roomIds] },
+    });
   }
 
   async markRead(roomId: string, messageId?: string): Promise<ReadState> {

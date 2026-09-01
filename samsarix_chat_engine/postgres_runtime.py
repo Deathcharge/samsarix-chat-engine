@@ -50,6 +50,7 @@ class PostgresApplicationRuntime:
         searches_per_minute: int,
         typing_events_per_minute: int,
         typing_timeout_seconds: float,
+        read_state_queries_per_minute: int = 60,
         min_pool_size: int = 1,
         max_pool_size: int = 10,
         pool_timeout_seconds: float = 10.0,
@@ -103,6 +104,12 @@ class PostgresApplicationRuntime:
             foundation,
             scope="search",
             limit=searches_per_minute,
+            max_buckets=max_rate_buckets,
+        )
+        self.read_state_limiter = PostgresRateLimiter(
+            foundation,
+            scope="search",
+            limit=read_state_queries_per_minute,
             max_buckets=max_rate_buckets,
         )
         self.typing_limiter = PostgresRateLimiter(

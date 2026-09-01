@@ -248,6 +248,7 @@ class Settings:
     max_connections_per_room: int = 100
     messages_per_minute: int = 60
     searches_per_minute: int = 30
+    read_state_queries_per_minute: int = 60
     max_rooms: int = 1_000
     max_stored_messages: int = 100_000
     max_stored_messages_per_room: int = 10_000
@@ -328,6 +329,7 @@ class Settings:
             "max_connections_per_room": (self.max_connections_per_room, 1, 100_000),
             "messages_per_minute": (self.messages_per_minute, 1, 100_000),
             "searches_per_minute": (self.searches_per_minute, 1, 100_000),
+            "read_state_queries_per_minute": (self.read_state_queries_per_minute, 1, 100_000),
             "max_rooms": (self.max_rooms, 1, 1_000_000),
             "max_stored_messages": (self.max_stored_messages, 1, 10_000_000),
             "max_stored_messages_per_room": (self.max_stored_messages_per_room, 1, 1_000_000),
@@ -524,6 +526,7 @@ class Settings:
             max_connections_per_room=_read_int("MAX_CONNECTIONS_PER_ROOM", 100, minimum=1, maximum=100_000),
             messages_per_minute=_read_int("MESSAGES_PER_MINUTE", 60, minimum=1, maximum=100_000),
             searches_per_minute=_read_int("SEARCHES_PER_MINUTE", 30, minimum=1, maximum=100_000),
+            read_state_queries_per_minute=_read_int("READ_STATE_QUERIES_PER_MINUTE", 60, minimum=1, maximum=100_000),
             max_rooms=_read_int("MAX_ROOMS", 1_000, minimum=1, maximum=1_000_000),
             max_stored_messages=_read_int("MAX_STORED_MESSAGES", 100_000, minimum=1, maximum=10_000_000),
             max_stored_messages_per_room=_read_int(

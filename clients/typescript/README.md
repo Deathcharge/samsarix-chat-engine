@@ -1,6 +1,6 @@
 # `@samsarix/chat-client`
 
-Dependency-free TypeScript client for Samsarix Chat Engine's implemented HTTP and WebSocket contracts, including the 0.12 server and guarded PostgreSQL preview. Unpublished SDK 0.9.0 ships ESM and generated declarations, works with browser globals, and accepts injected `fetch`/`WebSocket` implementations for Node runtimes and tests. Node 18 requires an injected WebSocket implementation; the live smoke uses Node's newer native WebSocket.
+Dependency-free TypeScript client for Samsarix Chat Engine's implemented HTTP and WebSocket contracts, including the 0.12 server and guarded PostgreSQL preview. Unpublished SDK 0.10.0 ships ESM and generated declarations, works with browser globals, and accepts injected `fetch`/`WebSocket` implementations for Node runtimes and tests. Node 18 requires an injected WebSocket implementation; the live smoke uses Node's newer native WebSocket.
 
 This package is part of the Samsarix Chat Engine repository and is not yet published to npm.
 
@@ -11,7 +11,7 @@ cd clients/typescript
 npm ci
 npm run build
 npm pack
-npm install ./samsarix-chat-client-0.9.0.tgz
+npm install ./samsarix-chat-client-0.10.0.tgz
 ```
 
 ## Token client
@@ -70,9 +70,11 @@ room.onEvent((event) => {
 });
 await room.connect();
 const unread = await client.getReadState("support-42");
+const inbox = await client.queryReadStates(["support-42", "support-43"]);
 const matches = await client.searchMessages("support-42", "payment failed", { limit: 25 });
 console.log("matches", matches.items);
 console.log("unread", unread.unread_count);
+console.log("inbox unread", inbox.total_unread_count);
 await client.markRead("support-42");
 room.setTyping(true);
 room.sendMessage("Live follow-up", crypto.randomUUID(), { "ticket.id": "SUP-42" });
@@ -83,7 +85,7 @@ room.setTyping(false);
 
 The credential provider is called again on reconnect, allowing the host application to refresh short-lived tokens. Authentication secrets are sent in the first WebSocket message, never in the URL.
 
-Read-state methods require a signed application-user token because the server binds the cursor to its stable subject; operator API keys cannot stand in for an end user. Typing is ephemeral and automatically expires server-side if a client misses its stop transition.
+Read-state methods require a signed application-user token because the server binds the cursor to its stable subject; operator API keys cannot stand in for an end user. `queryReadStates()` accepts 1–100 unique room IDs, validates them before transport, and preserves caller order. The token must grant `room:read` for every requested room. Its content-free result includes each cursor/count and latest visible message ID/time plus aggregate unread totals; the host still owns room discovery, assignment, labels, and previews. Typing is ephemeral and automatically expires server-side if a client misses its stop transition.
 
 Replies are one level deep. `listReplies()` pages one top-level message's replies, while `sendReply()` publishes through the existing `message.created` event with `message.parent_message_id` set. Room history remains a flat chronological stream, so reconcile all messages by ID and use the parent field only for presentation/grouping. The output field remains optional in the SDK type so current clients can consume released 0.12 WebSocket events, which predate the field; the threaded development server always returns either a parent ID or null.
 

@@ -23,6 +23,7 @@ ATTACHMENT_MEDIA_TYPE_PATTERN = r"^[a-z0-9][a-z0-9!#$&^_.+\-]{0,62}/[a-z0-9][a-z
 ATTACHMENT_SHA256_PATTERN = r"^[a-f0-9]{64}$"
 MESSAGE_ATTACHMENTS_MAX_COUNT = 5
 MESSAGE_ATTACHMENTS_MAX_BYTES = 8_192
+READ_STATE_QUERY_MAX_ROOMS = 100
 
 MessageMetadataValue = str | int | float | bool | None
 MessageMetadata = dict[str, MessageMetadataValue]
@@ -109,6 +110,18 @@ def validate_attachment_references(value: list[AttachmentReference]) -> list[Att
     ).encode("utf-8")
     if len(encoded) > MESSAGE_ATTACHMENTS_MAX_BYTES:
         raise ValueError(f"attachments must not exceed {MESSAGE_ATTACHMENTS_MAX_BYTES} UTF-8 JSON bytes")
+    return value
+
+
+def validate_read_state_query_room_ids(value: list[str]) -> list[str]:
+    """Return a bounded unique ordered set of canonical room identifiers."""
+
+    if not 1 <= len(value) <= READ_STATE_QUERY_MAX_ROOMS:
+        raise ValueError(f"room_ids must contain between 1 and {READ_STATE_QUERY_MAX_ROOMS} items")
+    if any(re.fullmatch(ROOM_ID_PATTERN, room_id) is None for room_id in value):
+        raise ValueError("room_ids must contain valid room IDs")
+    if len(value) != len(set(value)):
+        raise ValueError("room_ids must not contain duplicates")
     return value
 
 
@@ -280,6 +293,43 @@ class ReadState(APIModel):
     last_read_message_id: str | None
     last_read_at: datetime | None
     unread_count: int
+
+
+class ReadStateQuery(APIModel):
+    """Bounded ordered room set for one signed subject's inbox snapshot."""
+
+    room_ids: list[str] = Field(min_length=1, max_length=READ_STATE_QUERY_MAX_ROOMS)
+
+    @field_validator("room_ids")
+    @classmethod
+    def validate_room_ids(cls, value: list[str]) -> list[str]:
+        return validate_read_state_query_room_ids(value)
+
+
+class ReadStateSummary(APIModel):
+    """One room's cursor, unread count, and content-free latest activity."""
+
+    room_id: str
+    last_read_message_id: str | None
+    last_read_at: datetime | None
+    unread_count: int = Field(ge=0)
+    latest_message_id: str | None
+    latest_message_at: datetime | None
+
+    @model_validator(mode="after")
+    def require_complete_latest_message(self) -> ReadStateSummary:
+        if (self.latest_message_id is None) != (self.latest_message_at is None):
+            raise ValueError("latest_message_id and latest_message_at must both be set or both be null")
+        return self
+
+
+class ReadStateQueryResult(APIModel):
+    """Content-free cross-room inbox state for one signed subject."""
+
+    subject: str
+    items: list[ReadStateSummary]
+    total_unread_count: int = Field(ge=0)
+    unread_room_count: int = Field(ge=0)
 
 
 class AuditEvent(APIModel):

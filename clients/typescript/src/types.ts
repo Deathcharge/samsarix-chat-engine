@@ -103,6 +103,22 @@ export interface ReadState {
   unread_count: number;
 }
 
+export interface ReadStateSummary {
+  room_id: string;
+  last_read_message_id: string | null;
+  last_read_at: string | null;
+  unread_count: number;
+  latest_message_id: string | null;
+  latest_message_at: string | null;
+}
+
+export interface ReadStateQueryResult {
+  subject: string;
+  items: ReadStateSummary[];
+  total_unread_count: number;
+  unread_room_count: number;
+}
+
 export interface MemberModerationUpdate {
   muted_for_seconds?: number;
   banned_for_seconds?: number;

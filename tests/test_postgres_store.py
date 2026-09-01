@@ -29,6 +29,7 @@ from samsarix_chat_engine.store import (  # noqa: E402
     RoomArchivedError,
     RoomCapacityError,
     RoomNotArchivedError,
+    RoomNotFoundError,
     ThreadDepthError,
     WebhookCapacityError,
     WebhookDeliveryNotFoundError,
@@ -1105,6 +1106,86 @@ async def test_read_state_is_monotonic_subject_scoped_and_bounded(clean_postgres
         reset = await service.get_read_state("general", "alice")
         assert reset.last_read_message_id is None
         assert reset.unread_count == 1
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_cross_room_read_state_query_has_postgres_parity(clean_postgres_database: str) -> None:
+    service = _store(clean_postgres_database)
+    await service.initialize()
+    try:
+        for room_id in ("support", "incident", "empty"):
+            await service.create_room(RoomCreate(id=room_id, name=room_id.title()))
+        own, _ = await service.create_message(
+            room_id="support",
+            sender="alice",
+            content="own",
+            client_message_id=None,
+            allow_frozen=False,
+            author_subject="alice",
+        )
+        first_support, _ = await service.create_message(
+            room_id="support",
+            sender="bob",
+            content="first support",
+            client_message_id=None,
+            allow_frozen=False,
+            author_subject="bob",
+        )
+        incident, _ = await service.create_message(
+            room_id="incident",
+            sender="bob",
+            content="incident",
+            client_message_id=None,
+            allow_frozen=False,
+            author_subject="bob",
+        )
+        assert own.id != first_support.id
+        await service.mark_read("support", "alice", first_support.id)
+        latest_support, _ = await service.create_message(
+            room_id="support",
+            sender="bob",
+            content="latest support",
+            client_message_id=None,
+            allow_frozen=False,
+            author_subject="bob",
+        )
+
+        summaries = await service.query_read_states(["incident", "support", "empty"], "alice")
+        assert [summary.room_id for summary in summaries] == ["incident", "support", "empty"]
+        assert [summary.unread_count for summary in summaries] == [1, 1, 0]
+        assert summaries[0].latest_message_id == incident.id
+        assert summaries[0].latest_message_at == incident.created_at
+        assert summaries[1].last_read_message_id == first_support.id
+        assert summaries[1].last_read_at is not None
+        assert summaries[1].latest_message_id == latest_support.id
+        assert summaries[1].latest_message_at == latest_support.created_at
+        assert summaries[2].latest_message_id is None
+        assert summaries[2].latest_message_at is None
+
+        await service.delete_message(
+            room_id="incident",
+            message_id=incident.id,
+            actor="bob",
+            is_admin=False,
+            member_subject="bob",
+        )
+        deleted = (await service.query_read_states(["incident"], "alice"))[0]
+        assert deleted.unread_count == 0
+        assert deleted.latest_message_id is None
+        assert deleted.latest_message_at is None
+
+        with pytest.raises(RoomNotFoundError):
+            await service.query_read_states(["support", "missing-room"], "alice")
+        await service.set_member_moderation(
+            "incident",
+            "alice",
+            MemberModerationUpdate(banned_for_seconds=60),
+            actor="operator",
+        )
+        with pytest.raises(MemberBannedError):
+            await service.query_read_states(["support", "incident"], "alice")
     finally:
         await service.close()
 

@@ -151,6 +151,48 @@ Signed application users with `room:read` receive their current room cursor and 
 
 No row is created by a read. With no stored cursor, all non-deleted messages from other authenticated subjects count as unread. The exclusion uses signed-token author metadata rather than the public display sender; operator/local messages and legacy rows therefore count as other-authored. Shared operator-key and unauthenticated local callers receive `403 stable_subject_required` because they do not identify one durable user.
 
+### `POST /v1/read-states/query`
+
+Returns one content-free inbox snapshot for 1–100 unique room IDs:
+
+```json
+{"room_ids":["support-42","incident-9"]}
+```
+
+The response preserves caller order and includes current aggregate totals:
+
+```json
+{
+  "subject": "agent-7",
+  "items": [
+    {
+      "room_id": "support-42",
+      "last_read_message_id": "message-4",
+      "last_read_at": "2026-09-01T12:00:00Z",
+      "unread_count": 2,
+      "latest_message_id": "message-6",
+      "latest_message_at": "2026-09-01T12:05:00Z"
+    },
+    {
+      "room_id": "incident-9",
+      "last_read_message_id": null,
+      "last_read_at": null,
+      "unread_count": 0,
+      "latest_message_id": null,
+      "latest_message_at": null
+    }
+  ],
+  "total_unread_count": 2,
+  "unread_room_count": 1
+}
+```
+
+Only a signed subject may query. Its token must grant `room:read` for every requested ID before storage is consulted; an unauthorized room fails the whole request with `403 authorization_denied`. An authorized but missing room returns `404 room_not_found`, and any active room ban returns `403 room_banned`. Duplicate, malformed, empty, or oversized room sets return `422 invalid_request`. Reading does not create or update cursor rows.
+
+`latest_message_id` and `latest_message_at` identify the newest non-deleted retained message, or are both null. Bodies, senders, metadata, attachments, reactions, and pin state are never copied into this response; fetch one selected room's authorized history for a preview. The host application supplies the candidate room IDs from its own membership/assignment database and may sort the returned items by unread state or latest activity. This endpoint does not discover membership or list rooms for a user.
+
+SQLite evaluates the requested set in one database statement. PostgreSQL uses one statement and one snapshot across the set. Each signed subject receives `SAMSARIX_CHAT_READ_STATE_QUERIES_PER_MINUTE` requests per 60 seconds, independently keyed from message search; excess returns `429 read_state_query_rate_limit_exceeded` with `Retry-After: 60`. The 100-room bound, retained-message caps, and content-free result limit query and response amplification.
+
 ### `PUT /v1/rooms/{room_id}/read-state`
 
 Advances the signed subject's cursor through one room message:

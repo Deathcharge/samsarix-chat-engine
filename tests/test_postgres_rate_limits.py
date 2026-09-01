@@ -69,6 +69,27 @@ async def test_scopes_and_identity_keys_have_independent_buckets(clean_postgres_
 
 
 @pytest.mark.asyncio
+async def test_inbox_and_search_prefixes_have_independent_shared_query_budgets(
+    clean_postgres_database: str,
+) -> None:
+    first = PostgresFoundation(clean_postgres_database)
+    second = PostgresFoundation(clean_postgres_database)
+    await asyncio.gather(first.open(), second.open())
+    try:
+        first_inbox = PostgresRateLimiter(first, scope="search", limit=1)
+        second_inbox = PostgresRateLimiter(second, scope="search", limit=1)
+        search = PostgresRateLimiter(second, scope="search", limit=1)
+
+        assert await first_inbox.allow("read-state-query:alice")
+        assert not await second_inbox.allow("read-state-query:alice")
+        assert await search.allow("search:alice")
+        assert not await search.allow("search:alice")
+        assert await first_inbox.active_bucket_count() == 2
+    finally:
+        await asyncio.gather(first.close(), second.close())
+
+
+@pytest.mark.asyncio
 async def test_capacity_fails_closed_then_expired_bucket_is_reclaimed(clean_postgres_database: str) -> None:
     foundation = PostgresFoundation(clean_postgres_database)
     await foundation.open()

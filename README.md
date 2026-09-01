@@ -2,7 +2,7 @@
 
 Samsarix Chat Engine is a small, local-first room chat service from Samsarix LLC for developers who need persisted messages and live WebSocket delivery without adopting a full collaboration platform. It runs as a standalone FastAPI service or as an embeddable ASGI application, stores data in SQLite, and has no dependency on Redis, an LLM provider, or any private package.
 
-Version 0.12.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, verification-only asymmetric authentication, accountable data lifecycle, practical conversation controls, typed TypeScript client, support workflow and retrieval, durable application webhooks, and hardened container deployment are implemented and tested. The development branch additionally includes unreleased one-depth threaded replies, bounded message reactions, shared room pins, application message metadata, host-owned attachment references, and a guarded PostgreSQL multi-instance preview. The project is licensed under the standard Mozilla Public License 2.0.
+Version 0.12.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, verification-only asymmetric authentication, accountable data lifecycle, practical conversation controls, typed TypeScript client, support workflow and retrieval, durable application webhooks, and hardened container deployment are implemented and tested. The development branch additionally includes unreleased one-depth threaded replies, bounded message reactions, shared room pins, application message metadata, host-owned attachment references, bounded cross-room inbox state, and a guarded PostgreSQL multi-instance preview. The project is licensed under the standard Mozilla Public License 2.0.
 
 ## What works
 
@@ -17,6 +17,7 @@ Version 0.12.0 is an alpha release candidate. Its core single-instance journey, 
 - Protect operator actions with an optional shared API key.
 - Give application users signed, expiring, per-room read/write/pin access tokens using HS256 or a static public Ed25519/RSA JWKS.
 - Track signed users' monotonic room read cursors and current unread counts without counting their own messages.
+- Build host-owned support/classroom/incident inboxes with one bounded, content-free cross-room read-state query.
 - Exchange separately rate-limited, auto-expiring typing signals without persisting activity history.
 - Let authors edit or delete their own messages while administrators can moderate any message.
 - Freeze rooms for administrator-only announcements, mute disruptive members, and ban room access by token subject.
@@ -169,6 +170,7 @@ All settings are optional for loopback development. Copy [.env.example](.env.exa
 | `SAMSARIX_CHAT_MAX_MESSAGE_CHARS` | `4000` | Per-message character limit |
 | `SAMSARIX_CHAT_MESSAGES_PER_MINUTE` | `60` | Per-client HTTP and per-connection WebSocket message rate |
 | `SAMSARIX_CHAT_SEARCHES_PER_MINUTE` | `30` | Per-subject or client-address room-search rate |
+| `SAMSARIX_CHAT_READ_STATE_QUERIES_PER_MINUTE` | `60` | Per-subject bounded cross-room read-state queries |
 | `SAMSARIX_CHAT_MAX_CONNECTIONS` | `200` | Process-wide WebSocket cap |
 | `SAMSARIX_CHAT_MAX_CONNECTIONS_PER_ROOM` | `100` | Per-room WebSocket cap |
 | `SAMSARIX_CHAT_MAX_ROOMS` | `1000` | Persisted room cap |

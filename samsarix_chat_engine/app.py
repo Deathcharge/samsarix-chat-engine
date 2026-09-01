@@ -56,6 +56,8 @@ from .models import (
     ReactionActor,
     ReactionMutation,
     ReadState,
+    ReadStateQuery,
+    ReadStateQueryResult,
     ReadStateUpdate,
     RetentionResult,
     Room,
@@ -432,6 +434,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     lifecycle_lock: DatabaseLifecycleLock | None = None
     limiter: RateLimiter
     search_limiter: RateLimiter
+    read_state_limiter: RateLimiter
     typing_limiter: RateLimiter
     if resolved.storage_backend == "postgres":
         try:
@@ -460,6 +463,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             max_connections_per_room=resolved.max_connections_per_room,
             messages_per_minute=resolved.messages_per_minute,
             searches_per_minute=resolved.searches_per_minute,
+            read_state_queries_per_minute=resolved.read_state_queries_per_minute,
             typing_events_per_minute=resolved.typing_events_per_minute,
             typing_timeout_seconds=resolved.typing_timeout_seconds,
             min_pool_size=resolved.postgres_min_pool_size,
@@ -478,6 +482,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         store: ChatStorage = postgres_runtime.store
         limiter = postgres_runtime.message_limiter
         search_limiter = postgres_runtime.search_limiter
+        read_state_limiter = postgres_runtime.read_state_limiter
         typing_limiter = postgres_runtime.typing_limiter
     else:
         store = ChatStore(
@@ -494,6 +499,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifecycle_lock = DatabaseLifecycleLock(resolved.database_path)
         limiter = MessageRateLimiter(resolved.messages_per_minute)
         search_limiter = MessageRateLimiter(resolved.searches_per_minute)
+        read_state_limiter = MessageRateLimiter(resolved.read_state_queries_per_minute)
         typing_limiter = MessageRateLimiter(resolved.typing_events_per_minute)
     token_service: AccessTokenVerifier | None = (
         AccessTokenService(
@@ -543,6 +549,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             application.state.connections = manager
             application.state.message_limiter = limiter
             application.state.search_limiter = search_limiter
+            application.state.read_state_limiter = read_state_limiter
             application.state.typing_limiter = typing_limiter
             application.state.token_service = token_service
             application.state.webhook_dispatcher = webhook_dispatcher
@@ -580,6 +587,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.connections = manager
     application.state.message_limiter = limiter
     application.state.search_limiter = search_limiter
+    application.state.read_state_limiter = read_state_limiter
     application.state.typing_limiter = typing_limiter
     application.state.token_service = token_service
     application.state.webhook_dispatcher = webhook_dispatcher
@@ -895,6 +903,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return await store.get_read_state(room_id, subject)
         except RoomNotFoundError as exc:
             raise APIError(404, "room_not_found", "Room not found") from exc
+
+    @router.post("/read-states/query", response_model=ReadStateQueryResult, tags=["messages"])
+    async def query_read_states(payload: ReadStateQuery, principal: PrincipalDependency) -> ReadStateQueryResult:
+        subject = _stable_subject(principal)
+        for room_id in payload.room_ids:
+            _authorize(principal, "room:read", room_id)
+        if not await read_state_limiter.allow(f"read-state-query:{subject}"):
+            raise APIError(
+                429,
+                "read_state_query_rate_limit_exceeded",
+                "Read-state query rate limit exceeded",
+                headers={"Retry-After": "60"},
+            )
+        try:
+            items = await store.query_read_states(payload.room_ids, subject)
+        except RoomNotFoundError as exc:
+            raise APIError(404, "room_not_found", "Room not found") from exc
+        except MemberBannedError as exc:
+            raise APIError(403, "room_banned", "This account is banned from the room") from exc
+        return ReadStateQueryResult(
+            subject=subject,
+            items=items,
+            total_unread_count=sum(item.unread_count for item in items),
+            unread_room_count=sum(item.unread_count > 0 for item in items),
+        )
 
     @router.put("/rooms/{room_id}/read-state", response_model=ReadState, tags=["messages"])
     async def mark_read(room_id: str, payload: ReadStateUpdate, principal: PrincipalDependency) -> ReadState:
