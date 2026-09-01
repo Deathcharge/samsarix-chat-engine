@@ -34,6 +34,6 @@
     "pack:check": "npm run build && npm pack --dry-run"
   },
   "devDependencies": {
-    "typescript": "^5.7.2"
+    "typescript": "^7.0.2"
   }
 }
