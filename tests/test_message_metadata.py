@@ -70,7 +70,7 @@ def test_http_metadata_round_trip_update_clear_idempotency_and_export(
     assert preserved.json()["metadata"] == expected
     assert cleared.json()["metadata"] == {}
     assert history[0]["metadata"] == {}
-    assert export[0]["schema_version"] == 7
+    assert export[0]["schema_version"] == 8
     assert export[1]["message"]["metadata"] == {}
 
 
@@ -142,6 +142,6 @@ def test_schema_v8_migration_adds_empty_metadata_without_rewriting_messages(tmp_
     with closing(sqlite3.connect(database)) as connection:
         version = connection.execute("PRAGMA user_version").fetchone()[0]
         stored = connection.execute("SELECT metadata_json FROM messages WHERE id = 'message-1'").fetchone()[0]
-    assert version == 10
+    assert version == 11
     assert message["content"] == "preserved" and message["metadata"] == {}
     assert stored == "{}"

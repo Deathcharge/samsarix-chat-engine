@@ -20,6 +20,7 @@ await chat.createMessage("support-case-42", {
   content: "Payment failed after the upgrade",
   client_message_id: crypto.randomUUID(),
   metadata: { "ticket.id": "SUP-42", "ticket.channel": "in_product" },
+  mentioned_subjects: ["agent-7"],
   attachments: [{
     id: "support-upload-SUP-42-trace",
     name: "payment-trace.txt",
@@ -73,6 +74,8 @@ Pins are shared room curation, not private bookmarks or workflow authority. Give
 Application message metadata connects the room transcript to host-owned records without making chat storage the workflow database. Use bounded scalar references such as `ticket.id`, `assignment.id`, `incident.severity`, `runbook`, or `action`; keep customer records, access decisions, arbitrary nested data, and executable UI configuration in the host application. Every participant with room read access and every selected message webhook receiver can see the metadata. Treat values as untrusted display/integration data, and use the signed token—not metadata—for authorization. Tombstoning clears the object along with message content.
 
 Attachment references connect a message to host-owned evidence or resources without turning Samsarix into a blob store. Authenticate and scan the upload before creating the message, store only a stable opaque object ID plus bounded display facts, and resolve that ID through a fresh room/user authorization check whenever a client downloads it. Never put a signed URL, storage credential, local path, or authorization decision in the descriptor. Tombstoning clears references from the chat record but does not delete host-owned bytes; the host must handle orphan cleanup, retention, and storage/egress cost. See [Host-owned attachment references](ATTACHMENTS.md) for the complete contract.
+
+Mentions are explicit host-account targets, not parsed display names or proof of membership. A customer can include the assigned agent's opaque subject, or an agent can target an escalation/on-call subject; the host consumes a deduplicated message webhook, re-checks room membership and notification preferences, and performs any email/push/work-queue delivery under its own budgets. Samsarix preserves at most ten targets through the transcript and clears them on tombstone deletion. Do not put email addresses, device tokens, or provider credentials in `mentioned_subjects`. See [Host-resolved message mentions](MENTIONS.md).
 
 The runnable [support workflow example](../examples/03_support_workflow.py) demonstrates the complete HTTP path with separate customer and agent identities. With a server running and an operator key plus signing secret configured, issue two tokens:
 

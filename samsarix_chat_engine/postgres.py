@@ -25,7 +25,7 @@ from psycopg.conninfo import conninfo_to_dict
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
-POSTGRES_SCHEMA_VERSION = 13
+POSTGRES_SCHEMA_VERSION = 14
 POSTGRES_MIGRATION_LOCK_ID = 7_495_346_927_831_819_041
 POSTGRES_EVENT_SEQUENCE_LOCK_ID = 7_495_346_927_831_819_042
 POSTGRES_EVENT_RETENTION_LOCK_ID = 7_495_346_927_831_819_043
@@ -1174,6 +1174,11 @@ class PostgresFoundation:
                             AND jsonb_array_length(attachment_references) <= 5
                             AND octet_length(attachment_references::text) <= 16384
                         ),
+                        mentioned_subjects JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (
+                            jsonb_typeof(mentioned_subjects) = 'array'
+                            AND jsonb_array_length(mentioned_subjects) <= 10
+                            AND octet_length(mentioned_subjects::text) <= 4096
+                        ),
                         edited_at TIMESTAMPTZ,
                         deleted_at TIMESTAMPTZ,
                         UNIQUE (room_id, client_message_id)
@@ -1206,6 +1211,16 @@ class PostgresFoundation:
                         jsonb_typeof(attachment_references) = 'array'
                         AND jsonb_array_length(attachment_references) <= 5
                         AND octet_length(attachment_references::text) <= 16384
+                    )
+                    """
+                )
+                await connection.execute(
+                    """
+                    ALTER TABLE public.samsarix_messages
+                    ADD COLUMN IF NOT EXISTS mentioned_subjects JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (
+                        jsonb_typeof(mentioned_subjects) = 'array'
+                        AND jsonb_array_length(mentioned_subjects) <= 10
+                        AND octet_length(mentioned_subjects::text) <= 4096
                     )
                     """
                 )

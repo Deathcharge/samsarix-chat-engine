@@ -101,7 +101,7 @@ async def test_schema_v2_migrates_transactionally_and_widens_event_payloads(
     service = _store(clean_postgres_database)
     await service.initialize()
     try:
-        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 13
+        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 14
         assert await service.check_ready()
         assert await service.list_rooms() == []
         async with service.foundation.transaction() as connection:
@@ -196,7 +196,7 @@ async def test_schema_v6_backfills_matching_instance_generations(
     service = _store(clean_postgres_database)
     await service.initialize()
     try:
-        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 13
+        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 14
         async with service.foundation.transaction() as connection:
             cursor = await connection.execute(
                 """
@@ -241,7 +241,7 @@ async def test_schema_v8_adds_thread_parent_column_and_index(clean_postgres_data
     migrated = _store(clean_postgres_database)
     await migrated.initialize()
     try:
-        assert await migrated.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 13
+        assert await migrated.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 14
         async with migrated.foundation.transaction() as connection:
             cursor = await connection.execute(
                 """
@@ -275,7 +275,7 @@ async def test_schema_v9_adds_reaction_storage(clean_postgres_database: str) -> 
     migrated = _store(clean_postgres_database)
     await migrated.initialize()
     try:
-        assert await migrated.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 13
+        assert await migrated.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 14
         async with migrated.foundation.transaction() as connection:
             cursor = await connection.execute(
                 """
@@ -303,7 +303,7 @@ async def test_schema_v11_adds_empty_application_metadata(clean_postgres_databas
     migrated = _store(clean_postgres_database)
     await migrated.initialize()
     try:
-        assert await migrated.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 13
+        assert await migrated.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 14
         async with migrated.foundation.transaction() as connection:
             cursor = await connection.execute(
                 """
@@ -330,7 +330,7 @@ async def test_schema_v12_adds_empty_attachment_references(clean_postgres_databa
     migrated = _store(clean_postgres_database)
     await migrated.initialize()
     try:
-        assert await migrated.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 13
+        assert await migrated.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 14
         async with migrated.foundation.transaction() as connection:
             cursor = await connection.execute(
                 """
@@ -389,6 +389,82 @@ async def test_attachment_references_have_postgres_parity_and_are_scrubbed(store
     assert created.content == "" and created.attachments == [attachment]
     assert changed and deleted.attachments == []
     assert events and all(event.payload["message"]["attachments"] == [] for event in events)
+
+
+@pytest.mark.asyncio
+async def test_schema_v13_adds_empty_mentioned_subjects(clean_postgres_database: str) -> None:
+    initial = _store(clean_postgres_database)
+    await initial.initialize()
+    await initial.close()
+    async with await psycopg.AsyncConnection.connect(clean_postgres_database, autocommit=True) as connection:
+        await connection.execute("ALTER TABLE public.samsarix_messages DROP COLUMN mentioned_subjects")
+        await connection.execute("UPDATE public.samsarix_schema_metadata SET version = 13")
+
+    migrated = _store(clean_postgres_database)
+    await migrated.initialize()
+    try:
+        assert await migrated.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 14
+        async with migrated.foundation.transaction() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT column_default, is_nullable FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'samsarix_messages'
+                  AND column_name = 'mentioned_subjects'
+                """
+            )
+            row = await cursor.fetchone()
+        assert row is not None and "[]" in str(row[0]) and row[1] == "NO"
+    finally:
+        await migrated.close()
+
+
+@pytest.mark.asyncio
+async def test_message_mentions_have_postgres_parity_and_are_scrubbed(store: PostgresChatStore) -> None:
+    await store.create_room(RoomCreate(id="general", name="General"))
+    await store.foundation.register_instance("mention-observer", lease_seconds=30)
+    created, was_created = await store.create_message(
+        room_id="general",
+        sender="alice",
+        content="Escalating",
+        mentioned_subjects=["oncall", "lead"],
+        client_message_id="mention-1",
+        allow_frozen=False,
+        member_subject="alice",
+        author_subject="alice",
+    )
+    replay, replay_created = await store.create_message(
+        room_id="general",
+        sender="alice",
+        content="ignored",
+        mentioned_subjects=["other"],
+        client_message_id="mention-1",
+        allow_frozen=False,
+        member_subject="alice",
+        author_subject="alice",
+    )
+    updated = await store.update_message(
+        room_id="general",
+        message_id=created.id,
+        actor="alice",
+        content="Manager engaged",
+        mentioned_subjects=["manager"],
+        is_admin=False,
+        member_subject="alice",
+    )
+    deleted, changed = await store.delete_message(
+        room_id="general",
+        message_id=created.id,
+        actor="alice",
+        is_admin=False,
+        member_subject="alice",
+    )
+    events = await store.foundation.read_events("mention-observer")
+
+    assert was_created and not replay_created and replay == created
+    assert created.mentioned_subjects == ["oncall", "lead"]
+    assert updated.mentioned_subjects == ["manager"]
+    assert changed and deleted.mentioned_subjects == []
+    assert events and all(event.payload["message"]["mentioned_subjects"] == [] for event in events)
 
 
 @pytest.mark.asyncio

@@ -65,6 +65,9 @@ status, customer_message = request(
     payload={
         "content": "My deployment cannot reconnect.",
         "metadata": {"ticket.id": "SUP-DEMO-1", "ticket.channel": "in_product"},
+        # The host owns assignment and notification preferences; Samsarix
+        # records only the assigned agent's stable subject for webhook routing.
+        "mentioned_subjects": ["agent-7"],
         # The host application has already authenticated, scanned, stored, and
         # authorized this object. Samsarix stores only its opaque descriptor.
         "attachments": [
@@ -118,6 +121,7 @@ print(
             "customer_before": customer_unread,
             "customer_after": customer_read,
             "customer_attachment_ids": [attachment["id"] for attachment in customer_message.get("attachments", [])],
+            "customer_mentions": customer_message.get("mentioned_subjects", []),
         },
         indent=2,
     )

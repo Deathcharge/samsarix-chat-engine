@@ -51,7 +51,7 @@ Admin-only. Send `{"archived":true}` to make a room read-only and close active c
 
 ### `GET /v1/rooms/{room_id}/export`
 
-Admin-only. Streams `application/x-ndjson`: a `samsarix.room_export` metadata record with `schema_version: 7`, followed by one current `message` record or tombstone per line in chronological order. Schema 7 retains nullable `parent_message_id`, grouped `reactions`, nullable `pinned_at`/`pinned_by`, and bounded message `metadata`, then adds ordered host-owned `attachments`. The response is an attachment and the operation records `room.export_requested`.
+Admin-only. Streams `application/x-ndjson`: a `samsarix.room_export` metadata record with `schema_version: 8`, followed by one current `message` record or tombstone per line in chronological order. Schema 8 retains nullable `parent_message_id`, grouped `reactions`, nullable `pinned_at`/`pinned_by`, bounded message `metadata`, and ordered host-owned `attachments`, then adds ordered host-resolved `mentioned_subjects`. The response is an attachment and the operation records `room.export_requested`.
 
 ### `DELETE /v1/rooms/{room_id}`
 
@@ -68,7 +68,8 @@ Persists a message, broadcasts it to the room, and returns 201:
   "client_message_id": "client-generated-id",
   "parent_message_id": null,
   "metadata": {"ticket.id":"SUP-42","priority":2},
-  "attachments": [{"id":"upload:SUP-42:trace","name":"trace.json","media_type":"application/json","size_bytes":256}]
+  "attachments": [{"id":"upload:SUP-42:trace","name":"trace.json","media_type":"application/json","size_bytes":256}],
+  "mentioned_subjects": ["agent-7","billing-oncall"]
 }
 ```
 
@@ -79,6 +80,8 @@ Set `parent_message_id` to a non-deleted top-level message in the same room to c
 Optional `metadata` is a flat JSON object for host-application display and integration context. It accepts at most 20 unique lowercase ASCII keys matching `^[a-z][a-z0-9_.-]{0,63}$`; values are strings, booleans, null, or finite numbers, with integers restricted to the JavaScript-safe range. Canonical UTF-8 JSON is capped at 4096 bytes. Arrays and nested objects are rejected. Treat every value as untrusted data: it is not authorization, server routing, HTML, or executable UI. Idempotent create replay returns the first persisted metadata and ignores a different retry body.
 
 Optional `attachments` contains at most five ordered opaque descriptors totaling at most 8192 canonical UTF-8 JSON bytes. Each requires a unique portable `id` (1–128 characters), untrusted display `name` (1–255, no controls), lowercase `media_type`, and non-negative JavaScript-safe `size_bytes`; `sha256` is an optional lowercase 64-hex digest. Unknown fields and URLs are rejected. The engine does not upload, fetch, scan, authorize, or delete the file. The host resolves IDs and issues a fresh authorized download after checking current room access; never persist an expiring signed URL. See [Host-owned attachment references](ATTACHMENTS.md).
+
+Optional `mentioned_subjects` contains at most ten ordered, unique, case-sensitive stable IDs of 1–64 characters without surrounding whitespace. Samsarix does not parse `@` display text, validate target membership, expand roles, or deliver notifications. The host resolves targets, re-checks membership/preferences, and owns provider delivery, deduplication, abuse and cost controls. Supplying the field on edit replaces the array; omitting it or sending null preserves the current value, and `[]` clears it. See [Host-resolved message mentions](MENTIONS.md).
 
 ### `PATCH /v1/rooms/{room_id}/messages/{message_id}`
 
@@ -119,7 +122,7 @@ Returns messages in chronological order:
 }
 ```
 
-Pages contain the newest matching messages. Message objects include nullable `parent_message_id`, sorted `reactions: [{"key":"ack","count":2}]`, nullable `pinned_at`/`pinned_by`, application `metadata`, ordered `attachments`, `edited_at`, and `deleted_at`; a deleted message has empty `content`, metadata and attachments, no reactions, and no pin. Top-level history intentionally includes replies in the same flat chronological stream for backward compatibility. When `next_before` is non-null, pass it as `before` to fetch the next older page. An unknown or cross-room cursor returns `400 invalid_cursor`.
+Pages contain the newest matching messages. Message objects include nullable `parent_message_id`, sorted `reactions: [{"key":"ack","count":2}]`, nullable `pinned_at`/`pinned_by`, application `metadata`, ordered `attachments`, ordered `mentioned_subjects`, `edited_at`, and `deleted_at`; a deleted message has empty `content`, metadata, attachments and mentions, no reactions, and no pin. Top-level history intentionally includes replies in the same flat chronological stream for backward compatibility. When `next_before` is non-null, pass it as `before` to fetch the next older page. An unknown or cross-room cursor returns `400 invalid_cursor`.
 
 ### `GET /v1/rooms/{room_id}/messages/{parent_message_id}/replies?limit=50&before={message_id}`
 
@@ -189,7 +192,7 @@ The response preserves caller order and includes current aggregate totals:
 
 Only a signed subject may query. Its token must grant `room:read` for every requested ID before storage is consulted; an unauthorized room fails the whole request with `403 authorization_denied`. An authorized but missing room returns `404 room_not_found`, and any active room ban returns `403 room_banned`. Duplicate, malformed, empty, or oversized room sets return `422 invalid_request`. Reading does not create or update cursor rows.
 
-`latest_message_id` and `latest_message_at` identify the newest non-deleted retained message, or are both null. Bodies, senders, metadata, attachments, reactions, and pin state are never copied into this response; fetch one selected room's authorized history for a preview. The host application supplies the candidate room IDs from its own membership/assignment database and may sort the returned items by unread state or latest activity. This endpoint does not discover membership or list rooms for a user.
+`latest_message_id` and `latest_message_at` identify the newest non-deleted retained message, or are both null. Bodies, senders, metadata, attachments, mentions, reactions, and pin state are never copied into this response; fetch one selected room's authorized history for a preview. The host application supplies the candidate room IDs from its own membership/assignment database and may sort the returned items by unread state or latest activity. This endpoint does not discover membership or list rooms for a user.
 
 SQLite evaluates the requested set in one database statement. PostgreSQL uses one statement and one snapshot across the set. Each signed subject receives `SAMSARIX_CHAT_READ_STATE_QUERIES_PER_MINUTE` requests per 60 seconds, independently keyed from message search; excess returns `429 read_state_query_rate_limit_exceeded` with `Retry-After: 60`. The 100-room bound, retained-message caps, and content-free result limit query and response amplification.
 
@@ -329,7 +332,7 @@ Live events are:
 ### Client commands
 
 ```json
-{"type":"message","content":"Hello","client_message_id":"optional-id","metadata":{"ticket.id":"SUP-42"},"attachments":[]}
+{"type":"message","content":"Hello","client_message_id":"optional-id","metadata":{"ticket.id":"SUP-42"},"attachments":[],"mentioned_subjects":["agent-7"]}
 ```
 
 ```json

@@ -372,6 +372,7 @@ class PostgresChatStore:
         content: str,
         metadata: MessageMetadata | None = None,
         attachments: list[AttachmentReference] | None = None,
+        mentioned_subjects: list[str] | None = None,
         client_message_id: str | None,
         parent_message_id: str | None = None,
         allow_frozen: bool,
@@ -426,6 +427,7 @@ class PostgresChatStore:
                     parent_message_id,
                     Jsonb(metadata or {}),
                     Jsonb([attachment.model_dump(mode="json") for attachment in attachments or []]),
+                    Jsonb(mentioned_subjects or []),
                 ),
             )
             row = await cursor.fetchone()
@@ -460,6 +462,7 @@ class PostgresChatStore:
         actor: str,
         content: str,
         metadata: MessageMetadata | None = None,
+        mentioned_subjects: list[str] | None = None,
         is_admin: bool,
         member_subject: str | None = None,
     ) -> Message:
@@ -472,7 +475,7 @@ class PostgresChatStore:
             )
             await connection.execute("SELECT pg_advisory_xact_lock(%s)", (POSTGRES_MESSAGE_CAP_LOCK_ID,))
             row = await self._lock_message(connection, room_id, message_id)
-            if row[13] is not None:
+            if row[14] is not None:
                 raise MessageDeletedError(message_id)
             if not is_admin and str(row[2]) != actor:
                 raise MessageOwnershipError(message_id)
@@ -482,6 +485,7 @@ class PostgresChatStore:
                     content,
                     _normalize_search_text(content),
                     Jsonb(metadata) if metadata is not None else None,
+                    Jsonb(mentioned_subjects) if mentioned_subjects is not None else None,
                     message_id,
                 ),
             )
@@ -531,7 +535,7 @@ class PostgresChatStore:
             row = await self._lock_message(connection, room_id, message_id)
             if not is_admin and str(row[2]) != actor:
                 raise MessageOwnershipError(message_id)
-            if row[13] is not None:
+            if row[14] is not None:
                 return _message_from_row(row), False
             await connection.execute(
                 "DELETE FROM public.samsarix_message_reactions WHERE message_id = %s",
@@ -587,7 +591,7 @@ class PostgresChatStore:
                 member_subject=member_subject,
             )
             row = await self._lock_message(connection, room_id, message_id)
-            if row[13] is not None:
+            if row[14] is not None:
                 raise MessageDeletedError(message_id)
             cursor = await connection.execute("SELECT clock_timestamp()")
             now = _required_row(await cursor.fetchone(), "reaction timestamp")[0]
@@ -696,7 +700,7 @@ class PostgresChatStore:
                 member_subject=member_subject,
             )
             row = await self._lock_message(connection, room_id, message_id)
-            if row[13] is not None:
+            if row[14] is not None:
                 raise MessageDeletedError(message_id)
             cursor = await connection.execute("SELECT clock_timestamp()")
             now = _required_row(await cursor.fetchone(), "pin timestamp")[0]
@@ -1559,7 +1563,7 @@ class PostgresChatStore:
             await connection.execute(
                 """
                 UPDATE public.samsarix_realtime_events
-                SET payload = jsonb_set(jsonb_set(CASE
+                SET payload = jsonb_set(jsonb_set(jsonb_set(CASE
                     WHEN event_type = 'message.reaction.updated' THEN jsonb_set(
                         jsonb_set(
                             jsonb_set(
@@ -1634,7 +1638,8 @@ class PostgresChatStore:
                         false
                     )
                 END, ARRAY['message', 'metadata'], '{}'::jsonb, false),
-                    ARRAY['message', 'attachments'], '[]'::jsonb, false)
+                    ARRAY['message', 'attachments'], '[]'::jsonb, false),
+                    ARRAY['message', 'mentioned_subjects'], '[]'::jsonb, false)
                 WHERE room_id = %s
                   AND event_type LIKE 'message.%%'
                   AND payload #>> '{message,id}' = ANY(%s::text[])
@@ -1778,19 +1783,21 @@ class PostgresChatStore:
 
 _MESSAGE_COLUMNS = (
     "id, room_id, sender, content, created_at, client_message_id, parent_message_id, "
-    "reaction_summaries, pinned_at, pinned_by, application_metadata, attachment_references, edited_at, deleted_at"
+    "reaction_summaries, pinned_at, pinned_by, application_metadata, attachment_references, mentioned_subjects, "
+    "edited_at, deleted_at"
 )
 _MESSAGE_SELECT = f"SELECT {_MESSAGE_COLUMNS} FROM public.samsarix_messages"  # noqa: S608 - internal constant
 _CREATE_MESSAGE_SQL = f"""
 INSERT INTO public.samsarix_messages (
     id, room_id, sender, author_subject, content, search_content, client_message_id, parent_message_id,
-    application_metadata, attachment_references
-) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    application_metadata, attachment_references, mentioned_subjects
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 RETURNING {_MESSAGE_COLUMNS}
 """  # noqa: S608 - internal constant
 _UPDATE_MESSAGE_SQL = f"""
 UPDATE public.samsarix_messages
 SET content = %s, search_content = %s, application_metadata = COALESCE(%s::jsonb, application_metadata),
+    mentioned_subjects = COALESCE(%s::jsonb, mentioned_subjects),
     edited_at = clock_timestamp()
 WHERE id = %s
 RETURNING {_MESSAGE_COLUMNS}
@@ -1799,7 +1806,7 @@ _DELETE_MESSAGE_SQL = f"""
 UPDATE public.samsarix_messages
 SET content = '', search_content = '', reaction_summaries = '[]'::jsonb,
     pinned_at = NULL, pinned_by = NULL, application_metadata = '{{}}'::jsonb,
-    attachment_references = '[]'::jsonb, deleted_at = clock_timestamp()
+    attachment_references = '[]'::jsonb, mentioned_subjects = '[]'::jsonb, deleted_at = clock_timestamp()
 WHERE id = %s
 RETURNING {_MESSAGE_COLUMNS}
 """  # noqa: S608 - internal constant
@@ -1921,8 +1928,9 @@ def _message_from_row(row: tuple[Any, ...]) -> Message:
         pinned_by=str(row[9]) if row[9] is not None else None,
         metadata=dict(row[10]),
         attachments=[AttachmentReference.model_validate(item) for item in row[11]],
-        edited_at=row[12],
-        deleted_at=row[13],
+        mentioned_subjects=list(row[12]),
+        edited_at=row[13],
+        deleted_at=row[14],
     )
 
 

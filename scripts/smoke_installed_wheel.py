@@ -164,6 +164,7 @@ async def _websocket_round_trip(base_url: str, token: str) -> str:
                             "size_bytes": 128,
                         }
                     ],
+                    "mentioned_subjects": ["wheel-oncall"],
                 }
             )
         )
@@ -177,6 +178,7 @@ async def _websocket_round_trip(base_url: str, token: str) -> str:
             or created["message"]["metadata"] != {"source": "wheel-smoke"}
             or created["message"]["content"] != ""
             or created["message"]["attachments"][0]["id"] != "wheel-trace-ws"
+            or created["message"]["mentioned_subjects"] != ["wheel-oncall"]
         ):
             raise RuntimeError("WebSocket typing stop or sender identity mismatch")
         sender = created["message"]["sender"]
@@ -318,6 +320,7 @@ def main() -> int:
                             "sha256": "a" * 64,
                         }
                     ],
+                    "mentioned_subjects": ["wheel-oncall", "wheel-lead"],
                 },
             )
             unread_message = _request(
@@ -407,6 +410,7 @@ def main() -> int:
                 or message["sender"] != "wheel-user"
                 or message["metadata"] != {"ticket.id": "WHEEL-1"}
                 or message["attachments"][0]["id"] != "wheel-trace-http"
+                or message["mentioned_subjects"] != ["wheel-oncall", "wheel-lead"]
                 or len(history["items"]) != 2
                 or [item["content"] for item in search["items"]] != ["installed wheel unread"]
                 or reply["parent_message_id"] != message["id"]
@@ -421,7 +425,7 @@ def main() -> int:
                 base_url + f"/v1/rooms/wheel-room/messages/{message['id']}",
                 method="PATCH",
                 credential=("Authorization", f"Bearer {token}"),
-                body={"content": "installed wheel edited"},
+                body={"content": "installed wheel edited", "mentioned_subjects": ["wheel-manager"]},
             )
             _wait_for_webhooks(base_url, operator_key, 7)
             deleted_message = _request(
@@ -457,6 +461,7 @@ def main() -> int:
                 edited["edited_at"] is None
                 or edited["metadata"] != {"ticket.id": "WHEEL-1"}
                 or edited["attachments"] != message["attachments"]
+                or edited["mentioned_subjects"] != ["wheel-manager"]
             ):
                 raise RuntimeError("installed-wheel edit control mismatch")
             if deleted_message is not None:
@@ -498,6 +503,9 @@ def main() -> int:
                 created_webhook["data"]["message"]["attachments"] != message["attachments"]
                 or updated_webhook["data"]["message"]["attachments"] != message["attachments"]
                 or deleted_webhook["data"]["message"]["attachments"] != []
+                or created_webhook["data"]["message"]["mentioned_subjects"] != ["wheel-oncall", "wheel-lead"]
+                or updated_webhook["data"]["message"]["mentioned_subjects"] != ["wheel-manager"]
+                or deleted_webhook["data"]["message"]["mentioned_subjects"] != []
             ):
                 raise RuntimeError("installed-wheel attachment webhook journey mismatch")
             exported = _request(
@@ -506,10 +514,11 @@ def main() -> int:
             )
             export_lines = [json.loads(line) for line in exported.splitlines()]
             if (
-                export_lines[0]["schema_version"] != 7
+                export_lines[0]["schema_version"] != 8
                 or export_lines[1]["message"]["content"] != ""
                 or export_lines[1]["message"]["metadata"] != {}
                 or export_lines[1]["message"]["attachments"] != []
+                or export_lines[1]["message"]["mentioned_subjects"] != []
                 or export_lines[1]["message"]["deleted_at"] is None
                 or export_lines[3]["message"]["parent_message_id"] != message["id"]
                 or export_lines[3]["message"]["reactions"] != [{"key": "ack", "count": 1}]
@@ -542,7 +551,7 @@ def main() -> int:
             if not database.is_file() or database.stat().st_size == 0:
                 raise RuntimeError("installed-wheel database was not persisted")
             print(
-                f"http=ok metadata=ok attachments=ok search=ok threads=ok reactions=ok pins=ok websocket=ok "
+                f"http=ok metadata=ok attachments=ok mentions=ok search=ok threads=ok reactions=ok pins=ok "
                 f"read_state=ok inbox=ok typing=ok controls=ok "
                 f"webhook=ok export=ok "
                 f"lifecycle=ok backup=ok "
