@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import gc
 import inspect
 import json
 import math
@@ -728,13 +729,30 @@ async def exercise(world: World, conninfo: str, observer: Any) -> None:
                 fault = asyncio.create_task(world.inject_fault(http, observer))
                 tasks.extend((sampler, fault))
                 try:
-                    await arrivals(
-                        p,
-                        lambda index, due: world.cycle(http, index, due),
-                        world.counts,
-                        lambda delay: world.measure("start_delay_ms", delay),
-                        record_drop=world.record_drop,
-                    )
+                    # A generational collection in this client process can pause
+                    # every coroutine long enough to impersonate a missed open-
+                    # arrival slot during the intentionally dense recovery burst.
+                    # The workload is bounded and CPython reference counting stays
+                    # active; restore the caller's GC state before reconciliation.
+                    collect_started = time.monotonic()
+                    gc.collect()
+                    world.fault["driver_gc_collect_before_arrivals_ms"] = (time.monotonic() - collect_started) * 1000
+                    driver_gc_enabled = gc.isenabled()
+                    if driver_gc_enabled:
+                        gc.disable()
+                    world.fault["driver_cyclic_gc_was_enabled"] = driver_gc_enabled
+                    world.fault["driver_cyclic_gc_disabled_during_arrivals"] = not gc.isenabled()
+                    try:
+                        await arrivals(
+                            p,
+                            lambda index, due: world.cycle(http, index, due),
+                            world.counts,
+                            lambda delay: world.measure("start_delay_ms", delay),
+                            record_drop=world.record_drop,
+                        )
+                    finally:
+                        if driver_gc_enabled:
+                            gc.enable()
                     await fault
                     require(not sampler.done(), "sampler_stopped_early")
                     require(not world.failures, "subscriber_failed")
