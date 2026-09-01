@@ -155,6 +155,17 @@ This milestone supports low-noise acknowledgement, resolution, escalation, and l
 
 This milestone serves accepted support resolutions, classroom resources, incident runbooks/decisions, and community guidelines without adding private bookmarks, attachments, notifications, or a role database. The host application decides who receives `room:pin`; Samsarix enforces that signed decision per room.
 
+## v0.17 — bounded application message metadata
+
+- [x] accept a conservative flat JSON-scalar object on HTTP and WebSocket message creation;
+- [x] let an author/admin preserve, replace, or explicitly clear metadata during a content edit;
+- [x] enforce 20 keys, lowercase portable key names, JavaScript-safe finite numbers, and a 4096-byte canonical JSON bound;
+- [x] persist and return metadata through SQLite, PostgreSQL, history, replies, search, pins, export, realtime, and selected webhooks;
+- [x] clear metadata from tombstones and retained event/webhook copies at the message privacy boundary;
+- [x] expose compatible HTTP/WebSocket helpers through unpublished TypeScript SDK 0.8.0.
+
+This milestone lets a host application associate messages with support tickets, classroom assignments, incident severity/runbooks, or safe action identifiers without adding an arbitrary nested document store. Metadata is untrusted display/integration data and never grants access, changes server routing, injects HTML, or names executable UI components.
+
 ## Deliberate non-goals
 
 - no built-in password database, social graph, billing, or end-user frontend;

@@ -150,7 +150,15 @@ async def _websocket_round_trip(base_url: str, token: str) -> str:
         typing_started = await receive_json(observer)
         if typing_started["type"] != "typing.started" or typing_started["username"] != "wheel-user":
             raise RuntimeError("WebSocket typing transition mismatch")
-        await websocket.send(json.dumps({"type": "message", "content": "installed wheel WebSocket"}))
+        await websocket.send(
+            json.dumps(
+                {
+                    "type": "message",
+                    "content": "installed wheel WebSocket",
+                    "metadata": {"source": "wheel-smoke"},
+                }
+            )
+        )
         typing_stopped = await receive_json(observer)
         observer_created = await receive_json(observer)
         created = await receive_json(websocket)
@@ -158,6 +166,7 @@ async def _websocket_round_trip(base_url: str, token: str) -> str:
             typing_stopped["type"] != "typing.stopped"
             or observer_created["type"] != "message.created"
             or created["message"]["sender"] != "wheel-user"
+            or created["message"]["metadata"] != {"source": "wheel-smoke"}
         ):
             raise RuntimeError("WebSocket typing stop or sender identity mismatch")
         sender = created["message"]["sender"]
@@ -287,7 +296,7 @@ def main() -> int:
                 base_url + "/v1/rooms/wheel-room/messages",
                 method="POST",
                 credential=("Authorization", f"Bearer {token}"),
-                body={"content": "installed wheel HTTP"},
+                body={"content": "installed wheel HTTP", "metadata": {"ticket.id": "WHEEL-1"}},
             )
             _request(
                 base_url + "/v1/rooms/wheel-room/messages",
@@ -330,7 +339,11 @@ def main() -> int:
                 base_url + "/v1/rooms/wheel-room/messages",
                 method="POST",
                 credential=("Authorization", f"Bearer {token}"),
-                body={"content": "installed wheel reply", "parent_message_id": message["id"]},
+                body={
+                    "content": "installed wheel reply",
+                    "parent_message_id": message["id"],
+                    "metadata": {"action": "acknowledge"},
+                },
             )
             replies = _request(
                 base_url + f"/v1/rooms/wheel-room/messages/{message['id']}/replies",
@@ -356,6 +369,7 @@ def main() -> int:
             if (
                 room["id"] != "wheel-room"
                 or message["sender"] != "wheel-user"
+                or message["metadata"] != {"ticket.id": "WHEEL-1"}
                 or len(history["items"]) != 2
                 or [item["content"] for item in search["items"]] != ["installed wheel unread"]
                 or reply["parent_message_id"] != message["id"]
@@ -402,7 +416,7 @@ def main() -> int:
                 credential=("X-API-Key", operator_key),
                 body={"muted_for_seconds": 0},
             )
-            if edited["edited_at"] is None:
+            if edited["edited_at"] is None or edited["metadata"] != {"ticket.id": "WHEEL-1"}:
                 raise RuntimeError("installed-wheel edit control mismatch")
             if deleted_message is not None:
                 raise RuntimeError("installed-wheel delete control mismatch")
@@ -437,12 +451,14 @@ def main() -> int:
             )
             export_lines = [json.loads(line) for line in exported.splitlines()]
             if (
-                export_lines[0]["schema_version"] != 5
+                export_lines[0]["schema_version"] != 6
                 or export_lines[1]["message"]["content"] != ""
+                or export_lines[1]["message"]["metadata"] != {}
                 or export_lines[1]["message"]["deleted_at"] is None
                 or export_lines[3]["message"]["parent_message_id"] != message["id"]
                 or export_lines[3]["message"]["reactions"] != [{"key": "ack", "count": 1}]
                 or export_lines[3]["message"]["pinned_by"] != "wheel-user"
+                or export_lines[3]["message"]["metadata"] != {"action": "acknowledge"}
             ):
                 raise RuntimeError("installed-wheel export journey mismatch")
             backup = Path(temporary) / "smoke-backup.db"
@@ -470,7 +486,8 @@ def main() -> int:
             if not database.is_file() or database.stat().st_size == 0:
                 raise RuntimeError("installed-wheel database was not persisted")
             print(
-                f"http=ok search=ok threads=ok reactions=ok pins=ok websocket=ok read_state=ok typing=ok controls=ok "
+                f"http=ok metadata=ok search=ok threads=ok reactions=ok pins=ok websocket=ok "
+                f"read_state=ok typing=ok controls=ok "
                 f"webhook=ok export=ok "
                 f"lifecycle=ok backup=ok "
                 f"sender={websocket_sender} history={len(history['items'])}"

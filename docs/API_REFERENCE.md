@@ -51,7 +51,7 @@ Admin-only. Send `{"archived":true}` to make a room read-only and close active c
 
 ### `GET /v1/rooms/{room_id}/export`
 
-Admin-only. Streams `application/x-ndjson`: a `samsarix.room_export` metadata record with `schema_version: 5`, followed by one current `message` record or tombstone per line in chronological order. Schema 5 retains nullable `parent_message_id` and grouped `reactions`, then adds nullable `pinned_at` and `pinned_by`. The response is an attachment and the operation records `room.export_requested`.
+Admin-only. Streams `application/x-ndjson`: a `samsarix.room_export` metadata record with `schema_version: 6`, followed by one current `message` record or tombstone per line in chronological order. Schema 6 retains nullable `parent_message_id`, grouped `reactions`, and nullable `pinned_at`/`pinned_by`, then adds bounded message `metadata`. The response is an attachment and the operation records `room.export_requested`.
 
 ### `DELETE /v1/rooms/{room_id}`
 
@@ -66,7 +66,8 @@ Persists a message, broadcasts it to the room, and returns 201:
   "sender": "Andrew",
   "content": "Hello",
   "client_message_id": "client-generated-id",
-  "parent_message_id": null
+  "parent_message_id": null,
+  "metadata": {"ticket.id":"SUP-42","priority":2}
 }
 ```
 
@@ -74,17 +75,19 @@ Persists a message, broadcasts it to the room, and returns 201:
 
 Set `parent_message_id` to a non-deleted top-level message in the same room to create a reply. Threads are exactly one level deep: replying to a reply returns `409 thread_depth_exceeded`; a deleted parent returns `409 parent_message_deleted`; an unknown or cross-room parent returns `404 parent_message_not_found`. Archived rooms reject new messages with `409 room_archived`; frozen rooms reject member writes with `409 room_frozen`; active controls return `403 room_muted` or `403 room_banned`.
 
+Optional `metadata` is a flat JSON object for host-application display and integration context. It accepts at most 20 unique lowercase ASCII keys matching `^[a-z][a-z0-9_.-]{0,63}$`; values are strings, booleans, null, or finite numbers, with integers restricted to the JavaScript-safe range. Canonical UTF-8 JSON is capped at 4096 bytes. Arrays and nested objects are rejected. Treat every value as untrusted data: it is not authorization, server routing, HTML, or executable UI. Idempotent create replay returns the first persisted metadata and ignores a different retry body.
+
 ### `PATCH /v1/rooms/{room_id}/messages/{message_id}`
 
-Replaces a non-deleted message's content and sets `edited_at`. The signed author or an administrator may edit; other writers receive `403 message_not_owned`. Edited content is bounded by `SAMSARIX_CHAT_MAX_MESSAGE_CHARS`; oversized edits return `413 message_too_large`. Deleted messages return `409 message_deleted`. Success broadcasts `message.updated` after commit. Earlier content is overwritten and is not copied to the audit trail.
+Replaces a non-deleted message's content and sets `edited_at`. The signed author or an administrator may edit; other writers receive `403 message_not_owned`. Edited content is bounded by `SAMSARIX_CHAT_MAX_MESSAGE_CHARS`; oversized edits return `413 message_too_large`. Deleted messages return `409 message_deleted`. Success broadcasts `message.updated` after commit. Earlier content is overwritten and is not copied to the audit trail. Omit `metadata` (or send null) to preserve it, send `{}` to clear it, or send a complete replacement object using the create limits.
 
 ```json
-{"content":"Corrected text"}
+{"content":"Corrected text","metadata":{"ticket.status":"resolved"}}
 ```
 
 ### `DELETE /v1/rooms/{room_id}/messages/{message_id}`
 
-The signed author or an administrator may delete. Success returns 204, replaces content with an empty string, clears all reaction actors/counts and pin metadata, sets `deleted_at`, and broadcasts `message.deleted` once. Repeating the delete is idempotent. The tombstone stays in chronological history so clients do not reorder surrounding messages; deleted content, reaction identity, and pin identity are not retained by this feature. Administrators may remove content while a room is frozen or archived.
+The signed author or an administrator may delete. Success returns 204, replaces content with an empty string, clears application metadata, reaction actors/counts, and pin metadata, sets `deleted_at`, and broadcasts `message.deleted` once. Repeating the delete is idempotent. The tombstone stays in chronological history so clients do not reorder surrounding messages; deleted content, application context, reaction identity, and pin identity are not retained by this feature. Administrators may remove content while a room is frozen or archived.
 
 ### `PUT|DELETE /v1/rooms/{room_id}/messages/{message_id}/reactions/{reaction_key}`
 
@@ -113,7 +116,7 @@ Returns messages in chronological order:
 }
 ```
 
-Pages contain the newest matching messages. Message objects include nullable `parent_message_id`, sorted `reactions: [{"key":"ack","count":2}]`, nullable `pinned_at`/`pinned_by`, `edited_at`, and `deleted_at`; a deleted message has empty `content`, no reactions, and no pin. Top-level history intentionally includes replies in the same flat chronological stream for backward compatibility. When `next_before` is non-null, pass it as `before` to fetch the next older page. An unknown or cross-room cursor returns `400 invalid_cursor`.
+Pages contain the newest matching messages. Message objects include nullable `parent_message_id`, sorted `reactions: [{"key":"ack","count":2}]`, nullable `pinned_at`/`pinned_by`, application `metadata`, `edited_at`, and `deleted_at`; a deleted message has empty `content`, empty metadata, no reactions, and no pin. Top-level history intentionally includes replies in the same flat chronological stream for backward compatibility. When `next_before` is non-null, pass it as `before` to fetch the next older page. An unknown or cross-room cursor returns `400 invalid_cursor`.
 
 ### `GET /v1/rooms/{room_id}/messages/{parent_message_id}/replies?limit=50&before={message_id}`
 
@@ -281,7 +284,7 @@ Live events are:
 ### Client commands
 
 ```json
-{"type":"message","content":"Hello","client_message_id":"optional-id"}
+{"type":"message","content":"Hello","client_message_id":"optional-id","metadata":{"ticket.id":"SUP-42"}}
 ```
 
 ```json

@@ -25,7 +25,7 @@ from psycopg.conninfo import conninfo_to_dict
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
-POSTGRES_SCHEMA_VERSION = 11
+POSTGRES_SCHEMA_VERSION = 12
 POSTGRES_MIGRATION_LOCK_ID = 7_495_346_927_831_819_041
 POSTGRES_EVENT_SEQUENCE_LOCK_ID = 7_495_346_927_831_819_042
 POSTGRES_EVENT_RETENTION_LOCK_ID = 7_495_346_927_831_819_043
@@ -1165,6 +1165,10 @@ class PostgresFoundation:
                         reaction_summaries JSONB NOT NULL DEFAULT '[]'::jsonb,
                         pinned_at TIMESTAMPTZ,
                         pinned_by TEXT CHECK (pinned_by IS NULL OR char_length(pinned_by) BETWEEN 1 AND 64),
+                        application_metadata JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (
+                            jsonb_typeof(application_metadata) = 'object'
+                            AND octet_length(application_metadata::text) <= 8192
+                        ),
                         edited_at TIMESTAMPTZ,
                         deleted_at TIMESTAMPTZ,
                         UNIQUE (room_id, client_message_id)
@@ -1207,6 +1211,15 @@ class PostgresFoundation:
                     ALTER TABLE public.samsarix_messages
                     ADD COLUMN IF NOT EXISTS pinned_by TEXT CHECK (
                         pinned_by IS NULL OR char_length(pinned_by) BETWEEN 1 AND 64
+                    )
+                    """
+                )
+                await connection.execute(
+                    """
+                    ALTER TABLE public.samsarix_messages
+                    ADD COLUMN IF NOT EXISTS application_metadata JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (
+                        jsonb_typeof(application_metadata) = 'object'
+                        AND octet_length(application_metadata::text) <= 8192
                     )
                     """
                 )

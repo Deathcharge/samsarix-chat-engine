@@ -62,6 +62,7 @@ async def test_outbox_is_transactional_idempotent_and_covers_committed_events(tm
         room_id="support",
         sender="alice",
         content="hello",
+        metadata={"ticket.id": "SUP-42"},
         client_message_id="client-1",
         allow_frozen=False,
         author_subject="alice",
@@ -79,6 +80,7 @@ async def test_outbox_is_transactional_idempotent_and_covers_committed_events(tm
     assert replay == created
     first_delivery = await store.next_webhook_delivery(datetime.now(timezone.utc) + timedelta(seconds=1))
     assert first_delivery is not None
+    assert json.loads(first_delivery.payload)["data"]["message"]["metadata"] == {"ticket.id": "SUP-42"}
     await store.record_webhook_attempt(
         first_delivery.delivery.id,
         attempted_at=datetime.now(timezone.utc),
@@ -94,11 +96,13 @@ async def test_outbox_is_transactional_idempotent_and_covers_committed_events(tm
         message_id=created.id,
         actor="alice",
         content="updated",
+        metadata={"ticket.status": "resolved"},
         is_admin=False,
         member_subject="alice",
     )
     update_delivery = await store.next_webhook_delivery(datetime.now(timezone.utc) + timedelta(seconds=1))
     assert update_delivery is not None
+    assert json.loads(update_delivery.payload)["data"]["message"]["metadata"] == {"ticket.status": "resolved"}
     await store.record_webhook_attempt(
         update_delivery.delivery.id,
         attempted_at=datetime.now(timezone.utc),
@@ -138,6 +142,7 @@ async def test_outbox_is_transactional_idempotent_and_covers_committed_events(tm
     assert envelope["id"] == pending.delivery.id
     assert envelope["type"] == "message.deleted"
     assert envelope["data"]["message"]["content"] == ""
+    assert envelope["data"]["message"]["metadata"] == {}
     assert envelope["data"]["room_id"] == "support"
     assert updated.content == "updated"
     assert deleted.content == ""

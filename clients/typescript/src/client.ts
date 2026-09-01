@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import { SamsarixApiError } from "./errors.js";
+import { normalizeMessageMetadata } from "./metadata.js";
 import { RoomSession } from "./room-session.js";
 import type {
   ChatMessage,
@@ -165,9 +166,13 @@ export class SamsarixChatClient {
   }
 
   async createMessage(roomId: string, payload: MessageCreate, idempotencyKey?: string): Promise<ChatMessage> {
+    const body =
+      payload.metadata === undefined
+        ? payload
+        : { ...payload, metadata: normalizeMessageMetadata(payload.metadata) };
     return this.request<ChatMessage>(`/v1/rooms/${encodeURIComponent(roomId)}/messages`, {
       method: "POST",
-      body: payload,
+      body,
       ...(idempotencyKey === undefined ? {} : { headers: { "Idempotency-Key": idempotencyKey } }),
     });
   }
@@ -187,10 +192,21 @@ export class SamsarixChatClient {
     await this.request<void>(`/v1/rooms/${encodeURIComponent(roomId)}/read-state`, { method: "DELETE" });
   }
 
-  async updateMessage(roomId: string, messageId: string, content: string): Promise<ChatMessage> {
+  async updateMessage(
+    roomId: string,
+    messageId: string,
+    content: string,
+    metadata?: import("./types.js").MessageMetadata,
+  ): Promise<ChatMessage> {
     return this.request<ChatMessage>(
       `/v1/rooms/${encodeURIComponent(roomId)}/messages/${encodeURIComponent(messageId)}`,
-      { method: "PATCH", body: { content } },
+      {
+        method: "PATCH",
+        body: {
+          content,
+          ...(metadata === undefined ? {} : { metadata: normalizeMessageMetadata(metadata) }),
+        },
+      },
     );
   }
 

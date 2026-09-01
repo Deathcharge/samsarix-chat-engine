@@ -14,6 +14,8 @@ This project follows semantic versioning while it is in alpha: minor versions ma
 
 ### Added
 
+- Bounded application message metadata across HTTP/WebSocket creation, author/admin edits, SQLite, PostgreSQL, history, replies, search, pins, exports, realtime events, selected signed webhooks, and unpublished TypeScript SDK 0.8.0. The contract is a flat 20-key, 4096-byte JSON-scalar object intended for ticket, assignment, incident, and action references—not authorization or executable UI.
+- Tombstones clear application metadata and scrub it from retained PostgreSQL message events and completed webhook copies. SQLite schema v9 and PostgreSQL schema v12 add default-empty storage; NDJSON room export advances to schema 6.
 - Shared room message pins across HTTP, SQLite, PostgreSQL, exports, metadata audit, optional signed webhooks, realtime relay, and unpublished TypeScript SDK 0.7.0. `room:read` lists newest pins; `room:read` plus the new least-privilege `room:pin` capability changes them without granting deployment administration.
 - Pin/unpin is idempotent and actor-bound. Messages expose nullable `pinned_at`/`pinned_by`; `message.pin.updated` carries the complete replacement message. Tombstones clear pin state, cancel or scrub webhook payloads, and redact pin actors from retained PostgreSQL events.
 - SQLite schema v8 and PostgreSQL schema v11 add indexed shared-pin metadata. NDJSON room export advances to schema 5 for the pin fields.

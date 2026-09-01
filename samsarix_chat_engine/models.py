@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+import json
+import math
+import re
 from datetime import datetime
 from typing import Any, Literal
 
@@ -11,6 +14,54 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 ROOM_ID_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,63}$"
 REACTION_KEY_PATTERN = r"^[a-z0-9][a-z0-9_+\-]{0,29}$"
+MESSAGE_METADATA_KEY_PATTERN = r"^[a-z][a-z0-9_.-]{0,63}$"
+MESSAGE_METADATA_MAX_KEYS = 20
+MESSAGE_METADATA_MAX_BYTES = 4_096
+MESSAGE_METADATA_MAX_SAFE_INTEGER = 9_007_199_254_740_991
+
+MessageMetadataValue = str | int | float | bool | None
+MessageMetadata = dict[str, MessageMetadataValue]
+
+
+def validate_message_metadata(value: MessageMetadata) -> MessageMetadata:
+    """Return stable metadata after enforcing the public cross-language contract."""
+
+    if len(value) > MESSAGE_METADATA_MAX_KEYS:
+        raise ValueError(f"metadata must contain at most {MESSAGE_METADATA_MAX_KEYS} keys")
+    normalized: MessageMetadata = {}
+    for key, item in sorted(value.items()):
+        if re.fullmatch(MESSAGE_METADATA_KEY_PATTERN, key) is None:
+            raise ValueError("metadata keys must be 1-64 lowercase ASCII key characters")
+        if isinstance(item, bool) or item is None or isinstance(item, str):
+            normalized[key] = item
+        elif isinstance(item, int):
+            if abs(item) > MESSAGE_METADATA_MAX_SAFE_INTEGER:
+                raise ValueError("metadata integers must be exactly representable by JavaScript")
+            normalized[key] = item
+        elif isinstance(item, float):
+            if not math.isfinite(item):
+                raise ValueError("metadata numbers must be finite")
+            if item.is_integer() and abs(item) > MESSAGE_METADATA_MAX_SAFE_INTEGER:
+                raise ValueError("metadata integers must be exactly representable by JavaScript")
+            normalized[key] = item
+        else:
+            raise ValueError("metadata values must be JSON scalars; arrays and objects are not supported")
+    encoded = json.dumps(
+        normalized,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(encoded) > MESSAGE_METADATA_MAX_BYTES:
+        raise ValueError(f"metadata must not exceed {MESSAGE_METADATA_MAX_BYTES} UTF-8 JSON bytes")
+    return normalized
+
+
+def validate_optional_message_metadata(value: MessageMetadata | None) -> MessageMetadata | None:
+    """Validate an update value while preserving omission/null as no change."""
+
+    return None if value is None else validate_message_metadata(value)
 
 
 class APIModel(BaseModel):
@@ -70,6 +121,9 @@ class MessageCreate(_MessageContentPayload):
     sender: str | None = Field(default=None, min_length=1, max_length=64)
     client_message_id: str | None = Field(default=None, min_length=1, max_length=128)
     parent_message_id: str | None = Field(default=None, min_length=1, max_length=128)
+    metadata: MessageMetadata = Field(default_factory=dict)
+
+    _validate_metadata = field_validator("metadata")(validate_message_metadata)
 
 
 class ReactionSummary(APIModel):
@@ -92,8 +146,11 @@ class Message(APIModel):
     reactions: list[ReactionSummary] = Field(default_factory=list)
     pinned_at: datetime | None = None
     pinned_by: str | None = Field(default=None, min_length=1, max_length=64)
+    metadata: MessageMetadata = Field(default_factory=dict)
     edited_at: datetime | None = None
     deleted_at: datetime | None = None
+
+    _validate_metadata = field_validator("metadata")(validate_message_metadata)
 
     @model_validator(mode="after")
     def require_complete_pin_metadata(self) -> Message:
@@ -101,11 +158,17 @@ class Message(APIModel):
             raise ValueError("pinned_at and pinned_by must both be set or both be null")
         if self.deleted_at is not None and self.pinned_at is not None:
             raise ValueError("deleted messages cannot remain pinned")
+        if self.deleted_at is not None and self.metadata:
+            raise ValueError("deleted messages cannot retain application metadata")
         return self
 
 
 class MessageUpdate(_MessageContentPayload):
     """Author or administrator message-content update."""
+
+    metadata: MessageMetadata | None = None
+
+    _validate_metadata = field_validator("metadata")(validate_optional_message_metadata)
 
 
 class ReactionActor(APIModel):
@@ -242,6 +305,9 @@ class WebSocketMessage(_MessageContentPayload):
     type: Literal["message"]
     client_message_id: str | None = Field(default=None, min_length=1, max_length=128)
     parent_message_id: str | None = Field(default=None, min_length=1, max_length=128)
+    metadata: MessageMetadata = Field(default_factory=dict)
+
+    _validate_metadata = field_validator("metadata")(validate_message_metadata)
 
 
 class WebSocketPing(APIModel):

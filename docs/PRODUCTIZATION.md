@@ -1,8 +1,16 @@
 # Productization record
 
-Last updated: 2026-08-31
+Last updated: 2026-09-01
 
 ## Current v0.13 engineering status
+
+The application-metadata slice starts from clean synchronized `main` at merged PR #60 (`7dfc43a`) and its successful 19-job exact-main run: **694 Python tests, two skips, 90.01% coverage**, 119 live PostgreSQL tests, 60 SDK tests, package/wheel, container, restore/PITR, load and Kubernetes gates. Official Sendbird, Stream, and Ably contracts expose custom per-message data/metadata, supporting the familiar need to attach application context to chat. Samsarix deliberately narrows that shape to a flat 20-key, 4096-byte JSON-scalar object for named support ticket, classroom assignment, incident severity/runbook, and safe action-reference uses. It is untrusted display/integration data, not authorization, server routing, markup, or executable UI.
+
+HTTP and WebSocket creation accept metadata; an author/admin edit preserves it when omitted, clears it with `{}`, or replaces the full object. SQLite schema 9 and PostgreSQL schema 12 persist default-empty state. History, replies, search, pins, export schema 6, realtime events, and selected signed webhooks inherit the ordinary complete-message contract. Tombstones clear metadata and scrub retained PostgreSQL message events and terminal webhook copies. Unpublished TypeScript SDK 0.8.0 validates writes before transport while keeping inbound metadata optional for released-0.12 compatibility.
+
+Current local verification passes Ruff, mypy, **587 non-PostgreSQL tests with two expected skips and 121 live PostgreSQL tests deselected**, all **61 TypeScript SDK tests**, package inspection, installed-wheel application smoke, and the real TypeScript HTTP/WebSocket recovery journey. Live PostgreSQL migration/parity/privacy, container/Kubernetes acceptance, exact-PR CI, protected merge, and exact-main CI remain gates. No registry publication, hosted resource, production deployment, customer data, telemetry, paid service, attachment store, arbitrary nested document store, authorization rule, or executable UI contract is introduced.
+
+Primary references checked on 2026-09-01: [Sendbird message custom data](https://sendbird.com/docs/chat/platform-api/v3/message/message-overview), [Stream message extra data](https://getstream.io/chat/docs/sdk/android/client/extra-data/), [Stream custom-data size contract](https://getstream.io/chat/docs/dotnet-csharp/send-message/), and [Ably message metadata](https://ably.com/docs/chat/api/javascript/message). These references establish contract shape, not demand or product-market fit.
 
 The shared-pins slice starts from clean synchronized `main` at merged PR #59 (`3d124ed`) and its successful 19-job exact-main run: **689 Python tests, two skips, 89.98% coverage**, all live PostgreSQL/load/recovery jobs, 59 SDK tests, package/wheel smoke, container and Kubernetes acceptance. Official Discord documentation now exposes a dedicated pin permission plus paginated channel pins ordered by pin time; Slack records pin time and actor; Stream exposes `pinned_at`, `pinned_by`, a distinct pin permission, and paginated pinned-message UI. Those primary sources support a familiar shared-curation shape for accepted support resolutions, classroom resources, incident runbooks/decisions, and community guidelines. They do not prove demand or justify a full role, notification, attachment, or frontend system.
 

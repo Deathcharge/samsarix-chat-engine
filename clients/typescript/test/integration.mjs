@@ -40,11 +40,16 @@ assert.equal(initialReadState.unread_count, 1);
 
 const created = await client.createMessage(
   "sdk-room",
-  { content: "TypeScript HTTP", client_message_id: "sdk-http-1" },
+  {
+    content: "TypeScript HTTP",
+    client_message_id: "sdk-http-1",
+    metadata: { "ticket.id": "SDK-1", priority: 2 },
+  },
   "sdk-http-1",
 );
 assert.equal(created.sender, "sdk-user");
 assert.equal(created.parent_message_id, null);
+assert.deepEqual(created.metadata, { priority: 2, "ticket.id": "SDK-1" });
 const httpReply = await client.createMessage("sdk-room", {
   content: "TypeScript HTTP reply",
   parent_message_id: created.id,
@@ -71,9 +76,10 @@ assert.ok(events.some((event) => event.type === "history"));
 assert.ok(events.some((event) => event.type === "pong"));
 
 const websocketCreated = nextEvent(session, "message.created");
-session.sendMessage("TypeScript WebSocket", "sdk-ws-1");
+session.sendMessage("TypeScript WebSocket", "sdk-ws-1", { source: "sdk-smoke" });
 const createdEvent = await websocketCreated;
 assert.equal(createdEvent.message.client_message_id, "sdk-ws-1");
+assert.deepEqual(createdEvent.message.metadata, { source: "sdk-smoke" });
 const websocketReply = nextEvent(session, "message.created");
 session.sendReply(created.id, "TypeScript WebSocket reply", "sdk-ws-reply-1");
 assert.equal((await websocketReply).message.parent_message_id, created.id);
@@ -108,6 +114,7 @@ assert.equal((await unpinEvent).pinned, false);
 const updatedEvent = nextEvent(session, "message.updated");
 const updated = await client.updateMessage("sdk-room", created.id, "TypeScript edited");
 assert.equal(updated.content, "TypeScript edited");
+assert.deepEqual(updated.metadata, { priority: 2, "ticket.id": "SDK-1" });
 assert.equal((await updatedEvent).message.id, created.id);
 assert.deepEqual(
   (await client.searchMessages("sdk-room", "typescript http")).items.map((message) => message.id),
@@ -121,6 +128,7 @@ assert.equal((await deletedEvent).message.content, "");
 const history = await client.listMessages("sdk-room");
 const tombstone = history.items.find((message) => message.id === created.id);
 assert.equal(tombstone?.content, "");
+assert.deepEqual(tombstone?.metadata, {});
 assert.ok(tombstone?.deleted_at);
 
 // Close the native transport with a retryable application code, then hold the
@@ -155,7 +163,7 @@ session.sendMessage("Live after reconnect", "sdk-resumed-1");
 assert.equal((await resumed).message.client_message_id, "sdk-resumed-1");
 session.close();
 
-console.log("typescript_client_http=ok threads=ok reactions=ok pins=ok search=ok websocket=ok activation=ok reconnect_history=ok resumed_delivery=ok edit_delete=ok");
+console.log("typescript_client_http=ok metadata=ok threads=ok reactions=ok pins=ok search=ok websocket=ok activation=ok reconnect_history=ok resumed_delivery=ok edit_delete=ok");
 
 function nextEvent(roomSession, type) {
   return new Promise((resolve, reject) => {
