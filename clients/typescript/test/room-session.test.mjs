@@ -103,14 +103,19 @@ test("browser authentication, typed events, publish, ping, and close", async () 
   await connected;
 
   session.sendMessage("hello", "client-1");
+  session.sendReply("parent-1", "answer", "reply-1");
   session.ping();
   session.setTyping(true);
   session.setTyping(false);
   assert.throws(() => session.sendMessage(" "), TypeError);
   assert.throws(() => session.sendMessage("more than ten"), RangeError);
   assert.throws(() => session.sendMessage("hello", "x".repeat(129)), RangeError);
+  assert.throws(() => session.sendReply("", "answer"), RangeError);
+  assert.throws(() => session.sendReply("parent-1", " "), TypeError);
+  assert.throws(() => session.sendReply("parent-1", "more than ten"), RangeError);
   assert.deepEqual(sockets[0].sent.slice(2), [
     { type: "message", content: "hello", client_message_id: "client-1" },
+    { type: "message", content: "answer", parent_message_id: "parent-1", client_message_id: "reply-1" },
     { type: "ping" },
     { type: "typing", active: true },
     { type: "typing", active: false },
@@ -268,6 +273,53 @@ test("malformed event envelopes close cleanly with a protocol error", async () =
   sockets[0].receiveRaw("null");
   await assert.rejects(connected, SamsarixConnectionError);
   assert.deepEqual(sockets[0].closes[0], [4002, "Client connection ended"]);
+});
+
+test("released 0.12 messages without a parent field remain compatible", async () => {
+  const sockets = [];
+  const events = [];
+  const client = new SamsarixChatClient({
+    baseUrl: "https://chat.example",
+    credential: { token: "token" },
+    fetch: async () => new Response(),
+    webSocketFactory: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+  });
+  const session = client.roomSession("general", { reconnect: { enabled: false } });
+  session.onEvent((event) => events.push(event));
+  const connected = session.connect();
+  await waitFor(() => sockets.length === 1);
+  sockets[0].receive({
+    type: "ready",
+    room: ROOM,
+    username: "user",
+    active_connections: 1,
+    max_message_chars: 4000,
+  });
+  sockets[0].receive({
+    type: "history",
+    items: [
+      {
+        id: "legacy-message",
+        room_id: "general",
+        sender: "user",
+        content: "pre-thread server",
+        created_at: "2026-08-01T00:00:00Z",
+        client_message_id: null,
+        edited_at: null,
+        deleted_at: null,
+      },
+    ],
+    next_before: null,
+  });
+  sockets[0].receive({ type: "pong" });
+  await connected;
+
+  assert.equal(events.find((event) => event.type === "history").items[0].id, "legacy-message");
+  session.close();
 });
 
 test("known event types must include their required payload", async () => {

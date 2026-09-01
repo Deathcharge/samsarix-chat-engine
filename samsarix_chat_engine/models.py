@@ -68,6 +68,7 @@ class MessageCreate(_MessageContentPayload):
 
     sender: str | None = Field(default=None, min_length=1, max_length=64)
     client_message_id: str | None = Field(default=None, min_length=1, max_length=128)
+    parent_message_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class Message(APIModel):
@@ -79,6 +80,7 @@ class Message(APIModel):
     content: str
     created_at: datetime
     client_message_id: str | None = None
+    parent_message_id: str | None = None
     edited_at: datetime | None = None
     deleted_at: datetime | None = None
 
@@ -187,6 +189,7 @@ class WebSocketMessage(_MessageContentPayload):
 
     type: Literal["message"]
     client_message_id: str | None = Field(default=None, min_length=1, max_length=128)
+    parent_message_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class WebSocketPing(APIModel):

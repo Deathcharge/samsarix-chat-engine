@@ -39,7 +39,7 @@ def test_archive_export_delete_and_metadata_only_audit(client: TestClient, room:
     assert exported.headers["content-type"].startswith("application/x-ndjson")
     assert exported.headers["content-disposition"] == 'attachment; filename="general-messages.ndjson"'
     assert lines[0]["type"] == "samsarix.room_export"
-    assert lines[0]["schema_version"] == 2
+    assert lines[0]["schema_version"] == 3
     assert lines[0]["room"]["id"] == "general"
     assert lines[1] == {"type": "message", "message": created.json()}
 
@@ -313,12 +313,12 @@ def test_v1_database_migrates_in_place(tmp_path, caplog: pytest.LogCaptureFixtur
     assert room.status_code == 200
     assert room.json()["archived_at"] is None
     assert history.json()["items"][0]["content"] == "preserved"
-    assert version == 5
+    assert version == 6
     assert {"archived_at", "frozen_at"} <= columns
-    assert {"edited_at", "deleted_at", "author_subject"} <= message_columns
+    assert {"edited_at", "deleted_at", "author_subject", "parent_message_id"} <= message_columns
     assert read_state_table is not None
     assert webhook_table is not None
-    assert "Migrating database schema from version 1 to 5" in caplog.text
+    assert "Migrating database schema from version 1 to 6" in caplog.text
 
 
 def test_v2_database_migrates_conversation_controls_in_place(tmp_path) -> None:
@@ -385,11 +385,12 @@ def test_v2_database_migrates_conversation_controls_in_place(tmp_path) -> None:
         ).fetchone()
         message_columns = {row[1] for row in connection.execute("PRAGMA table_info(messages)")}
 
-    assert version == 5
+    assert version == 6
     assert controls_table is not None
     assert read_state_table is not None
     assert webhook_table is not None
     assert "author_subject" in message_columns
+    assert "parent_message_id" in message_columns
     assert room["frozen_at"] is None
     assert message["content"] == "preserved"
     assert message["edited_at"] is None
@@ -403,14 +404,14 @@ def test_v2_database_migrates_conversation_controls_in_place(tmp_path) -> None:
 def test_newer_database_schema_is_refused_without_mutation(tmp_path) -> None:
     database = tmp_path / "future.db"
     with closing(sqlite3.connect(database)) as connection, connection:
-        connection.execute("PRAGMA user_version = 6")
+        connection.execute("PRAGMA user_version = 7")
 
     with pytest.raises(UnsupportedSchemaVersionError, match="newer than supported"):
         with TestClient(create_app(Settings(database_path=database))):
             pass
 
     with closing(sqlite3.connect(database)) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 7
 
 
 @pytest.mark.asyncio

@@ -44,8 +44,16 @@ const created = await client.createMessage(
   "sdk-http-1",
 );
 assert.equal(created.sender, "sdk-user");
+assert.equal(created.parent_message_id, null);
+const httpReply = await client.createMessage("sdk-room", {
+  content: "TypeScript HTTP reply",
+  parent_message_id: created.id,
+  client_message_id: "sdk-reply-1",
+});
+assert.equal(httpReply.parent_message_id, created.id);
+assert.deepEqual((await client.listReplies("sdk-room", created.id)).items.map((message) => message.id), [httpReply.id]);
 const search = await client.searchMessages("sdk-room", "typescript http");
-assert.deepEqual(search.items.map((message) => message.id), [created.id]);
+assert.deepEqual(search.items.map((message) => message.id), [created.id, httpReply.id]);
 const markedRead = await client.markRead("sdk-room", created.id);
 assert.equal(markedRead.unread_count, 0);
 await client.clearReadState("sdk-room");
@@ -66,12 +74,18 @@ const websocketCreated = nextEvent(session, "message.created");
 session.sendMessage("TypeScript WebSocket", "sdk-ws-1");
 const createdEvent = await websocketCreated;
 assert.equal(createdEvent.message.client_message_id, "sdk-ws-1");
+const websocketReply = nextEvent(session, "message.created");
+session.sendReply(created.id, "TypeScript WebSocket reply", "sdk-ws-reply-1");
+assert.equal((await websocketReply).message.parent_message_id, created.id);
 
 const updatedEvent = nextEvent(session, "message.updated");
 const updated = await client.updateMessage("sdk-room", created.id, "TypeScript edited");
 assert.equal(updated.content, "TypeScript edited");
 assert.equal((await updatedEvent).message.id, created.id);
-assert.equal((await client.searchMessages("sdk-room", "typescript http")).items.length, 0);
+assert.deepEqual(
+  (await client.searchMessages("sdk-room", "typescript http")).items.map((message) => message.id),
+  [httpReply.id],
+);
 
 const deletedEvent = nextEvent(session, "message.deleted");
 await client.deleteMessage("sdk-room", created.id);
@@ -114,7 +128,7 @@ session.sendMessage("Live after reconnect", "sdk-resumed-1");
 assert.equal((await resumed).message.client_message_id, "sdk-resumed-1");
 session.close();
 
-console.log("typescript_client_http=ok search=ok websocket=ok activation=ok reconnect_history=ok resumed_delivery=ok edit_delete=ok");
+console.log("typescript_client_http=ok threads=ok search=ok websocket=ok activation=ok reconnect_history=ok resumed_delivery=ok edit_delete=ok");
 
 function nextEvent(roomSession, type) {
   return new Promise((resolve, reject) => {

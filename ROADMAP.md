@@ -44,7 +44,7 @@ This closes the largest remaining privacy and operational gap. It does not claim
 - [x] immediate live-socket eviction for bans and reconnect convergence for edits/deletes;
 - [x] metadata-only moderation audit, schema migration, API/runbook documentation, and integration tests.
 
-Attachments, search, reactions, threads, and mentions should be added only against a named consumer journey. Binary files should use operator-provided object storage rather than SQLite blobs.
+Attachments, reactions, and mentions should be added only against a named consumer journey. Search now serves support-case retrieval, and one-depth threads serve contextual support, classroom, and incident follow-up. Binary files should use operator-provided object storage rather than SQLite blobs.
 
 ## v0.7 — integration ergonomics
 
@@ -121,6 +121,17 @@ This makes the supported topology repeatable without implying that a container m
 No horizontal-scale claim is acceptable before those tests pass. Redis Pub/Sub is at-most-once and does not solve shared storage, migration/restore coordination, webhook leadership, or distributed quotas. A broker and shared authoritative database must solve a demonstrated topology together rather than decorate the architecture.
 
 The relay currently polls; transactional `NOTIFY` emission is not consumed by a listener. Notification-assisted latency is an optional optimization, not a release prerequisite. If introduced, it must pass listener-loss/reconnect tests without weakening the polling correctness path.
+
+## v0.14 — contextual threaded replies
+
+- [x] add an optional parent message ID to HTTP and WebSocket message creation;
+- [x] keep the contract deliberately one level deep and reject replies to replies;
+- [x] add authorized, chronological reply pagination with thread-scoped cursors;
+- [x] preserve idempotency, edit/delete, search, export, webhook, and realtime semantics for replies;
+- [x] migrate SQLite and PostgreSQL safely, including retention behavior for surviving replies;
+- [x] expose `listReplies()` and `sendReply()` through unpublished TypeScript SDK 0.5.0.
+
+This milestone serves named support, classroom, and incident journeys without adding arbitrary nesting or a separate conversation store. Room history remains a chronological flat stream so existing clients continue to receive every message; clients can use `parent_message_id` to render thread context.
 
 ## Deliberate non-goals
 

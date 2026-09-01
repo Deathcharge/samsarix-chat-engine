@@ -84,6 +84,7 @@ from .store import (
     RoomFrozenError,
     RoomNotArchivedError,
     RoomNotFoundError,
+    ThreadDepthError,
     WebhookCapacityError,
     WebhookDeliveryNotFoundError,
     WebhookPayloadUnavailableError,
@@ -330,6 +331,9 @@ _MESSAGE_WRITE_ERRORS: tuple[tuple[type[Exception], str, str, int | None, str | 
     (MemberBannedError, "room_banned", "This account is banned from the room", 4403, "Room access revoked"),
     (MemberMutedError, "room_muted", "This account is muted in the room", None, None),
     (WebhookCapacityError, "webhook_capacity_reached", "Webhook delivery capacity reached", None, None),
+    (MessageNotFoundError, "parent_message_not_found", "Parent message not found in this room", None, None),
+    (MessageDeletedError, "parent_message_deleted", "Deleted messages cannot receive new replies", None, None),
+    (ThreadDepthError, "thread_depth_exceeded", "Replies may target only top-level messages", None, None),
     (RoomNotFoundError, "room_not_found", "Room not found", 4404, "Room not found"),
 )
 
@@ -754,7 +758,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         def export_lines() -> Iterator[str]:
             metadata = {
                 "type": "samsarix.room_export",
-                "schema_version": 2,
+                "schema_version": 3,
                 "exported_at": exported_at.isoformat(),
                 "room": room.model_dump(mode="json"),
             }
@@ -826,6 +830,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise APIError(404, "room_not_found", "Room not found") from exc
         except InvalidCursorError as exc:
             raise APIError(400, "invalid_cursor", "The message cursor is not valid for this room") from exc
+        return MessagePage(items=items, next_before=next_before)
+
+    @router.get(
+        "/rooms/{room_id}/messages/{parent_message_id}/replies",
+        response_model=MessagePage,
+        tags=["messages"],
+    )
+    async def list_replies(
+        room_id: str,
+        parent_message_id: Annotated[str, Path(min_length=1, max_length=128)],
+        principal: PrincipalDependency,
+        limit: int = Query(default=50, ge=1, le=100),
+        before: str | None = Query(default=None, min_length=1, max_length=128),
+    ) -> MessagePage:
+        _authorize(principal, "room:read", room_id)
+        await _enforce_member_access(store, principal, room_id, write=False)
+        try:
+            items, next_before = await store.list_replies(
+                room_id,
+                parent_message_id,
+                limit=limit,
+                before=before,
+            )
+        except RoomNotFoundError as exc:
+            raise APIError(404, "room_not_found", "Room not found") from exc
+        except MessageNotFoundError as exc:
+            raise APIError(404, "parent_message_not_found", "Parent message not found in this room") from exc
+        except ThreadDepthError as exc:
+            raise APIError(409, "thread_depth_exceeded", "Replies do not have nested reply collections") from exc
+        except InvalidCursorError as exc:
+            raise APIError(400, "invalid_cursor", "The reply cursor is not valid for this thread") from exc
         return MessagePage(items=items, next_before=next_before)
 
     @router.get("/rooms/{room_id}/read-state", response_model=ReadState, tags=["messages"])
@@ -907,6 +942,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 sender=sender,
                 content=payload.content,
                 client_message_id=idempotency_key or payload.client_message_id,
+                parent_message_id=payload.parent_message_id,
                 allow_frozen=principal.is_admin,
                 member_subject=None if principal.is_admin else principal.subject,
                 author_subject=principal.subject,
@@ -917,6 +953,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise APIError(409, "room_archived", "Archived rooms are read-only") from exc
         except RoomFrozenError as exc:
             raise APIError(409, "room_frozen", "Only administrators may publish while the room is frozen") from exc
+        except MessageNotFoundError as exc:
+            raise APIError(404, "parent_message_not_found", "Parent message not found in this room") from exc
+        except MessageDeletedError as exc:
+            raise APIError(409, "parent_message_deleted", "Deleted messages cannot receive new replies") from exc
+        except ThreadDepthError as exc:
+            raise APIError(409, "thread_depth_exceeded", "Replies may target only top-level messages") from exc
         except MemberBannedError as exc:
             raise APIError(403, "room_banned", "This account is banned from the room") from exc
         except MemberMutedError as exc:
@@ -1580,6 +1622,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         sender=username,
                         content=command.content,
                         client_message_id=command.client_message_id,
+                        parent_message_id=command.parent_message_id,
                         allow_frozen=principal.is_admin,
                         member_subject=None if principal.is_admin else principal.subject,
                         author_subject=principal.subject,
@@ -1590,6 +1633,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     RoomArchivedError,
                     RoomFrozenError,
                     RoomNotFoundError,
+                    MessageNotFoundError,
+                    MessageDeletedError,
+                    ThreadDepthError,
                     WebhookCapacityError,
                 ) as exc:
                     code, message_text, close_code, close_reason = _message_write_error(exc)

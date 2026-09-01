@@ -4,7 +4,7 @@ Samsarix Chat Engine 0.10 provides the small amount of application state needed 
 
 ## Support-room journey
 
-A practical integration creates one private room per support case, issues short-lived room tokens to the customer and assigned agents, and stores the case-to-room mapping in the host application's database. A customer can post and disconnect; an agent later sees the unread count, reads through a message, replies, and marks the latest reply as read.
+A practical integration creates one private room per support case, issues short-lived room tokens to the customer and assigned agents, and stores the case-to-room mapping in the host application's database. A customer can post and disconnect; an agent later sees the unread count, reads through a message, adds a contextual one-depth reply, and marks the latest reply as read.
 
 ```ts
 import { SamsarixChatClient } from "@samsarix/chat-client";
@@ -17,6 +17,11 @@ const chat = new SamsarixChatClient({
 const before = await chat.getReadState("support-case-42");
 const messages = await chat.listMessages("support-case-42");
 const paymentContext = await chat.searchMessages("support-case-42", "payment failed");
+const original = paymentContext.items.at(-1);
+if (original) {
+  const existingReplies = await chat.listReplies("support-case-42", original.id);
+  console.log("thread", existingReplies.items);
+}
 await chat.markRead("support-case-42", messages.items.at(-1)?.id);
 
 const session = chat.roomSession("support-case-42");
@@ -42,7 +47,10 @@ session.onEvent((event) => {
 });
 await session.connect();
 session.setTyping(true);
+if (original) session.sendReply(original.id, "I am checking that transaction now", crypto.randomUUID());
 ```
+
+Threads are a presentation aid, not a separate authorization or delivery boundary. Only a non-deleted top-level message can receive new replies, nesting is rejected, and every reply still appears in chronological room history, search, exports, webhooks, and ordinary `message.created` events. Existing replies remain readable if their parent is later tombstoned. If physical count/age retention removes the parent, surviving replies are promoted by clearing their parent ID.
 
 The runnable [support workflow example](../examples/03_support_workflow.py) demonstrates the complete HTTP path with separate customer and agent identities. With a server running and an operator key plus signing secret configured, issue two tokens:
 

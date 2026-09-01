@@ -2,7 +2,7 @@
 
 Samsarix Chat Engine is a small, local-first room chat service from Samsarix LLC for developers who need persisted messages and live WebSocket delivery without adopting a full collaboration platform. It runs as a standalone FastAPI service or as an embeddable ASGI application, stores data in SQLite, and has no dependency on Redis, an LLM provider, or any private package.
 
-Version 0.12.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, verification-only asymmetric authentication, accountable data lifecycle, practical conversation controls, typed TypeScript client, support workflow and retrieval, durable application webhooks, and hardened container deployment are implemented and tested. The project is licensed under the standard Mozilla Public License 2.0.
+Version 0.12.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, verification-only asymmetric authentication, accountable data lifecycle, practical conversation controls, typed TypeScript client, support workflow and retrieval, durable application webhooks, and hardened container deployment are implemented and tested. The development branch additionally includes unreleased one-depth threaded replies and a guarded PostgreSQL multi-instance preview. The project is licensed under the standard Mozilla Public License 2.0.
 
 ## What works
 
@@ -10,6 +10,7 @@ Version 0.12.0 is an alpha release candidate. Its core single-instance journey, 
 - Post validated messages over HTTP or WebSocket.
 - Persist room history in SQLite and recover it after reconnect or restart.
 - Search the current retained content of one authorized room with Unicode-aware cursor pagination.
+- Keep contextual follow-ups in one-depth threads with authorized reply pagination.
 - Broadcast messages and lightweight join/leave presence within one process.
 - Retry message submission safely with `Idempotency-Key` or `client_message_id`.
 - Protect operator actions with an optional shared API key.
@@ -101,7 +102,7 @@ The profile publishes only to host loopback, runs as UID/GID 10001, mounts `/dat
 
 The framework-neutral [`@samsarix/chat-client`](clients/typescript/README.md) source ships in `clients/typescript`. It wraps authenticated HTTP operations and browser-safe first-message WebSocket authentication, emits generated declarations, refreshes credentials on reconnect, and applies bounded exponential backoff without runtime dependencies. The package is verified and packable but is not yet published to npm.
 
-SDK 0.4.0 waits for initial history and a post-history activation reply before `connect()` resolves. Attempts have a configurable deadline; retry budgets reset only after a stable activated connection, not merely `ready`. See the [migration and recovery contract](clients/typescript/README.md#reconnect-behavior), including browser-legal close codes and caller-owned history reconciliation.
+Unpublished SDK 0.5.0 adds `listReplies()` and `sendReply()` while retaining the 0.4 connection contract: it waits for initial history and a post-history activation reply before `connect()` resolves. Attempts have a configurable deadline; retry budgets reset only after a stable activated connection, not merely `ready`. See the [migration and recovery contract](clients/typescript/README.md#reconnect-behavior), including browser-legal close codes and caller-owned history reconciliation.
 
 ## WebSocket protocol
 
@@ -115,6 +116,12 @@ The server sends `ready` and `history`, then accepts these JSON commands:
 
 ```json
 {"type":"message","content":"Hello","client_message_id":"browser-42"}
+```
+
+To reply to a top-level message, add its ID:
+
+```json
+{"type":"message","content":"Contextual follow-up","parent_message_id":"message-id","client_message_id":"browser-43"}
 ```
 
 ```json
