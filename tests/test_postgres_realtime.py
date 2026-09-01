@@ -35,6 +35,7 @@ class RecordingTarget:
         self.broadcasted = asyncio.Event()
         self.fenced = asyncio.Event()
         self.event_sequences: list[int | None] = []
+        self.required_permissions: list[str | None] = []
 
     async def broadcast(
         self,
@@ -43,12 +44,14 @@ class RecordingTarget:
         *,
         exclude_connection_id: str | None = None,
         event_sequence: int | None = None,
+        required_permission: str | None = None,
     ) -> None:
         self.broadcast_attempts += 1
         if self.broadcast_attempts == self.fail_on_broadcast_number:
             raise RuntimeError("local dispatch failed")
         self.broadcasts.append((room_id, event, exclude_connection_id))
         self.event_sequences.append(event_sequence)
+        self.required_permissions.append(required_permission)
         self.broadcasted.set()
 
     async def close_room(
@@ -149,6 +152,33 @@ async def test_two_relays_receive_each_committed_public_event_once(clean_postgre
         assert await second_foundation.register_instance("relay-second", lease_seconds=30) > archived_sequence
     finally:
         await asyncio.gather(writer.close(), first_foundation.close(), second_foundation.close())
+
+
+@pytest.mark.asyncio
+async def test_read_update_dispatch_requires_receipt_permission() -> None:
+    target = RecordingTarget()
+    relay = PostgresRealtimeRelay(PostgresFoundation("postgresql://unused"), target)
+    event = RealtimeEvent(
+        sequence=7,
+        room_id="support",
+        event_type="read.updated",
+        payload={
+            "type": "read.updated",
+            "receipt": {
+                "subject": "alice",
+                "last_read_message_id": "message-1",
+                "last_read_message_at": "2026-09-01T00:00:00+00:00",
+                "last_read_at": "2026-09-01T00:00:00+00:00",
+            },
+        },
+        created_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+
+    await relay._dispatch(event)
+
+    assert target.broadcasts == [("support", event.payload, None)]
+    assert target.required_permissions == ["room:read-receipts"]
+    assert target.event_sequences == [7]
 
 
 @pytest.mark.asyncio

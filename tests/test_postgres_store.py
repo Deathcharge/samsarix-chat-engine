@@ -1170,15 +1170,32 @@ async def test_read_state_is_monotonic_subject_scoped_and_bounded(clean_postgres
         initial = await service.get_read_state("general", "alice")
         assert initial.last_read_message_id is None
         assert initial.unread_count == 1
-        assert (await service.mark_read("general", "alice", own.id)).unread_count == 1
+        assert (await service.mark_read("general", "alice", own.id)).state.unread_count == 1
         current = await service.mark_read("general", "alice", other.id)
-        assert current.last_read_message_id == other.id
-        assert current.unread_count == 0
-        assert (await service.mark_read("general", "alice", own.id)).last_read_message_id == other.id
+        assert current.state.last_read_message_id == other.id
+        assert current.state.unread_count == 0
+        assert current.changed is True
+        regressed = await service.mark_read("general", "alice", own.id)
+        assert regressed.state.last_read_message_id == other.id
+        assert regressed.changed is False
+        receipts = await service.query_read_receipts("general", ["missing", "alice"])
+        assert [receipt.subject for receipt in receipts] == ["missing", "alice"]
+        assert receipts[0].last_read_message_id is None
+        assert receipts[0].last_read_at is None
+        assert receipts[1].last_read_message_id == other.id
+        assert receipts[1].last_read_message_at == other.created_at
+        assert receipts[1].last_read_at is not None
         with pytest.raises(ReadStateCapacityError):
             await service.mark_read("general", "bob", None)
 
-        await service.clear_read_state("general", "alice")
+        assert await service.clear_read_state("general", "alice") is True
+        assert await service.clear_read_state("general", "alice") is False
+        assert (await service.query_read_receipts("general", ["alice"]))[0].last_read_at is None
+        async with service.foundation.transaction() as connection:
+            cursor = await connection.execute(
+                "SELECT COUNT(*) FROM public.samsarix_realtime_events WHERE event_type = 'read.updated'"
+            )
+            assert (await cursor.fetchone())[0] == 3
         reset = await service.get_read_state("general", "alice")
         assert reset.last_read_message_id is None
         assert reset.unread_count == 1
@@ -1218,7 +1235,7 @@ async def test_cross_room_read_state_query_has_postgres_parity(clean_postgres_da
             author_subject="bob",
         )
         assert own.id != first_support.id
-        await service.mark_read("support", "alice", first_support.id)
+        assert (await service.mark_read("support", "alice", first_support.id)).changed is True
         latest_support, _ = await service.create_message(
             room_id="support",
             sender="bob",

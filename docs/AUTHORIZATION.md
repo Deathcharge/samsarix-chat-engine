@@ -3,7 +3,7 @@
 Version 0.12 supports two credential classes with deliberately different jobs:
 
 - `SAMSARIX_CHAT_API_KEY` is the deployment-wide operator credential. It can create and list rooms, inspect process statistics, and access every room. Keep it on trusted servers and administration workstations.
-- A signed access token represents one application user. It contains a subject, an expiry, allowed room IDs, and `room:read`, `room:write`, `room:pin`, or `admin` permissions. Give ordinary clients only short-lived room tokens.
+- A signed access token represents one application user. It contains a subject, an expiry, allowed room IDs, and `room:read`, `room:write`, `room:pin`, `room:read-receipts`, or `admin` permissions. Give ordinary clients only short-lived room tokens.
 
 The engine does not implement signup, passwords, sessions, or an identity database. Your host application authenticates its user, decides which rooms they may access, and issues a token with `AccessTokenService` or a compatible JWT implementation. The engine can either share an HS256 signing secret or hold only a static public JWKS for verification.
 
@@ -112,6 +112,7 @@ The persisted message sender and WebSocket presence name are derived from the si
 | Get a room or its message history | room listed in token plus `room:read` |
 | Get, advance, or clear personal read state | stable signed subject, room listed in token, plus `room:read` |
 | Query read state for 1–100 rooms | stable signed subject, every room listed in token, plus `room:read` |
+| Query or receive participant read receipts | room listed in token, plus both `room:read` and `room:read-receipts` |
 | Connect WebSocket and receive events | room listed in token plus `room:read` |
 | Post or send typing state over WebSocket | room listed in token plus `room:write` |
 | Pin or unpin a shared message | room listed in token plus both `room:read` and `room:pin` |
@@ -125,5 +126,7 @@ Tokens use a mode-specific fixed algorithm allowlist—HS256 for shared-secret m
 HS256 means every verifier can also mint tokens, so share that secret only with trusted backend components. JWKS mode removes private signing authority from the engine and supports planned overlapping-key rotation, but the file still requires an operator restart and token revocation lists or remote automatic key refresh are not implemented. Prefer lifetimes measured in minutes for browser clients. Token headers that could redirect key selection (`jku`, `x5u`, or `x5c`) and critical/unencoded extensions are rejected. The webhook signing-secret rotation window is a separate outbound-delivery mechanism described in [Reliable application webhooks](WEBHOOKS.md). Container deployments should use mounted secret files described in [Container deployment](CONTAINER_DEPLOYMENT.md).
 
 Read state uses the exact signed `sub` as its durable key. Choose an opaque stable account ID, never a mutable display name or email address. The operator API key deliberately cannot access personal read-state endpoints because it represents a deployment rather than one end user. A cross-room query checks every requested ID against the same token before storage lookup and never returns a partial authorized subset.
+
+Receipt lookup is a separate privilege because participant activity can be sensitive. The caller supplies an explicit bounded subject set from the host application's membership model; Samsarix never lists room members. Ordinary users may mark and clear only their own cursor without receiving other participants' state. Grant `room:read-receipts` only where the product has a clear visibility and consent policy.
 
 Never put API keys or tokens in URLs. Configure TLS at the reverse proxy, an exact `SAMSARIX_CHAT_ALLOWED_ORIGINS` list for browser deployments, filesystem protections for SQLite, and log redaction at upstream gateways.

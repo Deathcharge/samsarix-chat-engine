@@ -2,7 +2,15 @@
 
 Last updated: 2026-09-01
 
-## Current v0.21 engineering status
+## Current v0.22 engineering status
+
+The participant-receipt slice starts from clean synchronized `main` at merged PR #65 (`80ea2e3`) and its successful 19-job exact-main run. It reuses the existing monotonic per-subject cursor rather than creating per-message receipt rows. A caller with `room:read` plus the new least-privilege `room:read-receipts` capability submits 1–100 explicit subjects and receives input-ordered current receipts, including the exact message `(created_at, id)` cursor and advancement time. Unknown or non-stored supplied subjects return null state, so the endpoint does not become a membership directory.
+
+Changed advances and clears produce typed `read.updated` events only for sockets carrying the receipt capability (or admin). PostgreSQL commits cursor state and event atomically; SQLite broadcasts only after a changed local write. Idempotent/regressive operations emit nothing. SDK 0.13.0 adds bounded `queryReadReceipts()` validation and typed events. Consumers query a fresh snapshot on every connect/reconnect because socket delivery remains at-most-once and the SDK timeline intentionally does not mix participant activity into message state.
+
+Receipt visibility is behavioral-data exposure, not an ordinary consequence of room reading. Hosts decide participant lists, policy and consent; Samsarix provides no membership enumeration, per-message receipt history, human-attention proof, delivery acknowledgement, consent registry or remote-copy erasure. Current provider documentation demonstrates that cursor/read-update primitives are established, and that privacy controls matter: [Sendbird read receipts](https://sendbird.com/docs/chat/platform-api/v3/message/read-receipts/read-receipts-overview) and [Stream unread/read events](https://getstream.io/chat/docs/node/unread_messages/). These sources establish product shape, not market demand or feature parity.
+
+## Previous v0.21 engineering status
 
 The reconnect-synchronization slice starts from clean synchronized `main` at merged PR #64 (`937c424`) and its successful 19-job exact-main run: **748 Python tests with two platform skips and 90.28% coverage**, all **127 live PostgreSQL tests**, 64 SDK tests, dependency/package/container/Kubernetes/restore/PITR gates, and five bounded load/recovery profiles. No PR or issue was open at the new baseline.
 

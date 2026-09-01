@@ -1,6 +1,6 @@
 # `@samsarix/chat-client`
 
-Dependency-free TypeScript client for Samsarix Chat Engine's implemented HTTP and WebSocket contracts, including the 0.12 server and guarded PostgreSQL preview. Unpublished SDK 0.12.0 ships ESM and generated declarations, a reconnect-aware bounded in-memory room timeline, works with browser globals, and accepts injected `fetch`/`WebSocket` implementations for Node runtimes and tests. Node 18 requires an injected WebSocket implementation; the live smoke uses Node's newer native WebSocket.
+Dependency-free TypeScript client for Samsarix Chat Engine's implemented HTTP and WebSocket contracts, including the 0.12 server and guarded PostgreSQL preview. Unpublished SDK 0.13.0 ships ESM and generated declarations, participant receipt snapshots/events, a reconnect-aware bounded in-memory room timeline, works with browser globals, and accepts injected `fetch`/`WebSocket` implementations for Node runtimes and tests. Node 18 requires an injected WebSocket implementation; the live smoke uses Node's newer native WebSocket.
 
 This package is part of the Samsarix Chat Engine repository and is not yet published to npm.
 
@@ -11,7 +11,7 @@ cd clients/typescript
 npm ci
 npm run build
 npm pack
-npm install ./samsarix-chat-client-0.12.0.tgz
+npm install ./samsarix-chat-client-0.13.0.tgz
 ```
 
 ## Token client
@@ -69,14 +69,19 @@ room.onEvent((event) => {
   if (event.type === "message.pin.updated") {
     console.log(event.pinned, event.message.pinned_by);
   }
+  if (event.type === "read.updated") {
+    updateReceipt(event.receipt);
+  }
 });
 await room.connect();
 const unread = await client.getReadState("support-42");
 const inbox = await client.queryReadStates(["support-42", "support-43"]);
+const receipts = await client.queryReadReceipts("support-42", ["customer-42", "agent-7"]);
 const matches = await client.searchMessages("support-42", "payment failed", { limit: 25 });
 console.log("matches", matches.items);
 console.log("unread", unread.unread_count);
 console.log("inbox unread", inbox.total_unread_count);
+console.log("participant receipts", receipts.items);
 await client.markRead("support-42");
 room.setTyping(true);
 room.sendMessage("Live follow-up", crypto.randomUUID(), { "ticket.id": "SUP-42" }, undefined, ["agent-7"]);
@@ -88,6 +93,8 @@ room.setTyping(false);
 The credential provider is called again on reconnect, allowing the host application to refresh short-lived tokens. Authentication secrets are sent in the first WebSocket message, never in the URL.
 
 Read-state methods require a signed application-user token because the server binds the cursor to its stable subject; operator API keys cannot stand in for an end user. `queryReadStates()` accepts 1–100 unique room IDs, validates them before transport, and preserves caller order. The token must grant `room:read` for every requested room. Its content-free result includes each cursor/count and latest visible message ID/time plus aggregate unread totals; the host still owns room discovery, assignment, labels, and previews. Typing is ephemeral and automatically expires server-side if a client misses its stop transition.
+
+`queryReadReceipts()` accepts 1–100 explicit unique subjects for one room and requires `room:read` plus `room:read-receipts`. It preserves input order and returns null state for a supplied subject without a cursor; this is not membership discovery. `last_read_message_at` and `last_read_message_id` form the exact chronological cursor, while `last_read_at` records its advancement. Apply typed `read.updated` events after the snapshot, and reload the explicit snapshot after every reconnect because delivery is at-most-once. See the repository's [receipt privacy and recovery contract](../../docs/READ_RECEIPTS.md).
 
 Replies are one level deep. `listReplies()` pages one top-level message's replies, while `sendReply()` publishes through the existing `message.created` event with `message.parent_message_id` set. Room history remains a flat chronological stream, so reconcile all messages by ID and use the parent field only for presentation/grouping. The output field remains optional in the SDK type so current clients can consume released 0.12 WebSocket events, which predate the field; the threaded development server always returns either a parent ID or null.
 
@@ -132,7 +139,7 @@ The timeline retains at most 1000 messages by default. Set `timelineMaxMessages`
 
 **0.12.0 contract change:** current servers advertise `snapshot_sync_v1` in `ready.capabilities`. The SDK sends a post-history `sync` command and waits for `sync.completed`, whose count/cursor must match that history snapshot. The server processes the command only after its local initialization buffer has flushed. Against an older server that does not advertise the capability, the SDK retains the 0.4.0 post-history ping/pong fallback. Both activation replies are delivered to event listeners. Register listeners before calling `connect()`; do not send from a `ready`/`history` listener while synchronization is pending. Await `connect()` or observe `connected` before sending.
 
-The marker completes a local snapshot handoff, not durable event replay. There is no public event cursor, exactly-once guarantee, recovery of missed ephemeral presence/typing, or claim that a different PostgreSQL replica has polled to the global head. The timeline is an in-memory newest-page reducer, not an offline database: fetch older pages separately, and reload other derived views such as pin ordering and read state when needed.
+The marker completes a local snapshot handoff, not durable event replay. There is no public event cursor, exactly-once guarantee, recovery of missed ephemeral presence/typing/receipt events, or claim that a different PostgreSQL replica has polled to the global head. The timeline is an in-memory newest-page reducer, not an offline database: fetch older pages separately, and reload other derived views such as pin ordering, read state, and participant receipts when needed.
 
 One `handshakeTimeoutMs` deadline covers each attempt from credential lookup through transport/authentication, initial history, and activation reply. Expiry rejects the pending promise with `SamsarixConnectionError.code === 4008`, detaches that attempt, requests transport closure, and consumes the same bounded retry budget as other transient failures. The SDK cannot cancel arbitrary work inside an application credential provider, abort a WebSocket transport beyond its `close()` API, or guarantee timer execution while a browser tab/event loop is suspended. Late credentials and callbacks cannot revive an expired attempt. A provider that never settles remains shared by that client's credential requests; time-bound the provider in the host application.
 

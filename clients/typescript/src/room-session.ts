@@ -34,6 +34,7 @@ const EVENT_TYPES = new Set([
   "pong",
   "presence.joined",
   "presence.left",
+  "read.updated",
   "ready",
   "room.archived",
   "room.frozen",
@@ -523,6 +524,8 @@ function isRoomEvent(value: unknown): value is RoomEvent {
       );
     case "pong":
       return true;
+    case "read.updated":
+      return "receipt" in value && isReadReceipt(value.receipt);
     case "sync.completed":
       return (
         value.strategy === "snapshot" &&
@@ -590,6 +593,33 @@ function isRoom(value: unknown): boolean {
     isNullableStringField(value, "archived_at") &&
     isNullableStringField(value, "frozen_at")
   );
+}
+
+function isReadReceipt(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const subject = value.subject;
+  if (
+    typeof subject !== "string" ||
+    subject.length === 0 ||
+    subject.length > 64 ||
+    subject !== subject.trim() ||
+    !isNullableStringField(value, "last_read_message_id") ||
+    !isNullableStringField(value, "last_read_message_at") ||
+    !isNullableStringField(value, "last_read_at")
+  ) {
+    return false;
+  }
+  if (
+    typeof value.last_read_message_id === "string" &&
+    (value.last_read_message_id.length === 0 ||
+      value.last_read_message_id.length > 128 ||
+      value.last_read_message_at === null ||
+      value.last_read_at === null)
+  ) {
+    return false;
+  }
+  if ((value.last_read_message_id === null) !== (value.last_read_message_at === null)) return false;
+  return true;
 }
 
 function isChatMessage(value: unknown): boolean {

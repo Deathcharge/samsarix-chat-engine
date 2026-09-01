@@ -25,6 +25,7 @@ MESSAGE_ATTACHMENTS_MAX_COUNT = 5
 MESSAGE_ATTACHMENTS_MAX_BYTES = 8_192
 MESSAGE_MENTIONS_MAX_COUNT = 10
 READ_STATE_QUERY_MAX_ROOMS = 100
+READ_RECEIPT_QUERY_MAX_SUBJECTS = 100
 
 MessageMetadataValue = str | int | float | bool | None
 MessageMetadata = dict[str, MessageMetadataValue]
@@ -148,6 +149,20 @@ def validate_read_state_query_room_ids(value: list[str]) -> list[str]:
         raise ValueError("room_ids must contain valid room IDs")
     if len(value) != len(set(value)):
         raise ValueError("room_ids must not contain duplicates")
+    return value
+
+
+def validate_read_receipt_query_subjects(value: Any) -> list[str]:
+    """Return a bounded unique ordered set of host-application subjects."""
+
+    if not isinstance(value, list) or any(not isinstance(subject, str) for subject in value):
+        raise ValueError("subjects must be an array of strings")
+    if not 1 <= len(value) <= READ_RECEIPT_QUERY_MAX_SUBJECTS:
+        raise ValueError(f"subjects must contain between 1 and {READ_RECEIPT_QUERY_MAX_SUBJECTS} items")
+    if any(not 1 <= len(subject) <= 64 or subject != subject.strip() for subject in value):
+        raise ValueError("subjects must contain 1-64 character values without surrounding whitespace")
+    if len(value) != len(set(value)):
+        raise ValueError("subjects must not contain duplicates")
     return value
 
 
@@ -364,6 +379,41 @@ class ReadStateQueryResult(APIModel):
     items: list[ReadStateSummary]
     total_unread_count: int = Field(ge=0)
     unread_room_count: int = Field(ge=0)
+
+
+class ReadReceiptQuery(APIModel):
+    """Explicit bounded participant set for one room's shared read progress."""
+
+    subjects: list[str] = Field(min_length=1, max_length=READ_RECEIPT_QUERY_MAX_SUBJECTS)
+
+    @field_validator("subjects", mode="before")
+    @classmethod
+    def validate_subjects(cls, value: Any) -> list[str]:
+        return validate_read_receipt_query_subjects(value)
+
+
+class ReadReceipt(APIModel):
+    """Content-free read progress for one explicitly requested room participant."""
+
+    subject: str = Field(min_length=1, max_length=64)
+    last_read_message_id: str | None
+    last_read_message_at: datetime | None
+    last_read_at: datetime | None
+
+    @model_validator(mode="after")
+    def require_complete_cursor(self) -> ReadReceipt:
+        if (self.last_read_message_id is None) != (self.last_read_message_at is None):
+            raise ValueError("last_read_message_id and last_read_message_at must both be set or both be null")
+        if self.last_read_message_id is not None and self.last_read_at is None:
+            raise ValueError("last_read_at is required when a message cursor is set")
+        return self
+
+
+class ReadReceiptQueryResult(APIModel):
+    """Input-ordered read progress for an explicit room participant set."""
+
+    room_id: str
+    items: list[ReadReceipt]
 
 
 class AuditEvent(APIModel):

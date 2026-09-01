@@ -30,11 +30,13 @@ from .models import (
     PinMutation,
     ReactionMutation,
     ReactionSummary,
+    ReadReceipt,
     ReadState,
     ReadStateSummary,
     Room,
     RoomCreate,
     WebhookDelivery,
+    validate_read_receipt_query_subjects,
     validate_read_state_query_room_ids,
 )
 
@@ -307,6 +309,15 @@ class PendingWebhook:
     payload: bytes
 
 
+@dataclass(frozen=True, slots=True)
+class ReadStateMutation:
+    """Internal read-state write result used to suppress duplicate receipt events."""
+
+    state: ReadState
+    receipt: ReadReceipt
+    changed: bool
+
+
 class MessageStream(Protocol):
     """Closable, synchronous message stream used by export responses."""
 
@@ -457,9 +468,11 @@ class ChatStorage(Protocol):
 
     async def query_read_states(self, room_ids: list[str], subject: str) -> list[ReadStateSummary]: ...
 
-    async def mark_read(self, room_id: str, subject: str, message_id: str | None) -> ReadState: ...
+    async def query_read_receipts(self, room_id: str, subjects: list[str]) -> list[ReadReceipt]: ...
 
-    async def clear_read_state(self, room_id: str, subject: str) -> None: ...
+    async def mark_read(self, room_id: str, subject: str, message_id: str | None) -> ReadStateMutation: ...
+
+    async def clear_read_state(self, room_id: str, subject: str) -> bool: ...
 
     async def list_audit_events(
         self,
@@ -800,17 +813,23 @@ class ChatStore:
         validated_room_ids = validate_read_state_query_room_ids(room_ids)
         return await asyncio.to_thread(self._query_read_states_sync, validated_room_ids, subject)
 
-    async def mark_read(self, room_id: str, subject: str, message_id: str | None) -> ReadState:
+    async def query_read_receipts(self, room_id: str, subjects: list[str]) -> list[ReadReceipt]:
+        """Return input-ordered read progress without enumerating room participants."""
+
+        validated_subjects = validate_read_receipt_query_subjects(subjects)
+        return await asyncio.to_thread(self._query_read_receipts_sync, room_id, validated_subjects)
+
+    async def mark_read(self, room_id: str, subject: str, message_id: str | None) -> ReadStateMutation:
         """Advance a signed subject's room cursor without allowing regression."""
 
         async with self._write_lock:
             return await asyncio.to_thread(self._mark_read_sync, room_id, subject, message_id)
 
-    async def clear_read_state(self, room_id: str, subject: str) -> None:
+    async def clear_read_state(self, room_id: str, subject: str) -> bool:
         """Remove a signed subject's persisted cursor for one room."""
 
         async with self._write_lock:
-            await asyncio.to_thread(self._clear_read_state_sync, room_id, subject)
+            return await asyncio.to_thread(self._clear_read_state_sync, room_id, subject)
 
     def iter_messages(self, room_id: str, *, batch_size: int = 500) -> MessageSnapshot:
         """Stream a consistent room-history snapshot without retaining it all in memory."""
@@ -2060,7 +2079,37 @@ class ChatStore:
             )
         return summaries
 
-    def _mark_read_sync(self, room_id: str, subject: str, message_id: str | None) -> ReadState:
+    def _query_read_receipts_sync(self, room_id: str, subjects: list[str]) -> list[ReadReceipt]:
+        requested_values = ", ".join("(?, ?)" for _ in subjects)
+        parameters: list[Any] = []
+        for ordinal, subject in enumerate(subjects):
+            parameters.extend((subject, ordinal))
+        parameters.append(room_id)
+        sql = f"""
+            WITH requested(subject, ordinal) AS (VALUES {requested_values})
+            SELECT requested.subject, read_state.message_id, read_state.message_created_at, read_state.updated_at
+            FROM requested
+            LEFT JOIN room_read_states AS read_state
+              ON read_state.room_id = ? AND read_state.subject = requested.subject
+            ORDER BY requested.ordinal
+        """  # noqa: S608 - only a bounded list of parameter placeholders is interpolated
+        with closing(self._connect()) as connection, connection:
+            if connection.execute("SELECT 1 FROM rooms WHERE id = ?", (room_id,)).fetchone() is None:
+                raise RoomNotFoundError(room_id)
+            rows = connection.execute(sql, parameters).fetchall()
+        return [
+            ReadReceipt(
+                subject=str(row["subject"]),
+                last_read_message_id=str(row["message_id"]) if row["message_id"] is not None else None,
+                last_read_message_at=(
+                    datetime.fromisoformat(row["message_created_at"]) if row["message_id"] is not None else None
+                ),
+                last_read_at=datetime.fromisoformat(row["updated_at"]) if row["updated_at"] else None,
+            )
+            for row in rows
+        ]
+
+    def _mark_read_sync(self, room_id: str, subject: str, message_id: str | None) -> ReadStateMutation:
         with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             if connection.execute("SELECT 1 FROM rooms WHERE id = ?", (room_id,)).fetchone() is None:
@@ -2098,7 +2147,8 @@ class ChatStore:
                 ).fetchone()[0]
                 if count >= self.max_read_states_per_room:
                     raise ReadStateCapacityError(room_id)
-            if existing_key is None or candidate_key > existing_key:
+            changed = existing_key is None or candidate_key > existing_key
+            if changed:
                 connection.execute(
                     """
                     INSERT INTO room_read_states (room_id, subject, message_id, message_created_at, updated_at)
@@ -2110,14 +2160,33 @@ class ChatStore:
                     """,
                     (room_id, subject, candidate_message_id, candidate_created_at, now.isoformat()),
                 )
-            return self._read_state_from_connection(connection, room_id, subject)
+            state = self._read_state_from_connection(connection, room_id, subject)
+            receipt_created_at = (
+                candidate_created_at
+                if changed
+                else existing["message_created_at"]
+                if existing is not None
+                else candidate_created_at
+            )
+            receipt = ReadReceipt(
+                subject=subject,
+                last_read_message_id=state.last_read_message_id,
+                last_read_message_at=(
+                    datetime.fromisoformat(receipt_created_at) if state.last_read_message_id is not None else None
+                ),
+                last_read_at=state.last_read_at,
+            )
+            return ReadStateMutation(state=state, receipt=receipt, changed=changed)
 
-    def _clear_read_state_sync(self, room_id: str, subject: str) -> None:
+    def _clear_read_state_sync(self, room_id: str, subject: str) -> bool:
         with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             if connection.execute("SELECT 1 FROM rooms WHERE id = ?", (room_id,)).fetchone() is None:
                 raise RoomNotFoundError(room_id)
-            connection.execute("DELETE FROM room_read_states WHERE room_id = ? AND subject = ?", (room_id, subject))
+            cursor = connection.execute(
+                "DELETE FROM room_read_states WHERE room_id = ? AND subject = ?", (room_id, subject)
+            )
+            return cursor.rowcount > 0
 
     @staticmethod
     def _read_state_from_connection(connection: sqlite3.Connection, room_id: str, subject: str) -> ReadState:

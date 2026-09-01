@@ -272,6 +272,47 @@ test("read-state query validates and preserves caller room order", async () => {
   assert.equal(requests.length, 1);
 });
 
+test("read-receipt query is explicit, ordered, and bounded", async () => {
+  const requests = [];
+  const result = {
+    room_id: "support-42",
+    items: [
+      {
+        subject: "customer-9",
+        last_read_message_id: "message-4",
+        last_read_message_at: "2026-09-01T00:00:30Z",
+        last_read_at: "2026-09-01T00:01:00Z",
+      },
+      { subject: "agent-7", last_read_message_id: null, last_read_message_at: null, last_read_at: null },
+    ],
+  };
+  const client = new SamsarixChatClient({
+    baseUrl: "https://chat.example",
+    credential: { token: "receipt-token" },
+    fetch: async (url, init) => {
+      requests.push({ url: String(url), init });
+      return jsonResponse(result);
+    },
+  });
+
+  assert.deepEqual(await client.queryReadReceipts("support-42", ["customer-9", "agent-7"]), result);
+  assert.equal(requests[0].url, "https://chat.example/v1/rooms/support-42/read-receipts/query");
+  assert.equal(requests[0].init.method, "POST");
+  assert.deepEqual(JSON.parse(requests[0].init.body), { subjects: ["customer-9", "agent-7"] });
+
+  for (const [roomId, subjects] of [
+    ["Support", ["alice"]],
+    ["support", []],
+    ["support", ["alice", "alice"]],
+    ["support", [" alice"]],
+    ["support", ["x".repeat(65)]],
+    ["support", Array.from({ length: 101 }, (_, index) => `subject-${index}`)],
+  ]) {
+    await assert.rejects(client.queryReadReceipts(roomId, subjects), TypeError);
+  }
+  assert.equal(requests.length, 1);
+});
+
 test("message search encodes normalized queries and pagination", async () => {
   const requests = [];
   const page = { items: [], next_before: null };

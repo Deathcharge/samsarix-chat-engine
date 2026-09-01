@@ -186,6 +186,7 @@ class PostgresApplicationRuntime:
         room_id: str,
         username: str,
         subject: str | None,
+        permissions: frozenset[str] = frozenset(),
     ) -> bool:
         """Reserve and register only within the same uninterrupted relay admission window."""
 
@@ -218,6 +219,7 @@ class PostgresApplicationRuntime:
                 room_id,
                 username,
                 subject,
+                permissions=permissions,
                 connection_id=connection_id,
                 broadcast_ready=False,
                 after_sequence=lease.admission_sequence,

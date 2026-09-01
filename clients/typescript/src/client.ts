@@ -15,6 +15,7 @@ import type {
   MessageCreate,
   MessagePage,
   PinMutation,
+  ReadReceiptQueryResult,
   ReadState,
   ReadStateQueryResult,
   ReactionMutation,
@@ -27,6 +28,7 @@ import type {
 
 const ROOM_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const READ_STATE_QUERY_MAX_ROOMS = 100;
+const READ_RECEIPT_QUERY_MAX_SUBJECTS = 100;
 
 export interface SamsarixClientOptions {
   baseUrl: string;
@@ -210,6 +212,30 @@ export class SamsarixChatClient {
       method: "POST",
       body: { room_ids: [...roomIds] },
     });
+  }
+
+  async queryReadReceipts(roomId: string, subjects: readonly string[]): Promise<ReadReceiptQueryResult> {
+    if (!ROOM_ID_PATTERN.test(roomId)) {
+      throw new TypeError("roomId must be a valid room ID");
+    }
+    if (!Array.isArray(subjects) || subjects.length === 0 || subjects.length > READ_RECEIPT_QUERY_MAX_SUBJECTS) {
+      throw new TypeError(`subjects must contain between 1 and ${READ_RECEIPT_QUERY_MAX_SUBJECTS} items`);
+    }
+    if (
+      subjects.some(
+        (subject) =>
+          typeof subject !== "string" || subject.length === 0 || subject.length > 64 || subject !== subject.trim(),
+      )
+    ) {
+      throw new TypeError("subjects must contain 1-64 character values without surrounding whitespace");
+    }
+    if (new Set(subjects).size !== subjects.length) {
+      throw new TypeError("subjects must not contain duplicates");
+    }
+    return this.request<ReadReceiptQueryResult>(
+      `/v1/rooms/${encodeURIComponent(roomId)}/read-receipts/query`,
+      { method: "POST", body: { subjects: [...subjects] } },
+    );
   }
 
   async markRead(roomId: string, messageId?: string): Promise<ReadState> {

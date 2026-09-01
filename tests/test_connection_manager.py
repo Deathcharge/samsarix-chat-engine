@@ -101,6 +101,39 @@ async def test_broadcast_can_exclude_an_origin_connection_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_broadcast_can_require_a_least_privilege_permission() -> None:
+    manager = ConnectionManager(max_connections=3, max_per_room=3, send_timeout=0.1)
+    viewer = FakeWebSocket()
+    reader = FakeWebSocket()
+    operator = FakeWebSocket()
+    await manager.register(
+        as_websocket(viewer),
+        "room",
+        "Viewer",
+        permissions=frozenset({"room:read", "room:read-receipts"}),
+    )
+    await manager.register(
+        as_websocket(reader),
+        "room",
+        "Reader",
+        permissions=frozenset({"room:read"}),
+    )
+    await manager.register(
+        as_websocket(operator),
+        "room",
+        "Operator",
+        permissions=frozenset({"admin"}),
+    )
+
+    event = {"type": "read.updated", "receipt": {"subject": "alice"}}
+    await manager.broadcast("room", event, required_permission="room:read-receipts")
+
+    assert viewer.sent == [event]
+    assert reader.sent == []
+    assert operator.sent == [event]
+
+
+@pytest.mark.asyncio
 async def test_pending_connection_receives_initial_frames_before_broadcasts() -> None:
     manager = ConnectionManager(max_connections=2, max_per_room=2, send_timeout=0.1)
     pending = FakeWebSocket()

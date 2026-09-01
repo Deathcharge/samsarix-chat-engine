@@ -209,6 +209,18 @@ This milestone supports support-case escalation, classroom attention and inciden
 
 This milestone gives support, classroom and incident UIs a deterministic newest-page recovery primitive without publishing the internal PostgreSQL relay sequence or introducing a second client-side persistence dependency. It does not recover missed ephemeral presence/typing, provide exactly-once delivery, or claim every replica has reached the global event head.
 
+## v0.22 — least-privilege participant read receipts
+
+- [x] query receipt state for 1–100 explicit subjects without adding a membership-list endpoint;
+- [x] require both `room:read` and the room-scoped `room:read-receipts` capability for snapshots and live receipt events;
+- [x] return the exact `(last_read_message_at, last_read_message_id)` cursor plus its advancement time in caller order;
+- [x] emit `read.updated` only for real advances or clears and filter delivery per connected principal;
+- [x] commit PostgreSQL cursor/event changes atomically while preserving SQLite changed-only broadcast behavior;
+- [x] expose `queryReadReceipts()` and typed live events through unpublished TypeScript SDK 0.13.0;
+- [x] document reconnect recovery, bounded requests, privacy/retention boundaries, and the difference between an application cursor and proof of human attention.
+
+This milestone supports small private support, classroom and incident rooms where participant acknowledgement is useful. The host supplies the subjects from its own membership model and decides whether receipts are appropriate or consented to. Samsarix does not enumerate members, create per-message receipt rows, provide delivery receipts, or prove that a person saw content.
+
 ## Deliberate non-goals
 
 - no built-in password database, social graph, billing, or end-user frontend;

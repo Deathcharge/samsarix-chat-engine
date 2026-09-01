@@ -122,6 +122,19 @@ export interface ReadStateQueryResult {
   unread_room_count: number;
 }
 
+export interface ReadReceipt {
+  subject: string;
+  last_read_message_id: string | null;
+  /** Creation time of the cursor message; compare `(created_at, id)` using server ordering. */
+  last_read_message_at: string | null;
+  last_read_at: string | null;
+}
+
+export interface ReadReceiptQueryResult {
+  room_id: string;
+  items: ReadReceipt[];
+}
+
 export interface MemberModerationUpdate {
   muted_for_seconds?: number;
   banned_for_seconds?: number;
@@ -173,6 +186,11 @@ export interface MessageReactionUpdatedEvent extends ReactionMutation {
 
 export interface MessagePinUpdatedEvent extends PinMutation {
   type: "message.pin.updated";
+}
+
+export interface ReadUpdatedEvent {
+  type: "read.updated";
+  receipt: ReadReceipt;
 }
 
 export interface PresenceEvent {
@@ -234,6 +252,7 @@ export type RoomEvent =
   | MessageDeletedEvent
   | MessagePinUpdatedEvent
   | MessageReactionUpdatedEvent
+  | ReadUpdatedEvent
   | PresenceEvent
   | RoomStateEvent
   | MemberBannedEvent

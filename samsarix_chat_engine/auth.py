@@ -20,8 +20,10 @@ from jwt.exceptions import MissingCryptographyError
 
 from .models import ROOM_ID_PATTERN
 
-Permission = Literal["room:read", "room:write", "room:pin", "admin"]
-ALLOWED_PERMISSIONS: Final[frozenset[str]] = frozenset({"room:read", "room:write", "room:pin", "admin"})
+Permission = Literal["room:read", "room:write", "room:pin", "room:read-receipts", "admin"]
+ALLOWED_PERMISSIONS: Final[frozenset[str]] = frozenset(
+    {"room:read", "room:write", "room:pin", "room:read-receipts", "admin"}
+)
 TOKEN_TYPE: Final = "samsarix-access+jwt"  # noqa: S105 - JWT media type, not a credential
 _ROOM_ID = re.compile(ROOM_ID_PATTERN)
 _KEY_ID = re.compile(r"[A-Za-z0-9._~-]{1,128}")

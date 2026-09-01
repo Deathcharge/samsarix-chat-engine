@@ -55,6 +55,9 @@ from .models import (
     PinMutation,
     ReactionActor,
     ReactionMutation,
+    ReadReceipt,
+    ReadReceiptQuery,
+    ReadReceiptQueryResult,
     ReadState,
     ReadStateQuery,
     ReadStateQueryResult,
@@ -930,29 +933,90 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             unread_room_count=sum(item.unread_count > 0 for item in items),
         )
 
+    @router.post(
+        "/rooms/{room_id}/read-receipts/query",
+        response_model=ReadReceiptQueryResult,
+        tags=["messages"],
+    )
+    async def query_read_receipts(
+        room_id: str,
+        payload: ReadReceiptQuery,
+        request: Request,
+        principal: PrincipalDependency,
+    ) -> ReadReceiptQueryResult:
+        _authorize(principal, "room:read", room_id)
+        _authorize(principal, "room:read-receipts", room_id)
+        await _enforce_member_access(store, principal, room_id, write=False)
+        rate_subject = principal.subject or _client_key(request)
+        if not await read_state_limiter.allow(f"read-receipt-query:{rate_subject}"):
+            raise APIError(
+                429,
+                "read_receipt_query_rate_limit_exceeded",
+                "Read-receipt query rate limit exceeded",
+                headers={"Retry-After": "60"},
+            )
+        try:
+            items = await store.query_read_receipts(room_id, payload.subjects)
+        except RoomNotFoundError as exc:
+            raise APIError(404, "room_not_found", "Room not found") from exc
+        return ReadReceiptQueryResult(room_id=room_id, items=items)
+
     @router.put("/rooms/{room_id}/read-state", response_model=ReadState, tags=["messages"])
     async def mark_read(room_id: str, payload: ReadStateUpdate, principal: PrincipalDependency) -> ReadState:
         _authorize(principal, "room:read", room_id)
         await _enforce_member_access(store, principal, room_id, write=False)
         subject = _stable_subject(principal)
+        if not await read_state_limiter.allow(f"read-receipt-update:{subject}"):
+            raise APIError(
+                429,
+                "read_receipt_update_rate_limit_exceeded",
+                "Read-receipt update rate limit exceeded",
+                headers={"Retry-After": "60"},
+            )
         try:
-            return await store.mark_read(room_id, subject, payload.message_id)
+            mutation = await store.mark_read(room_id, subject, payload.message_id)
         except RoomNotFoundError as exc:
             raise APIError(404, "room_not_found", "Room not found") from exc
         except MessageNotFoundError as exc:
             raise APIError(404, "message_not_found", "Message not found in this room") from exc
         except ReadStateCapacityError as exc:
             raise APIError(507, "read_state_capacity_reached", "The room read-state capacity has been reached") from exc
+        if mutation.changed and postgres_runtime is None:
+            await manager.broadcast(
+                room_id,
+                _event("read.updated", receipt=mutation.receipt.model_dump(mode="json")),
+                required_permission="room:read-receipts",
+            )
+        return mutation.state
 
     @router.delete("/rooms/{room_id}/read-state", status_code=204, tags=["messages"])
     async def clear_read_state(room_id: str, principal: PrincipalDependency) -> Response:
         _authorize(principal, "room:read", room_id)
         await _enforce_member_access(store, principal, room_id, write=False)
         subject = _stable_subject(principal)
+        if not await read_state_limiter.allow(f"read-receipt-update:{subject}"):
+            raise APIError(
+                429,
+                "read_receipt_update_rate_limit_exceeded",
+                "Read-receipt update rate limit exceeded",
+                headers={"Retry-After": "60"},
+            )
         try:
-            await store.clear_read_state(room_id, subject)
+            changed = await store.clear_read_state(room_id, subject)
         except RoomNotFoundError as exc:
             raise APIError(404, "room_not_found", "Room not found") from exc
+        if changed and postgres_runtime is None:
+            receipt = ReadReceipt(
+                subject=subject,
+                last_read_message_id=None,
+                last_read_message_at=None,
+                last_read_at=None,
+            )
+            await manager.broadcast(
+                room_id,
+                _event("read.updated", receipt=receipt.model_dump(mode="json")),
+                required_permission="room:read-receipts",
+            )
         return Response(status_code=204)
 
     @router.post("/rooms/{room_id}/messages", response_model=Message, tags=["messages"])
@@ -1602,6 +1666,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 room_id=room_id,
                 username=username,
                 subject=principal.subject,
+                permissions=principal.permissions,
             )
         else:
             session.registered = await manager.register(
@@ -1609,6 +1674,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 room_id,
                 username,
                 principal.subject,
+                permissions=principal.permissions,
                 connection_id=connection_id,
                 broadcast_ready=False,
             )

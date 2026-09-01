@@ -2,7 +2,7 @@
 
 Samsarix Chat Engine is a small, local-first room chat service from Samsarix LLC for developers who need persisted messages and live WebSocket delivery without adopting a full collaboration platform. It runs as a standalone FastAPI service or as an embeddable ASGI application, stores data in SQLite, and has no dependency on Redis, an LLM provider, or any private package.
 
-Version 0.12.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, verification-only asymmetric authentication, accountable data lifecycle, practical conversation controls, typed TypeScript client, support workflow and retrieval, durable application webhooks, and hardened container deployment are implemented and tested. The development branch additionally includes unreleased one-depth threaded replies, bounded message reactions, shared room pins, application message metadata, host-owned attachment references, bounded cross-room inbox state, host-resolved message mentions, explicit reconnect synchronization with an SDK room timeline, and a guarded PostgreSQL multi-instance preview. The project is licensed under the standard Mozilla Public License 2.0.
+Version 0.12.0 is an alpha release candidate. Its core single-instance journey, tenant-safe access boundary, verification-only asymmetric authentication, accountable data lifecycle, practical conversation controls, typed TypeScript client, support workflow and retrieval, durable application webhooks, and hardened container deployment are implemented and tested. The development branch additionally includes unreleased one-depth threaded replies, bounded message reactions, shared room pins, application message metadata, host-owned attachment references, bounded cross-room inbox state, host-resolved message mentions, explicit reconnect synchronization with an SDK room timeline, least-privilege participant read receipts, and a guarded PostgreSQL multi-instance preview. The project is licensed under the standard Mozilla Public License 2.0.
 
 ## What works
 
@@ -15,9 +15,10 @@ Version 0.12.0 is an alpha release candidate. Its core single-instance journey, 
 - Broadcast messages and lightweight join/leave presence within one process.
 - Retry message submission safely with `Idempotency-Key` or `client_message_id`.
 - Protect operator actions with an optional shared API key.
-- Give application users signed, expiring, per-room read/write/pin access tokens using HS256 or a static public Ed25519/RSA JWKS.
+- Give application users signed, expiring, per-room read/write/pin/read-receipt access tokens using HS256 or a static public Ed25519/RSA JWKS.
 - Track signed users' monotonic room read cursors and current unread counts without counting their own messages.
 - Build host-owned support/classroom/incident inboxes with one bounded, content-free cross-room read-state query.
+- Show opt-in participant read progress from explicit host-supplied subjects without exposing a membership directory.
 - Exchange separately rate-limited, auto-expiring typing signals without persisting activity history.
 - Let authors edit or delete their own messages while administrators can moderate any message.
 - Freeze rooms for administrator-only announcements, mute disruptive members, and ban room access by token subject.
@@ -109,7 +110,7 @@ The profile publishes only to host loopback, runs as UID/GID 10001, mounts `/dat
 
 The framework-neutral [`@samsarix/chat-client`](clients/typescript/README.md) source ships in `clients/typescript`. It wraps authenticated HTTP operations and browser-safe first-message WebSocket authentication, emits generated declarations, refreshes credentials on reconnect, and applies bounded exponential backoff without runtime dependencies. The package is verified and packable but is not yet published to npm.
 
-Unpublished SDK 0.12.0 adds a synchronization-aware room timeline to cross-room inbox queries, host-resolved mentions, attachment references, metadata, pins, reactions, and threaded replies. It waits for initial history and the advertised explicit snapshot boundary before `connect()` resolves, with ping/pong fallback against older servers. The in-memory window retains at most 1000 messages by default, supports a validated 1-10000 override, and exposes truncation plus an older-page cursor. Attempts have a configurable deadline; retry budgets reset only after a stable activated connection, not merely `ready`. See the [migration and recovery contract](clients/typescript/README.md#reconnect-behavior), including browser-legal close codes, in-memory stale state, and durable-replay non-goals.
+Unpublished SDK 0.13.0 adds least-privilege participant receipt snapshots and typed live updates to the synchronization-aware room timeline, cross-room inbox queries, host-resolved mentions, attachment references, metadata, pins, reactions, and threaded replies. It waits for initial history and the advertised explicit snapshot boundary before `connect()` resolves, with ping/pong fallback against older servers. The in-memory window retains at most 1000 messages by default, supports a validated 1-10000 override, and exposes truncation plus an older-page cursor. Attempts have a configurable deadline; retry budgets reset only after a stable activated connection, not merely `ready`. See the [migration and recovery contract](clients/typescript/README.md#reconnect-behavior) and [receipt privacy boundary](docs/READ_RECEIPTS.md).
 
 ## WebSocket protocol
 
@@ -178,7 +179,7 @@ All settings are optional for loopback development. Copy [.env.example](.env.exa
 | `SAMSARIX_CHAT_MAX_MESSAGE_CHARS` | `4000` | Per-message character limit |
 | `SAMSARIX_CHAT_MESSAGES_PER_MINUTE` | `60` | Per-client HTTP and per-connection WebSocket message rate |
 | `SAMSARIX_CHAT_SEARCHES_PER_MINUTE` | `30` | Per-subject or client-address room-search rate |
-| `SAMSARIX_CHAT_READ_STATE_QUERIES_PER_MINUTE` | `60` | Per-subject bounded cross-room read-state queries |
+| `SAMSARIX_CHAT_READ_STATE_QUERIES_PER_MINUTE` | `60` | Independently keyed per-caller budgets for cross-room read state, participant receipt queries, and read-state updates |
 | `SAMSARIX_CHAT_MAX_CONNECTIONS` | `200` | Process-wide WebSocket cap |
 | `SAMSARIX_CHAT_MAX_CONNECTIONS_PER_ROOM` | `100` | Per-room WebSocket cap |
 | `SAMSARIX_CHAT_MAX_ROOMS` | `1000` | Persisted room cap |
@@ -239,6 +240,7 @@ HTTP / WebSocket clients
 - Mention targets commit with the message and follow the same read/export/realtime/webhook paths; tombstones clear them. Hosts resolve membership/preferences and own all notification delivery, deduplication, rate and provider cost controls.
 - Selected webhook rows commit in the same transaction as their message/moderation change, then deliver at least once in the background. Receivers deduplicate the stable delivery ID.
 - Signed users can persist a monotonic per-room read cursor and retrieve a current unread count that excludes their own and deleted messages.
+- Participant receipt snapshots and changed-only live updates reuse those cursors, require a separate room capability, and never enumerate membership; reconnecting clients reload the explicit bounded subject set.
 - Search is room-authorized, current-state Unicode-normalized substring matching over at most the configured retained messages for that room; it is not global, fuzzy, or externally indexed.
 - Typing signals are transition-only, separately rate-limited, automatically expired, and never persisted or audited.
 - WebSocket delivery and presence events are best-effort/at-most-once. Reconnecting clients recover the newest 50 messages and can page older history over HTTP.
@@ -254,7 +256,7 @@ HTTP / WebSocket clients
 
 The default loopback bind avoids accidental network exposure. The API key is an all-room operator credential; do not ship it to browsers. Host applications authenticate users and issue short-lived room tokens whose subject becomes the server-enforced sender identity. Production deployments can give the engine only public verification keys so private signing authority remains in the host application. Configure TLS at a reverse proxy and exact allowed browser origins for any network deployment.
 
-Messages, display names, application metadata, opaque attachment descriptors, and mentioned subject identifiers are stored as plaintext in the configured SQLite file. The engine does not collect telemetry or put message bodies or API keys in its administrative audit trail. When explicitly configured, webhook payloads send selected message content and identifiers to the operator's endpoint and retain a payload copy in the bounded outbox. File bytes, upload validation/scanning, short-lived download authorization, object cleanup, notification preferences/delivery, and storage/provider/egress cost remain host responsibilities; do not store signed URLs, email addresses, device tokens, or notification credentials in descriptors or mention arrays. Backups, exports, webhook receivers, filesystem permissions, retention policy, user consent, and legal obligations remain the deployment owner's responsibility. Default operation has no metered API cost; its operating costs are compute, disk, backup, webhook requests, and network transfer only.
+Messages, display names, application metadata, opaque attachment descriptors, mentioned subject identifiers, and signed-subject read cursors are stored as plaintext in the configured SQLite file. Participant activity is separately permissioned but remains behavioral data; deployment owners decide visibility and consent, and event recipients/backups may retain prior state after a cursor is cleared. The engine does not collect telemetry or put message bodies or API keys in its administrative audit trail. When explicitly configured, webhook payloads send selected message content and identifiers to the operator's endpoint and retain a payload copy in the bounded outbox. File bytes, upload validation/scanning, short-lived download authorization, object cleanup, notification preferences/delivery, and storage/provider/egress cost remain host responsibilities; do not store signed URLs, email addresses, device tokens, or notification credentials in descriptors or mention arrays. Backups, exports, webhook receivers, filesystem permissions, retention policy, user consent, and legal obligations remain the deployment owner's responsibility. Default operation has no metered API cost; its operating costs are compute, disk, backup, webhook requests, and network transfer only.
 
 ## Development and release checks
 

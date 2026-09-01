@@ -1,6 +1,6 @@
 {
   "name": "@samsarix/chat-client",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "Typed, dependency-free client for Samsarix Chat Engine",
   "type": "module",
   "sideEffects": false,
@@ -14,11 +14,20 @@
   },
   "bugs": "https://github.com/Deathcharge/samsarix-chat-engine/issues",
   "support": "support@samsarix.com",
-  "keywords": ["chat", "websocket", "typescript", "samsarix"],
+  "keywords": [
+    "chat",
+    "websocket",
+    "typescript",
+    "samsarix"
+  ],
   "engines": {
     "node": ">=18"
   },
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
