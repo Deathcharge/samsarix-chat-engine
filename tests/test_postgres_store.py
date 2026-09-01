@@ -23,6 +23,7 @@ from samsarix_chat_engine.store import (  # noqa: E402
     MessageDeletedError,
     MessageNotFoundError,
     MessageOwnershipError,
+    ReactionCapacityError,
     ReadStateCapacityError,
     RetentionNotConfiguredError,
     RoomArchivedError,
@@ -99,7 +100,7 @@ async def test_schema_v2_migrates_transactionally_and_widens_event_payloads(
     service = _store(clean_postgres_database)
     await service.initialize()
     try:
-        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 9
+        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 10
         assert await service.check_ready()
         assert await service.list_rooms() == []
         async with service.foundation.transaction() as connection:
@@ -194,7 +195,7 @@ async def test_schema_v6_backfills_matching_instance_generations(
     service = _store(clean_postgres_database)
     await service.initialize()
     try:
-        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 9
+        assert await service.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 10
         async with service.foundation.transaction() as connection:
             cursor = await connection.execute(
                 """
@@ -239,7 +240,7 @@ async def test_schema_v8_adds_thread_parent_column_and_index(clean_postgres_data
     migrated = _store(clean_postgres_database)
     await migrated.initialize()
     try:
-        assert await migrated.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 9
+        assert await migrated.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 10
         async with migrated.foundation.transaction() as connection:
             cursor = await connection.execute(
                 """
@@ -256,6 +257,35 @@ async def test_schema_v8_adds_thread_parent_column_and_index(clean_postgres_data
                 """
             )
             assert await cursor.fetchone() == ("samsarix_messages_thread_order",)
+    finally:
+        await migrated.close()
+
+
+@pytest.mark.asyncio
+async def test_schema_v9_adds_reaction_storage(clean_postgres_database: str) -> None:
+    initial = _store(clean_postgres_database)
+    await initial.initialize()
+    await initial.close()
+    async with await psycopg.AsyncConnection.connect(clean_postgres_database, autocommit=True) as connection:
+        await connection.execute("DROP TABLE public.samsarix_message_reactions")
+        await connection.execute("ALTER TABLE public.samsarix_messages DROP COLUMN reaction_summaries")
+        await connection.execute("UPDATE public.samsarix_schema_metadata SET version = 9")
+
+    migrated = _store(clean_postgres_database)
+    await migrated.initialize()
+    try:
+        assert await migrated.foundation.schema_version() == POSTGRES_SCHEMA_VERSION == 10
+        async with migrated.foundation.transaction() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT column_name FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'samsarix_messages'
+                  AND column_name = 'reaction_summaries'
+                """
+            )
+            assert await cursor.fetchone() == ("reaction_summaries",)
+            cursor = await connection.execute("SELECT to_regclass('public.samsarix_message_reactions')")
+            assert await cursor.fetchone() == ("samsarix_message_reactions",)
     finally:
         await migrated.close()
 
@@ -382,6 +412,97 @@ async def test_postgres_retention_promotes_reply_when_parent_expires(clean_postg
             await service.list_replies("general", parent.id)
     finally:
         await service.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_reactions_are_atomic_bounded_and_tombstone_safe(store: PostgresChatStore) -> None:
+    await store.foundation.register_instance("reaction-observer", lease_seconds=30)
+    await store.create_room(RoomCreate(id="general", name="General"))
+    message, _ = await store.create_message(
+        room_id="general",
+        sender="alice",
+        content="Acknowledge",
+        client_message_id=None,
+        allow_frozen=False,
+        author_subject="alice",
+    )
+
+    first = await store.set_message_reaction(
+        room_id="general",
+        message_id=message.id,
+        reactor="alice",
+        key="ack",
+        present=True,
+        allow_frozen=False,
+        member_subject="alice",
+    )
+    replay = await store.set_message_reaction(
+        room_id="general",
+        message_id=message.id,
+        reactor="alice",
+        key="ack",
+        present=True,
+        allow_frozen=False,
+        member_subject="alice",
+    )
+    second = await store.set_message_reaction(
+        room_id="general",
+        message_id=message.id,
+        reactor="bob",
+        key="ack",
+        present=True,
+        allow_frozen=False,
+        member_subject="bob",
+    )
+    assert first.changed and not replay.changed
+    assert second.message.reactions[0].count == 2
+
+    for index in range(19):
+        await store.set_message_reaction(
+            room_id="general",
+            message_id=message.id,
+            reactor=f"user-{index}",
+            key=f"k{index}",
+            present=True,
+            allow_frozen=False,
+        )
+    with pytest.raises(ReactionCapacityError):
+        await store.set_message_reaction(
+            room_id="general",
+            message_id=message.id,
+            reactor="overflow",
+            key="overflow",
+            present=True,
+            allow_frozen=False,
+        )
+
+    events = await store.foundation.read_events("reaction-observer")
+    reaction_events = [event for event in events if event.event_type == "message.reaction.updated"]
+    assert len(reaction_events) == 21
+    assert reaction_events[0].payload["message"]["reactions"] == [{"key": "ack", "count": 1}]
+
+    deleted, changed = await store.delete_message(
+        room_id="general",
+        message_id=message.id,
+        actor="alice",
+        is_admin=False,
+        member_subject="alice",
+    )
+    assert changed and deleted.reactions == []
+    with pytest.raises(MessageDeletedError):
+        await store.set_message_reaction(
+            room_id="general",
+            message_id=message.id,
+            reactor="alice",
+            key="ack",
+            present=True,
+            allow_frozen=False,
+        )
+    scrubbed_events = await store.foundation.read_events("reaction-observer")
+    scrubbed_reactions = [event for event in scrubbed_events if event.event_type == "message.reaction.updated"]
+    assert scrubbed_reactions
+    assert all(event.payload["reactor"] == "[deleted]" for event in scrubbed_reactions)
+    assert all(event.payload["message"]["reactions"] == [] for event in scrubbed_reactions)
 
 
 @pytest.mark.asyncio

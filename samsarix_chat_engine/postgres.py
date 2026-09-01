@@ -25,7 +25,7 @@ from psycopg.conninfo import conninfo_to_dict
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
-POSTGRES_SCHEMA_VERSION = 9
+POSTGRES_SCHEMA_VERSION = 10
 POSTGRES_MIGRATION_LOCK_ID = 7_495_346_927_831_819_041
 POSTGRES_EVENT_SEQUENCE_LOCK_ID = 7_495_346_927_831_819_042
 POSTGRES_EVENT_RETENTION_LOCK_ID = 7_495_346_927_831_819_043
@@ -1162,6 +1162,7 @@ class PostgresFoundation:
                             client_message_id IS NULL OR char_length(client_message_id) BETWEEN 1 AND 128
                         ),
                         parent_message_id TEXT REFERENCES public.samsarix_messages(id) ON DELETE SET NULL,
+                        reaction_summaries JSONB NOT NULL DEFAULT '[]'::jsonb,
                         edited_at TIMESTAMPTZ,
                         deleted_at TIMESTAMPTZ,
                         UNIQUE (room_id, client_message_id)
@@ -1189,8 +1190,40 @@ class PostgresFoundation:
                 )
                 await connection.execute(
                     """
+                    ALTER TABLE public.samsarix_messages
+                    ADD COLUMN IF NOT EXISTS reaction_summaries JSONB NOT NULL DEFAULT '[]'::jsonb
+                    """
+                )
+                await connection.execute(
+                    """
                     CREATE INDEX IF NOT EXISTS samsarix_messages_thread_order
                     ON public.samsarix_messages (room_id, parent_message_id, created_at DESC, id DESC)
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS public.samsarix_message_reactions (
+                        message_id TEXT NOT NULL REFERENCES public.samsarix_messages(id) ON DELETE CASCADE,
+                        room_id TEXT NOT NULL REFERENCES public.samsarix_rooms(id) ON DELETE CASCADE,
+                        reactor TEXT NOT NULL CHECK (char_length(reactor) BETWEEN 1 AND 64),
+                        reaction_key TEXT NOT NULL CHECK (
+                            reaction_key ~ '^[a-z0-9][a-z0-9_+-]{0,29}$'
+                        ),
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                        PRIMARY KEY (message_id, reactor, reaction_key)
+                    )
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS samsarix_message_reactions_summary
+                    ON public.samsarix_message_reactions (message_id, reaction_key, reactor)
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS samsarix_message_reactions_room_actor
+                    ON public.samsarix_message_reactions (room_id, reactor, message_id)
                     """
                 )
                 await connection.execute(

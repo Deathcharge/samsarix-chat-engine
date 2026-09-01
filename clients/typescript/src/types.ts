@@ -35,8 +35,24 @@ export interface ChatMessage {
   client_message_id: string | null;
   /** Present on servers with threaded replies; released 0.12 servers omit it. */
   parent_message_id?: string | null;
+  /** Present on servers with message reactions; released 0.12 servers omit it. */
+  reactions?: ReactionSummary[];
   edited_at: string | null;
   deleted_at: string | null;
+}
+
+export interface ReactionSummary {
+  key: string;
+  count: number;
+}
+
+export interface ReactionMutation {
+  message: ChatMessage;
+  key: string;
+  reactor: string;
+  present: boolean;
+  changed: boolean;
+  updated_at: string;
 }
 
 export interface MessageCreate {
@@ -102,6 +118,10 @@ export interface MessageDeletedEvent {
   message: ChatMessage;
 }
 
+export interface MessageReactionUpdatedEvent extends ReactionMutation {
+  type: "message.reaction.updated";
+}
+
 export interface PresenceEvent {
   type: "presence.joined" | "presence.left";
   username: string;
@@ -152,6 +172,7 @@ export type RoomEvent =
   | MessageCreatedEvent
   | MessageUpdatedEvent
   | MessageDeletedEvent
+  | MessageReactionUpdatedEvent
   | PresenceEvent
   | RoomStateEvent
   | MemberBannedEvent

@@ -78,6 +78,17 @@ const websocketReply = nextEvent(session, "message.created");
 session.sendReply(created.id, "TypeScript WebSocket reply", "sdk-ws-reply-1");
 assert.equal((await websocketReply).message.parent_message_id, created.id);
 
+const reactionEvent = nextEvent(session, "message.reaction.updated");
+const reaction = await client.addReaction("sdk-room", createdEvent.message.id, "ack");
+assert.equal(reaction.changed, true);
+assert.deepEqual(reaction.message.reactions, [{ key: "ack", count: 1 }]);
+assert.deepEqual((await reactionEvent).message.reactions, [{ key: "ack", count: 1 }]);
+const reactionRemovedEvent = nextEvent(session, "message.reaction.updated");
+const removedReaction = await client.removeReaction("sdk-room", createdEvent.message.id, "ack");
+assert.equal(removedReaction.present, false);
+assert.deepEqual(removedReaction.message.reactions, []);
+assert.equal((await reactionRemovedEvent).present, false);
+
 const updatedEvent = nextEvent(session, "message.updated");
 const updated = await client.updateMessage("sdk-room", created.id, "TypeScript edited");
 assert.equal(updated.content, "TypeScript edited");
@@ -128,7 +139,7 @@ session.sendMessage("Live after reconnect", "sdk-resumed-1");
 assert.equal((await resumed).message.client_message_id, "sdk-resumed-1");
 session.close();
 
-console.log("typescript_client_http=ok threads=ok search=ok websocket=ok activation=ok reconnect_history=ok resumed_delivery=ok edit_delete=ok");
+console.log("typescript_client_http=ok threads=ok reactions=ok search=ok websocket=ok activation=ok reconnect_history=ok resumed_delivery=ok edit_delete=ok");
 
 function nextEvent(roomSession, type) {
   return new Promise((resolve, reject) => {

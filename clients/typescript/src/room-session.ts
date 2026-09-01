@@ -22,6 +22,7 @@ const EVENT_TYPES = new Set([
   "member.banned",
   "message.created",
   "message.deleted",
+  "message.reaction.updated",
   "message.updated",
   "pong",
   "presence.joined",
@@ -435,6 +436,16 @@ function isRoomEvent(value: unknown): value is RoomEvent {
     case "message.deleted":
     case "message.updated":
       return "message" in value && isChatMessage(value.message);
+    case "message.reaction.updated":
+      return (
+        "message" in value &&
+        isChatMessage(value.message) &&
+        isStringField(value, "key") &&
+        isStringField(value, "reactor") &&
+        typeof value.present === "boolean" &&
+        typeof value.changed === "boolean" &&
+        isStringField(value, "updated_at")
+      );
     case "pong":
       return true;
     case "presence.joined":
@@ -508,6 +519,17 @@ function isChatMessage(value: unknown): boolean {
     isStringField(value, "created_at") &&
     isNullableStringField(value, "client_message_id") &&
     (!("parent_message_id" in value) || isNullableStringField(value, "parent_message_id")) &&
+    (!("reactions" in value) ||
+      (Array.isArray(value.reactions) &&
+        value.reactions.every(
+          (item) =>
+            isRecord(item) &&
+            isStringField(item, "key") &&
+            "count" in item &&
+            typeof item.count === "number" &&
+            Number.isInteger(item.count) &&
+            item.count > 0,
+        ))) &&
     isNullableStringField(value, "edited_at") &&
     isNullableStringField(value, "deleted_at")
   );

@@ -1,6 +1,6 @@
 # `@samsarix/chat-client`
 
-Dependency-free TypeScript client for Samsarix Chat Engine's implemented HTTP and WebSocket contracts, including the 0.12 server and guarded PostgreSQL preview. Unpublished SDK 0.5.0 ships ESM and generated declarations, works with browser globals, and accepts injected `fetch`/`WebSocket` implementations for Node runtimes and tests. Node 18 requires an injected WebSocket implementation; the live smoke uses Node's newer native WebSocket.
+Dependency-free TypeScript client for Samsarix Chat Engine's implemented HTTP and WebSocket contracts, including the 0.12 server and guarded PostgreSQL preview. Unpublished SDK 0.6.0 ships ESM and generated declarations, works with browser globals, and accepts injected `fetch`/`WebSocket` implementations for Node runtimes and tests. Node 18 requires an injected WebSocket implementation; the live smoke uses Node's newer native WebSocket.
 
 This package is part of the Samsarix Chat Engine repository and is not yet published to npm.
 
@@ -11,7 +11,7 @@ cd clients/typescript
 npm ci
 npm run build
 npm pack
-npm install ./samsarix-chat-client-0.5.0.tgz
+npm install ./samsarix-chat-client-0.6.0.tgz
 ```
 
 ## Token client
@@ -35,6 +35,7 @@ const reply = await client.createMessage("support-42", {
   client_message_id: crypto.randomUUID(),
 });
 const thread = await client.listReplies("support-42", message.id, { limit: 25 });
+const acknowledgement = await client.addReaction("support-42", message.id, "ack");
 
 const room = client.roomSession("support-42");
 room.onStateChange((state) => console.log("chat state", state));
@@ -45,6 +46,9 @@ room.onEvent((event) => {
   }
   if (event.type === "message.created") {
     console.log(event.message);
+  }
+  if (event.type === "message.reaction.updated") {
+    console.log(event.key, event.message.reactions);
   }
 });
 await room.connect();
@@ -63,7 +67,9 @@ The credential provider is called again on reconnect, allowing the host applicat
 
 Read-state methods require a signed application-user token because the server binds the cursor to its stable subject; operator API keys cannot stand in for an end user. Typing is ephemeral and automatically expires server-side if a client misses its stop transition.
 
-Replies are one level deep. `listReplies()` pages one top-level message's replies, while `sendReply()` publishes through the existing `message.created` event with `message.parent_message_id` set. Room history remains a flat chronological stream, so reconcile all messages by ID and use the parent field only for presentation/grouping. The output field is optional in the SDK type so 0.5.0 can still consume released 0.12 WebSocket events, which predate the field; the threaded development server always returns either a parent ID or null.
+Replies are one level deep. `listReplies()` pages one top-level message's replies, while `sendReply()` publishes through the existing `message.created` event with `message.parent_message_id` set. Room history remains a flat chronological stream, so reconcile all messages by ID and use the parent field only for presentation/grouping. The output field remains optional in the SDK type so current clients can consume released 0.12 WebSocket events, which predate the field; the threaded development server always returns either a parent ID or null.
+
+`addReaction()` and `removeReaction()` mutate one validated reaction key for the signed subject and return the complete updated message plus `changed`/`present`. Operator-key callers pass a fourth `reactor` argument because an operator key does not identify an end user. Reaction updates arrive as `message.reaction.updated`; replace the message by ID rather than incrementing counts locally. The `reactions` output is optional in the SDK type so 0.6.0 can still consume released 0.12 messages, while the current development server always returns a sorted array. The server caps distinct keys at 20 per message and accepts lowercase ASCII keys such as `ack`, `resolved`, or `needs_attention`; it does not host emoji assets.
 
 ## Operator session
 

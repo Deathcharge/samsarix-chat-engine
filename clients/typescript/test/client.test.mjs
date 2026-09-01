@@ -174,6 +174,51 @@ test("thread reply listing encodes parent identifiers and pagination", async () 
   assert.equal(url.searchParams.get("before"), "reply-9");
 });
 
+test("reaction methods validate keys and encode idempotent actor mutations", async () => {
+  const requests = [];
+  const mutation = {
+    message: {
+      id: "message/1",
+      room_id: "support/eu",
+      sender: "agent",
+      content: "Acknowledged",
+      created_at: "2026-08-31T00:00:00Z",
+      client_message_id: null,
+      parent_message_id: null,
+      reactions: [{ key: "ack", count: 1 }],
+      edited_at: null,
+      deleted_at: null,
+    },
+    key: "ack",
+    reactor: "agent",
+    present: true,
+    changed: true,
+    updated_at: "2026-08-31T00:00:01Z",
+  };
+  const client = new SamsarixChatClient({
+    baseUrl: "https://chat.example",
+    credential: { apiKey: "operator-key" },
+    fetch: async (url, init) => {
+      requests.push({ url: String(url), init });
+      return jsonResponse(mutation);
+    },
+  });
+
+  assert.deepEqual(await client.addReaction("support/eu", "message/1", "ack", "agent"), mutation);
+  await client.removeReaction("support/eu", "message/1", "ack", "agent");
+
+  assert.equal(
+    requests[0].url,
+    "https://chat.example/v1/rooms/support%2Feu/messages/message%2F1/reactions/ack",
+  );
+  assert.equal(requests[0].init.method, "PUT");
+  assert.deepEqual(JSON.parse(requests[0].init.body), { reactor: "agent" });
+  assert.equal(requests[1].init.method, "DELETE");
+  await assert.rejects(client.addReaction("support", "message", "Not Valid"), RangeError);
+  await assert.rejects(client.addReaction("support", "message", "ack", " "), RangeError);
+  assert.equal(requests.length, 2);
+});
+
 test("room exports preserve the streaming response for operator-controlled consumption", async () => {
   const requests = [];
   const client = new SamsarixChatClient({

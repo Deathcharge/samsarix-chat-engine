@@ -43,6 +43,7 @@ from .auth import (
 )
 from .config import ConfigurationError, Settings, decode_webhook_secret
 from .models import (
+    REACTION_KEY_PATTERN,
     AuditEventPage,
     MemberModeration,
     MemberModerationUpdate,
@@ -50,6 +51,8 @@ from .models import (
     MessageCreate,
     MessagePage,
     MessageUpdate,
+    ReactionActor,
+    ReactionMutation,
     ReadState,
     ReadStateUpdate,
     RetentionResult,
@@ -76,6 +79,7 @@ from .store import (
     MessageDeletedError,
     MessageNotFoundError,
     MessageOwnershipError,
+    ReactionCapacityError,
     ReadStateCapacityError,
     RetentionNotConfiguredError,
     RoomAlreadyExistsError,
@@ -758,7 +762,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         def export_lines() -> Iterator[str]:
             metadata = {
                 "type": "samsarix.room_export",
-                "schema_version": 3,
+                "schema_version": 4,
                 "exported_at": exported_at.isoformat(),
                 "room": room.model_dump(mode="json"),
             }
@@ -1068,6 +1072,117 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if postgres_runtime is None:
                 await manager.broadcast(room_id, _event("message.deleted", message=message.model_dump(mode="json")))
         return Response(status_code=204)
+
+    async def mutate_reaction(
+        *,
+        room_id: str,
+        message_id: str,
+        reaction_key: str,
+        payload: ReactionActor,
+        present: bool,
+        request: Request,
+        principal: Principal,
+    ) -> ReactionMutation:
+        _authorize(principal, "room:write", room_id)
+        await _enforce_member_access(store, principal, room_id, write=True)
+        reactor = payload.reactor
+        if principal.subject is not None:
+            if reactor is not None and reactor != principal.subject:
+                raise APIError(403, "identity_mismatch", "Reaction actor must match the authenticated subject")
+            reactor = principal.subject
+        if reactor is None:
+            raise APIError(422, "reactor_required", "reactor is required when using operator or local access")
+        rate_subject = principal.subject or _client_key(request)
+        if not await limiter.allow(f"reaction:{rate_subject}"):
+            raise APIError(
+                429,
+                "rate_limit_exceeded",
+                "Message mutation rate limit exceeded",
+                headers={"Retry-After": "60"},
+            )
+        try:
+            mutation = await store.set_message_reaction(
+                room_id=room_id,
+                message_id=message_id,
+                reactor=reactor,
+                key=reaction_key,
+                present=present,
+                allow_frozen=principal.is_admin,
+                member_subject=None if principal.is_admin else principal.subject,
+            )
+        except RoomNotFoundError as exc:
+            raise APIError(404, "room_not_found", "Room not found") from exc
+        except MessageNotFoundError as exc:
+            raise APIError(404, "message_not_found", "Message not found") from exc
+        except MessageDeletedError as exc:
+            raise APIError(409, "message_deleted", "Deleted messages cannot receive reactions") from exc
+        except ReactionCapacityError as exc:
+            raise APIError(409, "reaction_capacity_reached", "This message already has 20 reaction keys") from exc
+        except RoomArchivedError as exc:
+            raise APIError(409, "room_archived", "Archived rooms are read-only") from exc
+        except RoomFrozenError as exc:
+            raise APIError(409, "room_frozen", "Only administrators may react while the room is frozen") from exc
+        except MemberBannedError as exc:
+            raise APIError(403, "room_banned", "This account is banned from the room") from exc
+        except MemberMutedError as exc:
+            raise APIError(403, "room_muted", "This account is muted in the room") from exc
+        except WebhookCapacityError as exc:
+            raise APIError(507, "webhook_capacity_reached", "Webhook delivery capacity reached") from exc
+        if mutation.changed:
+            if webhook_dispatcher is not None:
+                webhook_dispatcher.wake()
+            if postgres_runtime is None:
+                await manager.broadcast(
+                    room_id,
+                    _event("message.reaction.updated", **mutation.model_dump(mode="json")),
+                )
+        return mutation
+
+    @router.put(
+        "/rooms/{room_id}/messages/{message_id}/reactions/{reaction_key}",
+        response_model=ReactionMutation,
+        tags=["messages"],
+    )
+    async def add_reaction(
+        room_id: str,
+        message_id: str,
+        reaction_key: Annotated[str, Path(pattern=REACTION_KEY_PATTERN)],
+        payload: ReactionActor,
+        request: Request,
+        principal: PrincipalDependency,
+    ) -> ReactionMutation:
+        return await mutate_reaction(
+            room_id=room_id,
+            message_id=message_id,
+            reaction_key=reaction_key,
+            payload=payload,
+            present=True,
+            request=request,
+            principal=principal,
+        )
+
+    @router.delete(
+        "/rooms/{room_id}/messages/{message_id}/reactions/{reaction_key}",
+        response_model=ReactionMutation,
+        tags=["messages"],
+    )
+    async def remove_reaction(
+        room_id: str,
+        message_id: str,
+        reaction_key: Annotated[str, Path(pattern=REACTION_KEY_PATTERN)],
+        payload: ReactionActor,
+        request: Request,
+        principal: PrincipalDependency,
+    ) -> ReactionMutation:
+        return await mutate_reaction(
+            room_id=room_id,
+            message_id=message_id,
+            reaction_key=reaction_key,
+            payload=payload,
+            present=False,
+            request=request,
+            principal=principal,
+        )
 
     @router.patch(
         "/rooms/{room_id}/members/{subject}/moderation",

@@ -133,6 +133,17 @@ The relay currently polls; transactional `NOTIFY` emission is not consumed by a 
 
 This milestone serves named support, classroom, and incident journeys without adding arbitrary nesting or a separate conversation store. Room history remains a chronological flat stream so existing clients continue to receive every message; clients can use `parent_message_id` to render thread context.
 
+## v0.15 — bounded acknowledgement reactions
+
+- [x] add idempotent actor-bound reaction add/remove endpoints with signed-subject identity enforcement;
+- [x] expose sorted grouped counts on every message and a realtime `message.reaction.updated` event;
+- [x] enforce a conservative 20-key-per-message cap and validated 1–30 character keys;
+- [x] persist actor uniqueness and summaries transactionally in SQLite and PostgreSQL;
+- [x] clear reactions on tombstone deletion and preserve them through history, search, export, retention, backup, relay and optional signed webhooks;
+- [x] expose `addReaction()` and `removeReaction()` through unpublished TypeScript SDK 0.6.0.
+
+This milestone supports low-noise acknowledgement, resolution, escalation, and lightweight feedback in support, classroom, incident, and private-community rooms. It does not host custom emoji assets, rank content, or provide anonymous polling.
+
 ## Deliberate non-goals
 
 - no built-in password database, social graph, billing, or end-user frontend;
