@@ -90,13 +90,17 @@ assert.deepEqual(removedReaction.message.reactions, []);
 assert.equal((await reactionRemovedEvent).present, false);
 
 const pinEvent = nextEvent(session, "message.pin.updated");
-const pinned = await client.pinMessage("sdk-room", createdEvent.message.id, "sdk-agent");
+await assert.rejects(
+  () => client.pinMessage("sdk-room", createdEvent.message.id, "sdk-agent"),
+  (error) => error.code === "identity_mismatch",
+);
+const pinned = await client.pinMessage("sdk-room", createdEvent.message.id, "sdk-user");
 assert.equal(pinned.changed, true);
-assert.equal(pinned.message.pinned_by, "sdk-agent");
-assert.equal((await pinEvent).message.pinned_by, "sdk-agent");
+assert.equal(pinned.message.pinned_by, "sdk-user");
+assert.equal((await pinEvent).message.pinned_by, "sdk-user");
 assert.equal((await client.listPinnedMessages("sdk-room")).items[0].id, createdEvent.message.id);
 const unpinEvent = nextEvent(session, "message.pin.updated");
-const unpinned = await client.unpinMessage("sdk-room", createdEvent.message.id, "sdk-agent");
+const unpinned = await client.unpinMessage("sdk-room", createdEvent.message.id, "sdk-user");
 assert.equal(unpinned.pinned, false);
 assert.equal(unpinned.message.pinned_at, null);
 assert.equal((await unpinEvent).pinned, false);
