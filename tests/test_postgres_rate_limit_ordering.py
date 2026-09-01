@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -32,7 +32,7 @@ async def test_new_bucket_path_releases_row_locks_before_capacity_lock() -> None
 
     foundation = SimpleNamespace(transaction=transaction)
     limiter = PostgresRateLimiter(foundation, scope="message", limit=5)  # type: ignore[arg-type]
-    now = datetime(2026, 9, 1, tzinfo=UTC)
+    now = datetime(2026, 9, 1, tzinfo=timezone.utc)
     window_started_at = now.replace(second=0)
     existing = RateLimitDecision(
         allowed=True,
