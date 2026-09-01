@@ -49,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     issue.add_argument(
         "--permission",
         action="append",
-        choices=("room:read", "room:write", "admin"),
+        choices=("room:read", "room:write", "room:pin", "admin"),
         help="granted permission (repeatable; defaults to room read and write)",
     )
     issue.add_argument(

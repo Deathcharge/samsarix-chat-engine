@@ -25,6 +25,7 @@ from .models import (
     MemberModeration,
     MemberModerationUpdate,
     Message,
+    PinMutation,
     ReactionMutation,
     ReactionSummary,
     ReadState,
@@ -34,7 +35,7 @@ from .models import (
 )
 
 T = TypeVar("T")
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 logger = logging.getLogger(__name__)
 
 
@@ -386,6 +387,18 @@ class ChatStorage(Protocol):
         member_subject: str | None = None,
     ) -> ReactionMutation: ...
 
+    async def set_message_pin(
+        self,
+        *,
+        room_id: str,
+        message_id: str,
+        pinner: str,
+        actor: str,
+        pinned: bool,
+        allow_frozen: bool,
+        member_subject: str | None = None,
+    ) -> PinMutation: ...
+
     async def get_member_moderation(self, room_id: str, subject: str) -> MemberModeration | None: ...
 
     async def set_member_moderation(
@@ -398,6 +411,14 @@ class ChatStorage(Protocol):
     ) -> MemberModeration: ...
 
     async def list_messages(
+        self,
+        room_id: str,
+        *,
+        limit: int = 50,
+        before: str | None = None,
+    ) -> tuple[list[Message], str | None]: ...
+
+    async def list_pinned_messages(
         self,
         room_id: str,
         *,
@@ -654,6 +675,31 @@ class ChatStore:
                 member_subject,
             )
 
+    async def set_message_pin(
+        self,
+        *,
+        room_id: str,
+        message_id: str,
+        pinner: str,
+        actor: str,
+        pinned: bool,
+        allow_frozen: bool,
+        member_subject: str | None = None,
+    ) -> PinMutation:
+        """Idempotently set one message's shared room-wide pin state."""
+
+        async with self._write_lock:
+            return await asyncio.to_thread(
+                self._set_message_pin_sync,
+                room_id,
+                message_id,
+                pinner,
+                actor,
+                pinned,
+                allow_frozen,
+                member_subject,
+            )
+
     async def get_member_moderation(self, room_id: str, subject: str) -> MemberModeration | None:
         row = await asyncio.to_thread(
             self._run,
@@ -686,6 +732,17 @@ class ChatStore:
         before: str | None = None,
     ) -> tuple[list[Message], str | None]:
         return await asyncio.to_thread(self._list_messages_sync, room_id, limit, before)
+
+    async def list_pinned_messages(
+        self,
+        room_id: str,
+        *,
+        limit: int = 50,
+        before: str | None = None,
+    ) -> tuple[list[Message], str | None]:
+        """List room pins newest-first using pin-time cursor pagination."""
+
+        return await asyncio.to_thread(self._list_pinned_messages_sync, room_id, limit, before)
 
     async def list_replies(
         self,
@@ -740,7 +797,7 @@ class ChatStore:
             cursor = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, reactions_json, edited_at, deleted_at
+                       parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
                 FROM messages WHERE room_id = ? ORDER BY created_at, id
                 """,
                 (room_id,),
@@ -858,6 +915,8 @@ class ChatStore:
                     client_message_id TEXT,
                     parent_message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
                     reactions_json TEXT NOT NULL DEFAULT '[]',
+                    pinned_at TEXT,
+                    pinned_by TEXT CHECK (pinned_by IS NULL OR length(pinned_by) BETWEEN 1 AND 64),
                     UNIQUE(room_id, client_message_id)
                 );
 
@@ -885,9 +944,17 @@ class ChatStore:
                 )
             if "reactions_json" not in message_columns:
                 connection.execute("ALTER TABLE messages ADD COLUMN reactions_json TEXT NOT NULL DEFAULT '[]'")
+            if "pinned_at" not in message_columns:
+                connection.execute("ALTER TABLE messages ADD COLUMN pinned_at TEXT")
+            if "pinned_by" not in message_columns:
+                connection.execute("ALTER TABLE messages ADD COLUMN pinned_by TEXT")
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS messages_thread_order "
                 "ON messages(room_id, parent_message_id, created_at DESC, id DESC)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS messages_pin_order "
+                "ON messages(room_id, pinned_at DESC, id DESC) WHERE pinned_at IS NOT NULL"
             )
             connection.executescript(
                 """
@@ -1083,7 +1150,7 @@ class ChatStore:
                 existing = connection.execute(
                     """
                     SELECT id, room_id, sender, content, created_at, client_message_id,
-                           parent_message_id, reactions_json, edited_at, deleted_at
+                           parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
                     FROM messages WHERE room_id = ? AND client_message_id = ?
                     """,
                     (room_id, client_message_id),
@@ -1136,7 +1203,7 @@ class ChatStore:
             persisted = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, reactions_json, edited_at, deleted_at
+                       parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
                 FROM messages WHERE id = ?
                 """,
                 (message.id,),
@@ -1176,7 +1243,7 @@ class ChatStore:
             row = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, reactions_json, edited_at, deleted_at
+                       parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
                 FROM messages WHERE room_id = ? AND id = ?
                 """,
                 (room_id, message_id),
@@ -1202,7 +1269,7 @@ class ChatStore:
             row = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, reactions_json, edited_at, deleted_at
+                       parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
                 FROM messages WHERE id = ?
                 """,
                 (message_id,),
@@ -1239,7 +1306,7 @@ class ChatStore:
             row = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, reactions_json, edited_at, deleted_at
+                       parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
                 FROM messages WHERE room_id = ? AND id = ?
                 """,
                 (room_id, message_id),
@@ -1253,7 +1320,8 @@ class ChatStore:
             deleted_at = datetime.now(timezone.utc)
             connection.execute("DELETE FROM message_reactions WHERE message_id = ?", (message_id,))
             connection.execute(
-                "UPDATE messages SET content = '', reactions_json = '[]', deleted_at = ? WHERE id = ?",
+                "UPDATE messages SET content = '', reactions_json = '[]', pinned_at = NULL, "
+                "pinned_by = NULL, deleted_at = ? WHERE id = ?",
                 (deleted_at.isoformat(), message_id),
             )
             self._insert_audit(
@@ -1266,7 +1334,7 @@ class ChatStore:
             row = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, reactions_json, edited_at, deleted_at
+                       parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
                 FROM messages WHERE id = ?
                 """,
                 (message_id,),
@@ -1307,7 +1375,7 @@ class ChatStore:
             row = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, reactions_json, edited_at, deleted_at
+                       parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
                 FROM messages WHERE room_id = ? AND id = ?
                 """,
                 (room_id, message_id),
@@ -1368,7 +1436,7 @@ class ChatStore:
                 row = connection.execute(
                     """
                     SELECT id, room_id, sender, content, created_at, client_message_id,
-                           parent_message_id, reactions_json, edited_at, deleted_at
+                           parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
                     FROM messages WHERE id = ?
                     """,
                     (message_id,),
@@ -1386,6 +1454,80 @@ class ChatStore:
                 self._insert_webhook(
                     connection,
                     event_type="message.reaction.updated",
+                    room_id=room_id,
+                    resource_id=message_id,
+                    occurred_at=now,
+                    data=mutation.model_dump(mode="json"),
+                )
+            return mutation
+
+    def _set_message_pin_sync(
+        self,
+        room_id: str,
+        message_id: str,
+        pinner: str,
+        actor: str,
+        pinned: bool,
+        allow_frozen: bool,
+        member_subject: str | None,
+    ) -> PinMutation:
+        now = datetime.now(timezone.utc)
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            room = connection.execute("SELECT archived_at, frozen_at FROM rooms WHERE id = ?", (room_id,)).fetchone()
+            if room is None:
+                raise RoomNotFoundError(room_id)
+            if room["archived_at"] is not None:
+                raise RoomArchivedError(room_id)
+            if room["frozen_at"] is not None and not allow_frozen:
+                raise RoomFrozenError(room_id)
+            self._enforce_member_write_sync(connection, room_id, member_subject)
+            row = connection.execute(
+                """
+                SELECT id, room_id, sender, content, created_at, client_message_id,
+                       parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
+                FROM messages WHERE room_id = ? AND id = ?
+                """,
+                (room_id, message_id),
+            ).fetchone()
+            if row is None:
+                raise MessageNotFoundError(message_id)
+            if row["deleted_at"] is not None:
+                raise MessageDeletedError(message_id)
+
+            changed = (row["pinned_at"] is not None) != pinned
+            if changed:
+                connection.execute(
+                    "UPDATE messages SET pinned_at = ?, pinned_by = ? WHERE id = ?",
+                    (now.isoformat() if pinned else None, pinner if pinned else None, message_id),
+                )
+                self._insert_audit(
+                    connection,
+                    action="message.pin.updated",
+                    actor=actor,
+                    room_id=room_id,
+                    details={"message_id": message_id, "pinned": pinned},
+                )
+                row = connection.execute(
+                    """
+                    SELECT id, room_id, sender, content, created_at, client_message_id,
+                           parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
+                    FROM messages WHERE id = ?
+                    """,
+                    (message_id,),
+                ).fetchone()
+
+            mutation = PinMutation(
+                message=self._message_from_row(row),
+                pinner=pinner,
+                pinned=pinned,
+                changed=changed,
+                updated_at=now,
+            )
+            if changed:
+                self._insert_webhook(
+                    connection,
+                    event_type="message.pin.updated",
                     room_id=room_id,
                     resource_id=message_id,
                     occurred_at=now,
@@ -1561,7 +1703,7 @@ class ChatStore:
                 rows = connection.execute(
                     """
                     SELECT id, room_id, sender, content, created_at, client_message_id,
-                           parent_message_id, reactions_json, edited_at, deleted_at
+                           parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
                     FROM messages
                     WHERE room_id = ? AND (created_at < ? OR (created_at = ? AND id < ?))
                     ORDER BY created_at DESC, id DESC
@@ -1573,7 +1715,7 @@ class ChatStore:
                 rows = connection.execute(
                     """
                     SELECT id, room_id, sender, content, created_at, client_message_id,
-                           parent_message_id, reactions_json, edited_at, deleted_at
+                           parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
                     FROM messages
                     WHERE room_id = ?
                     ORDER BY created_at DESC, id DESC
@@ -1585,6 +1727,50 @@ class ChatStore:
         page_rows, next_before = _paginate_rows(rows, limit, chronological=True)
         messages = [self._message_from_row(row) for row in page_rows]
         return messages, next_before
+
+    def _list_pinned_messages_sync(
+        self,
+        room_id: str,
+        limit: int,
+        before: str | None,
+    ) -> tuple[list[Message], str | None]:
+        with closing(self._connect()) as connection, connection:
+            if connection.execute("SELECT 1 FROM rooms WHERE id = ?", (room_id,)).fetchone() is None:
+                raise RoomNotFoundError(room_id)
+
+            cursor_pinned_at: str | None = None
+            cursor_id: str | None = None
+            if before:
+                cursor = connection.execute(
+                    "SELECT pinned_at, id FROM messages WHERE room_id = ? AND id = ? AND pinned_at IS NOT NULL",
+                    (room_id, before),
+                ).fetchone()
+                if cursor is None:
+                    raise InvalidCursorError(before)
+                cursor_pinned_at = cursor["pinned_at"]
+                cursor_id = cursor["id"]
+            rows = connection.execute(
+                """
+                SELECT id, room_id, sender, content, created_at, client_message_id,
+                       parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
+                FROM messages
+                WHERE room_id = ? AND pinned_at IS NOT NULL
+                  AND (? IS NULL OR pinned_at < ? OR (pinned_at = ? AND id < ?))
+                ORDER BY pinned_at DESC, id DESC
+                LIMIT ?
+                """,
+                (
+                    room_id,
+                    cursor_pinned_at,
+                    cursor_pinned_at,
+                    cursor_pinned_at,
+                    cursor_id,
+                    limit + 1,
+                ),
+            ).fetchall()
+
+        page_rows, next_before = _paginate_rows(rows, limit, chronological=False)
+        return [self._message_from_row(row) for row in page_rows], next_before
 
     def _list_replies_sync(
         self,
@@ -1622,7 +1808,7 @@ class ChatStore:
             rows = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, reactions_json, edited_at, deleted_at
+                       parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
                 FROM messages
                 WHERE room_id = ? AND parent_message_id = ?
                   AND (? IS NULL OR created_at < ? OR (created_at = ? AND id < ?))
@@ -1669,7 +1855,7 @@ class ChatStore:
             rows = connection.execute(
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
-                       parent_message_id, reactions_json, edited_at, deleted_at
+                       parent_message_id, reactions_json, pinned_at, pinned_by, edited_at, deleted_at
                 FROM messages
                 WHERE room_id = ?
                   AND deleted_at IS NULL
@@ -2184,6 +2370,8 @@ class ChatStore:
             client_message_id=row["client_message_id"],
             parent_message_id=row["parent_message_id"],
             reactions=[ReactionSummary.model_validate(item) for item in json.loads(row["reactions_json"])],
+            pinned_at=datetime.fromisoformat(row["pinned_at"]) if row["pinned_at"] else None,
+            pinned_by=row["pinned_by"],
             edited_at=datetime.fromisoformat(row["edited_at"]) if row["edited_at"] else None,
             deleted_at=datetime.fromisoformat(row["deleted_at"]) if row["deleted_at"] else None,
         )

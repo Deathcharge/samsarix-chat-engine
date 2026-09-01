@@ -4,7 +4,7 @@ Samsarix Chat Engine 0.10 provides the small amount of application state needed 
 
 ## Support-room journey
 
-A practical integration creates one private room per support case, issues short-lived room tokens to the customer and assigned agents, and stores the case-to-room mapping in the host application's database. A customer can post and disconnect; an agent later sees the unread count, reads through a message, adds a contextual one-depth reply or an `ack`/`resolved` reaction, and marks the latest reply as read.
+A practical integration creates one private room per support case, issues short-lived room tokens to the customer and assigned agents, and stores the case-to-room mapping in the host application's database. A customer can post and disconnect; an agent later sees the unread count, reads through a message, adds a contextual one-depth reply or an `ack`/`resolved` reaction, pins the accepted resolution, and marks the latest reply as read.
 
 ```ts
 import { SamsarixChatClient } from "@samsarix/chat-client";
@@ -17,9 +17,10 @@ const chat = new SamsarixChatClient({
 const before = await chat.getReadState("support-case-42");
 const messages = await chat.listMessages("support-case-42");
 const paymentContext = await chat.searchMessages("support-case-42", "payment failed");
-await chat.addReaction("support-case-42", original.id, "ack");
 const original = paymentContext.items.at(-1);
 if (original) {
+  await chat.addReaction("support-case-42", original.id, "ack");
+  await chat.pinMessage("support-case-42", original.id);
   const existingReplies = await chat.listReplies("support-case-42", original.id);
   console.log("thread", existingReplies.items);
 }
@@ -55,11 +56,13 @@ Threads are a presentation aid, not a separate authorization or delivery boundar
 
 Reactions are low-noise state signals, not replacement messages or workflow authority. Use a small product-owned vocabulary such as `ack`, `resolved`, `needs_attention`, or `helpful`; show the server's grouped counts and replace a message from each `message.reaction.updated` event. The host application still decides whether a reaction should transition a ticket or notify a human. Each actor/key pair is unique, distinct keys are capped at 20 per message, and tombstoning a message removes its reaction actors and counts.
 
+Pins are shared room curation, not private bookmarks or workflow authority. Give `room:pin` only to agents, teachers, moderators, or incident leads that may elevate an accepted answer, runbook, decision, guideline, or announcement for everyone with room read access. Pin mutations also require `room:read`, are metadata-audited, and emit `message.pin.updated`; refresh the newest-first pin list after reconnect or concurrent changes. Tombstoning clears the pin. The host application still decides whether a pinned resolution should close a case or trigger another side effect.
+
 The runnable [support workflow example](../examples/03_support_workflow.py) demonstrates the complete HTTP path with separate customer and agent identities. With a server running and an operator key plus signing secret configured, issue two tokens:
 
 ```bash
 export SAMSARIX_CHAT_CUSTOMER_TOKEN="$(samsarix-chat token issue --subject customer-42 --room support-demo --permission room:read --permission room:write --expires-in 3600)"
-export SAMSARIX_CHAT_AGENT_TOKEN="$(samsarix-chat token issue --subject agent-7 --room support-demo --permission room:read --permission room:write --expires-in 3600)"
+export SAMSARIX_CHAT_AGENT_TOKEN="$(samsarix-chat token issue --subject agent-7 --room support-demo --permission room:read --permission room:write --permission room:pin --expires-in 3600)"
 python examples/03_support_workflow.py
 ```
 

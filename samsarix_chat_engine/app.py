@@ -51,6 +51,8 @@ from .models import (
     MessageCreate,
     MessagePage,
     MessageUpdate,
+    PinActor,
+    PinMutation,
     ReactionActor,
     ReactionMutation,
     ReadState,
@@ -762,7 +764,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         def export_lines() -> Iterator[str]:
             metadata = {
                 "type": "samsarix.room_export",
-                "schema_version": 4,
+                "schema_version": 5,
                 "exported_at": exported_at.isoformat(),
                 "room": room.model_dump(mode="json"),
             }
@@ -799,6 +801,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise APIError(404, "room_not_found", "Room not found") from exc
         except InvalidCursorError as exc:
             raise APIError(400, "invalid_cursor", "The message cursor is not valid for this room") from exc
+        return MessagePage(items=items, next_before=next_before)
+
+    @router.get("/rooms/{room_id}/messages/pins", response_model=MessagePage, tags=["messages"])
+    async def list_pinned_messages(
+        room_id: str,
+        principal: PrincipalDependency,
+        limit: int = Query(default=50, ge=1, le=100),
+        before: str | None = Query(default=None, min_length=1, max_length=128),
+    ) -> MessagePage:
+        _authorize(principal, "room:read", room_id)
+        await _enforce_member_access(store, principal, room_id, write=False)
+        try:
+            items, next_before = await store.list_pinned_messages(room_id, limit=limit, before=before)
+        except RoomNotFoundError as exc:
+            raise APIError(404, "room_not_found", "Room not found") from exc
+        except InvalidCursorError as exc:
+            raise APIError(400, "invalid_cursor", "The pin cursor is not valid for this room") from exc
         return MessagePage(items=items, next_before=next_before)
 
     @router.get("/rooms/{room_id}/messages/search", response_model=MessagePage, tags=["messages"])
@@ -1180,6 +1199,108 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             reaction_key=reaction_key,
             payload=payload,
             present=False,
+            request=request,
+            principal=principal,
+        )
+
+    async def mutate_pin(
+        *,
+        room_id: str,
+        message_id: str,
+        payload: PinActor,
+        pinned: bool,
+        request: Request,
+        principal: Principal,
+    ) -> PinMutation:
+        _authorize(principal, "room:read", room_id)
+        _authorize(principal, "room:pin", room_id)
+        await _enforce_member_access(store, principal, room_id, write=True)
+        pinner = payload.pinner
+        if principal.subject is not None:
+            if pinner is not None and pinner != principal.subject:
+                raise APIError(403, "identity_mismatch", "Pin actor must match the authenticated subject")
+            pinner = principal.subject
+        if pinner is None:
+            raise APIError(422, "pinner_required", "pinner is required when using operator or local access")
+        rate_subject = principal.subject or _client_key(request)
+        if not await limiter.allow(f"pin:{rate_subject}"):
+            raise APIError(
+                429,
+                "rate_limit_exceeded",
+                "Message mutation rate limit exceeded",
+                headers={"Retry-After": "60"},
+            )
+        try:
+            mutation = await store.set_message_pin(
+                room_id=room_id,
+                message_id=message_id,
+                pinner=pinner,
+                actor=_audit_actor(principal),
+                pinned=pinned,
+                allow_frozen=principal.is_admin,
+                member_subject=None if principal.is_admin else principal.subject,
+            )
+        except RoomNotFoundError as exc:
+            raise APIError(404, "room_not_found", "Room not found") from exc
+        except MessageNotFoundError as exc:
+            raise APIError(404, "message_not_found", "Message not found") from exc
+        except MessageDeletedError as exc:
+            raise APIError(409, "message_deleted", "Deleted messages cannot be pinned") from exc
+        except RoomArchivedError as exc:
+            raise APIError(409, "room_archived", "Archived rooms are read-only") from exc
+        except RoomFrozenError as exc:
+            raise APIError(409, "room_frozen", "Only administrators may change pins while the room is frozen") from exc
+        except MemberBannedError as exc:
+            raise APIError(403, "room_banned", "This account is banned from the room") from exc
+        except MemberMutedError as exc:
+            raise APIError(403, "room_muted", "This account is muted in the room") from exc
+        except WebhookCapacityError as exc:
+            raise APIError(507, "webhook_capacity_reached", "Webhook delivery capacity reached") from exc
+        if mutation.changed:
+            if webhook_dispatcher is not None:
+                webhook_dispatcher.wake()
+            if postgres_runtime is None:
+                await manager.broadcast(room_id, _event("message.pin.updated", **mutation.model_dump(mode="json")))
+        return mutation
+
+    @router.put(
+        "/rooms/{room_id}/messages/{message_id}/pin",
+        response_model=PinMutation,
+        tags=["messages"],
+    )
+    async def pin_message(
+        room_id: str,
+        message_id: str,
+        payload: PinActor,
+        request: Request,
+        principal: PrincipalDependency,
+    ) -> PinMutation:
+        return await mutate_pin(
+            room_id=room_id,
+            message_id=message_id,
+            payload=payload,
+            pinned=True,
+            request=request,
+            principal=principal,
+        )
+
+    @router.delete(
+        "/rooms/{room_id}/messages/{message_id}/pin",
+        response_model=PinMutation,
+        tags=["messages"],
+    )
+    async def unpin_message(
+        room_id: str,
+        message_id: str,
+        payload: PinActor,
+        request: Request,
+        principal: PrincipalDependency,
+    ) -> PinMutation:
+        return await mutate_pin(
+            room_id=room_id,
+            message_id=message_id,
+            payload=payload,
+            pinned=False,
             request=request,
             principal=principal,
         )

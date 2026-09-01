@@ -219,6 +219,52 @@ test("reaction methods validate keys and encode idempotent actor mutations", asy
   assert.equal(requests.length, 2);
 });
 
+test("pin methods and pagination encode room and message identifiers", async () => {
+  const requests = [];
+  const mutation = {
+    message: {
+      id: "message/1",
+      room_id: "support/eu",
+      sender: "agent",
+      content: "Resolution",
+      created_at: "2026-08-31T00:00:00Z",
+      client_message_id: null,
+      pinned_at: "2026-08-31T00:00:01Z",
+      pinned_by: "agent",
+      edited_at: null,
+      deleted_at: null,
+    },
+    pinner: "agent",
+    pinned: true,
+    changed: true,
+    updated_at: "2026-08-31T00:00:01Z",
+  };
+  const client = new SamsarixChatClient({
+    baseUrl: "https://chat.example",
+    credential: { apiKey: "operator-key" },
+    fetch: async (url, init) => {
+      requests.push({ url: String(url), init });
+      return jsonResponse(requests.length === 1 ? { items: [], next_before: null } : mutation);
+    },
+  });
+
+  await client.listPinnedMessages("support/eu", { limit: 25, before: "message/9" });
+  assert.deepEqual(await client.pinMessage("support/eu", "message/1", "agent"), mutation);
+  await client.unpinMessage("support/eu", "message/1", "agent");
+
+  const listUrl = new URL(requests[0].url);
+  assert.equal(listUrl.pathname, "/v1/rooms/support%2Feu/messages/pins");
+  assert.equal(listUrl.searchParams.get("limit"), "25");
+  assert.equal(listUrl.searchParams.get("before"), "message/9");
+  assert.equal(requests[1].url, "https://chat.example/v1/rooms/support%2Feu/messages/message%2F1/pin");
+  assert.equal(requests[1].init.method, "PUT");
+  assert.deepEqual(JSON.parse(requests[1].init.body), { pinner: "agent" });
+  assert.equal(requests[2].init.method, "DELETE");
+  await assert.rejects(client.pinMessage("support", "message", " "), RangeError);
+  await assert.rejects(client.listPinnedMessages("support", { limit: 101 }), RangeError);
+  assert.equal(requests.length, 3);
+});
+
 test("room exports preserve the streaming response for operator-controlled consumption", async () => {
   const requests = [];
   const client = new SamsarixChatClient({

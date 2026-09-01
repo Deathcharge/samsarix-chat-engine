@@ -33,6 +33,7 @@ _BROADCAST_EVENT_TYPES = frozenset(
         "message.created",
         "message.updated",
         "message.deleted",
+        "message.pin.updated",
         "message.reaction.updated",
         "room.frozen",
         "room.unfrozen",

@@ -21,6 +21,7 @@ from .models import (
     MemberModeration,
     MemberModerationUpdate,
     Message,
+    PinMutation,
     ReactionMutation,
     ReactionSummary,
     ReadState,
@@ -462,7 +463,7 @@ class PostgresChatStore:
             )
             await connection.execute("SELECT pg_advisory_xact_lock(%s)", (POSTGRES_MESSAGE_CAP_LOCK_ID,))
             row = await self._lock_message(connection, room_id, message_id)
-            if row[9] is not None:
+            if row[11] is not None:
                 raise MessageDeletedError(message_id)
             if not is_admin and str(row[2]) != actor:
                 raise MessageOwnershipError(message_id)
@@ -516,7 +517,7 @@ class PostgresChatStore:
             row = await self._lock_message(connection, room_id, message_id)
             if not is_admin and str(row[2]) != actor:
                 raise MessageOwnershipError(message_id)
-            if row[9] is not None:
+            if row[11] is not None:
                 return _message_from_row(row), False
             await connection.execute(
                 "DELETE FROM public.samsarix_message_reactions WHERE message_id = %s",
@@ -572,7 +573,7 @@ class PostgresChatStore:
                 member_subject=member_subject,
             )
             row = await self._lock_message(connection, room_id, message_id)
-            if row[9] is not None:
+            if row[11] is not None:
                 raise MessageDeletedError(message_id)
             cursor = await connection.execute("SELECT clock_timestamp()")
             now = _required_row(await cursor.fetchone(), "reaction timestamp")[0]
@@ -659,6 +660,71 @@ class PostgresChatStore:
                     room_id=room_id,
                     event_type="message.reaction.updated",
                     payload={"type": "message.reaction.updated", **mutation.model_dump(mode="json")},
+                )
+            return mutation
+
+    async def set_message_pin(
+        self,
+        *,
+        room_id: str,
+        message_id: str,
+        pinner: str,
+        actor: str,
+        pinned: bool,
+        allow_frozen: bool,
+        member_subject: str | None = None,
+    ) -> PinMutation:
+        async with self.foundation.transaction() as connection:
+            await self._lock_writable_room(
+                connection,
+                room_id,
+                allow_frozen=allow_frozen,
+                member_subject=member_subject,
+            )
+            row = await self._lock_message(connection, room_id, message_id)
+            if row[11] is not None:
+                raise MessageDeletedError(message_id)
+            cursor = await connection.execute("SELECT clock_timestamp()")
+            now = _required_row(await cursor.fetchone(), "pin timestamp")[0]
+            changed = (row[8] is not None) != pinned
+            if changed:
+                cursor = await connection.execute(
+                    f"""
+                    UPDATE public.samsarix_messages SET pinned_at = %s, pinned_by = %s
+                    WHERE id = %s RETURNING {_MESSAGE_COLUMNS}
+                    """,  # noqa: S608 - internal constant
+                    (now if pinned else None, pinner if pinned else None, message_id),
+                )
+                row = _required_row(await cursor.fetchone(), "message pin update")
+                await self._insert_audit(
+                    connection,
+                    action="message.pin.updated",
+                    actor=actor,
+                    room_id=room_id,
+                    details={"message_id": message_id, "pinned": pinned},
+                )
+
+            mutation = PinMutation(
+                message=_message_from_row(row),
+                pinner=pinner,
+                pinned=pinned,
+                changed=changed,
+                updated_at=now,
+            )
+            if changed:
+                await self._insert_webhook(
+                    connection,
+                    event_type="message.pin.updated",
+                    room_id=room_id,
+                    resource_id=message_id,
+                    occurred_at=now,
+                    data=mutation.model_dump(mode="json"),
+                )
+                await self.foundation.append_event(
+                    connection,
+                    room_id=room_id,
+                    event_type="message.pin.updated",
+                    payload={"type": "message.pin.updated", **mutation.model_dump(mode="json")},
                 )
             return mutation
 
@@ -789,6 +855,49 @@ class PostgresChatStore:
                 )
             rows = await cursor.fetchall()
         page_rows, next_before = _page_rows(rows, limit, chronological=True)
+        return [_message_from_row(row) for row in page_rows], next_before
+
+    async def list_pinned_messages(
+        self,
+        room_id: str,
+        *,
+        limit: int = 50,
+        before: str | None = None,
+    ) -> tuple[list[Message], str | None]:
+        _validate_page_limit(limit)
+        async with self.foundation.transaction() as connection:
+            await _require_room(connection, room_id)
+            cursor_key: tuple[datetime, str] | None = None
+            if before is not None:
+                cursor = await connection.execute(
+                    """
+                    SELECT pinned_at, id FROM public.samsarix_messages
+                    WHERE room_id = %s AND id = %s AND pinned_at IS NOT NULL
+                    """,
+                    (room_id, before),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    raise InvalidCursorError(before)
+                cursor_key = (row[0], str(row[1]))
+            cursor = await connection.execute(
+                f"""
+                {_MESSAGE_SELECT}
+                WHERE room_id = %s AND pinned_at IS NOT NULL
+                  AND (%s::timestamptz IS NULL OR pinned_at < %s OR (pinned_at = %s AND id < %s))
+                ORDER BY pinned_at DESC, id DESC LIMIT %s
+                """,
+                (
+                    room_id,
+                    cursor_key[0] if cursor_key else None,
+                    cursor_key[0] if cursor_key else None,
+                    cursor_key[0] if cursor_key else None,
+                    cursor_key[1] if cursor_key else None,
+                    limit + 1,
+                ),
+            )
+            rows = await cursor.fetchall()
+        page_rows, next_before = _page_rows(rows, limit, chronological=False)
         return [_message_from_row(row) for row in page_rows], next_before
 
     async def list_replies(
@@ -1369,23 +1478,74 @@ class PostgresChatStore:
                     WHEN event_type = 'message.reaction.updated' THEN jsonb_set(
                         jsonb_set(
                             jsonb_set(
-                                payload,
-                                ARRAY['message', 'content'],
-                                to_jsonb(''::text),
+                                jsonb_set(
+                                    jsonb_set(
+                                        payload,
+                                        ARRAY['message', 'content'],
+                                        to_jsonb(''::text),
+                                        false
+                                    ),
+                                    ARRAY['message', 'reactions'],
+                                    '[]'::jsonb,
+                                    false
+                                ),
+                                ARRAY['message', 'pinned_at'],
+                                'null'::jsonb,
                                 false
                             ),
-                            ARRAY['message', 'reactions'],
-                            '[]'::jsonb,
+                            ARRAY['message', 'pinned_by'],
+                            'null'::jsonb,
                             false
                         ),
                         ARRAY['reactor'],
                         to_jsonb('[deleted]'::text),
                         false
                     )
+                    WHEN event_type = 'message.pin.updated' THEN jsonb_set(
+                        jsonb_set(
+                            jsonb_set(
+                                jsonb_set(
+                                    jsonb_set(
+                                        payload,
+                                        ARRAY['message', 'content'],
+                                        to_jsonb(''::text),
+                                        false
+                                    ),
+                                    ARRAY['message', 'reactions'],
+                                    '[]'::jsonb,
+                                    false
+                                ),
+                                ARRAY['message', 'pinned_at'],
+                                'null'::jsonb,
+                                false
+                            ),
+                            ARRAY['message', 'pinned_by'],
+                            'null'::jsonb,
+                            false
+                        ),
+                        ARRAY['pinner'],
+                        to_jsonb('[deleted]'::text),
+                        false
+                    )
                     ELSE jsonb_set(
-                        payload,
-                        ARRAY['message', 'content'],
-                        to_jsonb(''::text),
+                        jsonb_set(
+                            jsonb_set(
+                                jsonb_set(
+                                    payload,
+                                    ARRAY['message', 'content'],
+                                    to_jsonb(''::text),
+                                    false
+                                ),
+                                ARRAY['message', 'reactions'],
+                                '[]'::jsonb,
+                                false
+                            ),
+                            ARRAY['message', 'pinned_at'],
+                            'null'::jsonb,
+                            false
+                        ),
+                        ARRAY['message', 'pinned_by'],
+                        'null'::jsonb,
                         false
                     )
                 END
@@ -1532,7 +1692,7 @@ class PostgresChatStore:
 
 _MESSAGE_COLUMNS = (
     "id, room_id, sender, content, created_at, client_message_id, parent_message_id, "
-    "reaction_summaries, edited_at, deleted_at"
+    "reaction_summaries, pinned_at, pinned_by, edited_at, deleted_at"
 )
 _MESSAGE_SELECT = f"SELECT {_MESSAGE_COLUMNS} FROM public.samsarix_messages"  # noqa: S608 - internal constant
 _CREATE_MESSAGE_SQL = f"""
@@ -1549,7 +1709,8 @@ RETURNING {_MESSAGE_COLUMNS}
 """  # noqa: S608 - internal constant
 _DELETE_MESSAGE_SQL = f"""
 UPDATE public.samsarix_messages
-SET content = '', search_content = '', reaction_summaries = '[]'::jsonb, deleted_at = clock_timestamp()
+SET content = '', search_content = '', reaction_summaries = '[]'::jsonb,
+    pinned_at = NULL, pinned_by = NULL, deleted_at = clock_timestamp()
 WHERE id = %s
 RETURNING {_MESSAGE_COLUMNS}
 """  # noqa: S608 - internal constant
@@ -1667,8 +1828,10 @@ def _message_from_row(row: tuple[Any, ...]) -> Message:
         client_message_id=str(row[5]) if row[5] is not None else None,
         parent_message_id=str(row[6]) if row[6] is not None else None,
         reactions=[ReactionSummary.model_validate(item) for item in row[7]],
-        edited_at=row[8],
-        deleted_at=row[9],
+        pinned_at=row[8],
+        pinned_by=str(row[9]) if row[9] is not None else None,
+        edited_at=row[10],
+        deleted_at=row[11],
     )
 
 

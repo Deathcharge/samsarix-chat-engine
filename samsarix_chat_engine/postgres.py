@@ -25,7 +25,7 @@ from psycopg.conninfo import conninfo_to_dict
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
-POSTGRES_SCHEMA_VERSION = 10
+POSTGRES_SCHEMA_VERSION = 11
 POSTGRES_MIGRATION_LOCK_ID = 7_495_346_927_831_819_041
 POSTGRES_EVENT_SEQUENCE_LOCK_ID = 7_495_346_927_831_819_042
 POSTGRES_EVENT_RETENTION_LOCK_ID = 7_495_346_927_831_819_043
@@ -1163,6 +1163,8 @@ class PostgresFoundation:
                         ),
                         parent_message_id TEXT REFERENCES public.samsarix_messages(id) ON DELETE SET NULL,
                         reaction_summaries JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        pinned_at TIMESTAMPTZ,
+                        pinned_by TEXT CHECK (pinned_by IS NULL OR char_length(pinned_by) BETWEEN 1 AND 64),
                         edited_at TIMESTAMPTZ,
                         deleted_at TIMESTAMPTZ,
                         UNIQUE (room_id, client_message_id)
@@ -1196,8 +1198,29 @@ class PostgresFoundation:
                 )
                 await connection.execute(
                     """
+                    ALTER TABLE public.samsarix_messages
+                    ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ
+                    """
+                )
+                await connection.execute(
+                    """
+                    ALTER TABLE public.samsarix_messages
+                    ADD COLUMN IF NOT EXISTS pinned_by TEXT CHECK (
+                        pinned_by IS NULL OR char_length(pinned_by) BETWEEN 1 AND 64
+                    )
+                    """
+                )
+                await connection.execute(
+                    """
                     CREATE INDEX IF NOT EXISTS samsarix_messages_thread_order
                     ON public.samsarix_messages (room_id, parent_message_id, created_at DESC, id DESC)
+                    """
+                )
+                await connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS samsarix_messages_pin_order
+                    ON public.samsarix_messages (room_id, pinned_at DESC, id DESC)
+                    WHERE pinned_at IS NOT NULL
                     """
                 )
                 await connection.execute(

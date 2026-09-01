@@ -11,7 +11,7 @@ X-API-Key: <secret>
 Authorization: Bearer <secret>
 ```
 
-When `SAMSARIX_CHAT_TOKEN_SIGNING_SECRET` or `SAMSARIX_CHAT_TOKEN_VERIFICATION_JWKS_FILE` is configured, application clients send a signed token as `Authorization: Bearer <token>`. Tokens bind a `sub` identity to room IDs and `room:read`, `room:write`, or `admin`. Room creation/listing and `/v1/stats` require operator/admin access. Room lookup/history require read access; posting requires write access. Health and readiness remain unauthenticated. See [Identity and room authorization](AUTHORIZATION.md) for issuance, static-JWKS rotation, and the strict claim profile.
+When `SAMSARIX_CHAT_TOKEN_SIGNING_SECRET` or `SAMSARIX_CHAT_TOKEN_VERIFICATION_JWKS_FILE` is configured, application clients send a signed token as `Authorization: Bearer <token>`. Tokens bind a `sub` identity to room IDs and `room:read`, `room:write`, `room:pin`, or `admin`. Room creation/listing and `/v1/stats` require operator/admin access. Room lookup/history require read access; posting requires write access; shared pin changes require read plus pin access. Health and readiness remain unauthenticated. See [Identity and room authorization](AUTHORIZATION.md) for issuance, static-JWKS rotation, and the strict claim profile.
 
 ## HTTP endpoints
 
@@ -51,7 +51,7 @@ Admin-only. Send `{"archived":true}` to make a room read-only and close active c
 
 ### `GET /v1/rooms/{room_id}/export`
 
-Admin-only. Streams `application/x-ndjson`: a `samsarix.room_export` metadata record with `schema_version: 4`, followed by one current `message` record or tombstone per line in chronological order. Schema 4 retains nullable `parent_message_id` from schema 3 and adds the current grouped `reactions` array. The response is an attachment and the operation records `room.export_requested`.
+Admin-only. Streams `application/x-ndjson`: a `samsarix.room_export` metadata record with `schema_version: 5`, followed by one current `message` record or tombstone per line in chronological order. Schema 5 retains nullable `parent_message_id` and grouped `reactions`, then adds nullable `pinned_at` and `pinned_by`. The response is an attachment and the operation records `room.export_requested`.
 
 ### `DELETE /v1/rooms/{room_id}`
 
@@ -84,13 +84,23 @@ Replaces a non-deleted message's content and sets `edited_at`. The signed author
 
 ### `DELETE /v1/rooms/{room_id}/messages/{message_id}`
 
-The signed author or an administrator may delete. Success returns 204, replaces content with an empty string, clears all reaction actors/counts, sets `deleted_at`, and broadcasts `message.deleted` once. Repeating the delete is idempotent. The tombstone stays in chronological history so clients do not reorder surrounding messages; deleted content and reaction identity are not retained by this feature. Administrators may remove content while a room is frozen or archived.
+The signed author or an administrator may delete. Success returns 204, replaces content with an empty string, clears all reaction actors/counts and pin metadata, sets `deleted_at`, and broadcasts `message.deleted` once. Repeating the delete is idempotent. The tombstone stays in chronological history so clients do not reorder surrounding messages; deleted content, reaction identity, and pin identity are not retained by this feature. Administrators may remove content while a room is frozen or archived.
 
 ### `PUT|DELETE /v1/rooms/{room_id}/messages/{message_id}/reactions/{reaction_key}`
 
 Requires `room:write`. `PUT` idempotently adds and `DELETE` idempotently removes one actor's reaction. Keys must match `^[a-z0-9][a-z0-9_+\-]{0,29}$`; a message may have at most 20 distinct keys. Signed users send `{}` and the server uses the token subject. Operator/local callers send `{"reactor":"display-or-stable-id"}`; a token cannot impersonate another reactor.
 
 The response contains the updated message, key, reactor, desired `present` state, whether storage `changed`, and `updated_at`. The reactor identity is therefore visible to authorized room clients and selected webhook receivers even though message history exposes only grouped counts. A real change broadcasts `message.reaction.updated` and can enqueue the same optional signed webhook; an idempotent replay does neither. Unknown, deleted, archived, frozen, muted, banned, capacity, and identity failures use the normal stable error contracts.
+
+### `GET /v1/rooms/{room_id}/messages/pins?limit=50&before={message_id}`
+
+Requires `room:read`. Returns pinned messages newest-pin-first in the normal `MessagePage` envelope, ordered by `(pinned_at, id)`. `next_before` is the last message ID in the current page. The cursor must still identify a pinned message in this room; concurrent unpinning can invalidate it, in which case clients reload the list. Deleted messages never appear because tombstoning clears their pin.
+
+### `PUT|DELETE /v1/rooms/{room_id}/messages/{message_id}/pin`
+
+Requires both `room:read` and the least-privilege room-scoped `room:pin` permission. `PUT` idempotently pins and `DELETE` idempotently unpins one message. Signed users send `{}` and the server binds the action to the token subject. Operator/local callers send `{"pinner":"stable-or-display-id"}` because their shared credential has no end-user identity; they cannot use that supplied value to alter the administrative audit actor.
+
+The response contains the complete current `message`, action actor `pinner`, desired `pinned` state, storage `changed`, and `updated_at`. A real change records metadata-only `message.pin.updated` audit state, broadcasts the event, and may enqueue the same optional signed webhook; an idempotent replay does none of those. Frozen rooms limit changes to administrators, archived rooms reject changes, and muted/banned/deleted/unknown/identity failures use the normal stable errors.
 
 ### `GET /v1/rooms/{room_id}/messages?limit=50&before={message_id}`
 
@@ -103,7 +113,7 @@ Returns messages in chronological order:
 }
 ```
 
-Pages contain the newest matching messages. Message objects include nullable `parent_message_id`, sorted `reactions: [{"key":"ack","count":2}]`, `edited_at`, and `deleted_at`; a deleted message has empty `content` and no reactions. Top-level history intentionally includes replies in the same flat chronological stream for backward compatibility. When `next_before` is non-null, pass it as `before` to fetch the next older page. An unknown or cross-room cursor returns `400 invalid_cursor`.
+Pages contain the newest matching messages. Message objects include nullable `parent_message_id`, sorted `reactions: [{"key":"ack","count":2}]`, nullable `pinned_at`/`pinned_by`, `edited_at`, and `deleted_at`; a deleted message has empty `content`, no reactions, and no pin. Top-level history intentionally includes replies in the same flat chronological stream for backward compatibility. When `next_before` is non-null, pass it as `before` to fetch the next older page. An unknown or cross-room cursor returns `400 invalid_cursor`.
 
 ### `GET /v1/rooms/{room_id}/messages/{parent_message_id}/replies?limit=50&before={message_id}`
 
@@ -257,6 +267,7 @@ Live events are:
 - `message.created`: contains `message` and `idempotent_replay`.
 - `message.updated`: contains the committed current `message`.
 - `message.deleted`: contains the committed message tombstone.
+- `message.pin.updated`: contains the complete current `message`, action actor `pinner`, desired `pinned` state, `changed: true`, and `updated_at`. Replace the message by ID and refresh the pinned list if its ordering matters.
 - `message.reaction.updated`: contains the complete current `message`, reaction `key`, `reactor`, desired `present` state, `changed: true`, and `updated_at`. Replace the message by ID; do not increment a cached count independently.
 - `presence.joined` / `presence.left`: contains `username` and the room connection count when the event was produced; best effort only. Queued or delayed events can predate the count in `ready`, so their counts are not fresh measurements at receipt and are never an authorization input.
 - `typing.started`: contains `username` and `expires_in`; sent to other connections only when a user transitions to typing.

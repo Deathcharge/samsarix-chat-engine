@@ -17,7 +17,7 @@ Set the destination and secret only in the server environment:
 ```text
 SAMSARIX_CHAT_WEBHOOK_URL=https://app.example.com/webhooks/samsarix-chat
 SAMSARIX_CHAT_WEBHOOK_SIGNING_SECRET=whsec_...
-SAMSARIX_CHAT_WEBHOOK_EVENTS=message.created,message.updated,message.deleted,message.reaction.updated,member.moderation.updated
+SAMSARIX_CHAT_WEBHOOK_EVENTS=message.created,message.updated,message.deleted,message.reaction.updated,message.pin.updated,member.moderation.updated
 ```
 
 The URL must use HTTPS and may contain a path, but not credentials, a query, or a fragment. Plain HTTP is accepted only for `localhost`, `127.0.0.1`, or `::1` development receivers. Each attempt resolves the destination once, rejects any disallowed address, and pins the selected address for the connection while preserving the original hostname for TLS verification and `Host`. Remote targets that resolve to loopback, private, link-local, reserved, or other non-public addresses are blocked unless a trusted self-hosted operator explicitly sets `SAMSARIX_CHAT_WEBHOOK_ALLOW_PRIVATE_TARGETS=true`. Production deployments should still restrict the chat process's network egress; application-level checks are not a substitute for an egress firewall or protection from deployment-level routing changes.
@@ -50,6 +50,8 @@ The minified UTF-8 body has a stable envelope:
       "client_message_id": null,
       "parent_message_id": null,
       "reactions": [],
+      "pinned_at": null,
+      "pinned_by": null,
       "edited_at": null,
       "deleted_at": null
     }
@@ -57,7 +59,7 @@ The minified UTF-8 body has a stable envelope:
 }
 ```
 
-For a threaded reply, `data.message.parent_message_id` is the top-level message ID; top-level messages use null. `message.updated` and `message.deleted` add `data.actor`; the deleted message is the committed empty-content, reaction-free tombstone. `message.reaction.updated` contains the complete current message plus `key`, `reactor`, `present`, `changed`, and `updated_at`; only real changes enqueue it. `member.moderation.updated` contains `data.actor` plus `data.moderation` with the room, subject, nullable mute/ban expiries, and update time. Event selection happens before outbox insertion, so unselected events consume no delivery storage.
+For a threaded reply, `data.message.parent_message_id` is the top-level message ID; top-level messages use null. `message.updated` and `message.deleted` add `data.actor`; the deleted message is the committed empty-content, reaction-free, unpinned tombstone. `message.reaction.updated` contains the complete current message plus `key`, `reactor`, `present`, `changed`, and `updated_at`. `message.pin.updated` contains the complete current message plus `pinner`, `pinned`, `changed`, and `updated_at`. Only real state changes enqueue either mutation event. `member.moderation.updated` contains `data.actor` plus `data.moderation` with the room, subject, nullable mute/ban expiries, and update time. Event selection happens before outbox insertion, so unselected events consume no delivery storage.
 
 Webhook payloads contain message content and stable subject/display identifiers. Configure a destination only when that transfer fits the deployment's privacy policy, retention rules, and user disclosures. Payload copies remain in the bounded SQLite outbox until pruning or resource deletion; the operations API intentionally returns metadata only.
 

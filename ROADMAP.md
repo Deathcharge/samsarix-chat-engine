@@ -144,6 +144,17 @@ This milestone serves named support, classroom, and incident journeys without ad
 
 This milestone supports low-noise acknowledgement, resolution, escalation, and lightweight feedback in support, classroom, incident, and private-community rooms. It does not host custom emoji assets, rank content, or provide anonymous polling.
 
+## v0.16 — least-privilege shared message pins
+
+- [x] add idempotent shared pin/unpin endpoints and a newest-first paginated room pin list;
+- [x] introduce room-scoped `room:pin` authorization without granting deployment-wide administration;
+- [x] expose nullable pin time/actor metadata plus realtime and optional signed-webhook updates;
+- [x] record metadata-only pin audit events and clear/redact pin state and actor identity on tombstone or retention;
+- [x] migrate SQLite and PostgreSQL with indexed pin-time ordering and advance versioned room exports;
+- [x] expose `listPinnedMessages()`, `pinMessage()`, and `unpinMessage()` through unpublished TypeScript SDK 0.7.0.
+
+This milestone serves accepted support resolutions, classroom resources, incident runbooks/decisions, and community guidelines without adding private bookmarks, attachments, notifications, or a role database. The host application decides who receives `room:pin`; Samsarix enforces that signed decision per room.
+
 ## Deliberate non-goals
 
 - no built-in password database, social graph, billing, or end-user frontend;
