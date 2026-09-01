@@ -79,7 +79,7 @@ def test_http_attachment_only_round_trip_idempotency_edit_and_export(
     assert replay.status_code == 200 and replay.json() == created.json()
     assert edited.json()["attachments"] == [ATTACHMENT]
     assert history[0]["attachments"] == [ATTACHMENT]
-    assert export[0]["schema_version"] == 7
+    assert export[0]["schema_version"] == 8
     assert export[1]["message"]["attachments"] == [ATTACHMENT]
 
 
@@ -143,6 +143,6 @@ def test_schema_v9_migration_adds_empty_attachment_references_without_rewriting_
     with closing(sqlite3.connect(database)) as connection:
         version = connection.execute("PRAGMA user_version").fetchone()[0]
         stored = connection.execute("SELECT attachments_json FROM messages WHERE id = 'message-1'").fetchone()[0]
-    assert version == 10
+    assert version == 11
     assert message["content"] == "preserved" and message["attachments"] == []
     assert stored == "[]"

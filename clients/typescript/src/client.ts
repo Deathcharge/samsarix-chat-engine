@@ -4,6 +4,7 @@
 import { normalizeAttachmentReferences } from "./attachments.js";
 import { SamsarixApiError } from "./errors.js";
 import { normalizeMessageMetadata } from "./metadata.js";
+import { normalizeMentionedSubjects } from "./mentions.js";
 import { RoomSession } from "./room-session.js";
 import type {
   ChatMessage,
@@ -173,6 +174,8 @@ export class SamsarixChatClient {
   async createMessage(roomId: string, payload: MessageCreate, idempotencyKey?: string): Promise<ChatMessage> {
     const attachments =
       payload.attachments === undefined ? undefined : normalizeAttachmentReferences(payload.attachments);
+    const mentionedSubjects =
+      payload.mentioned_subjects === undefined ? undefined : normalizeMentionedSubjects(payload.mentioned_subjects);
     if ((payload.content ?? "").trim().length === 0 && (attachments?.length ?? 0) === 0) {
       throw new TypeError("content or at least one attachment is required");
     }
@@ -180,6 +183,7 @@ export class SamsarixChatClient {
       ...payload,
       ...(payload.metadata === undefined ? {} : { metadata: normalizeMessageMetadata(payload.metadata) }),
       ...(attachments === undefined ? {} : { attachments }),
+      ...(mentionedSubjects === undefined ? {} : { mentioned_subjects: mentionedSubjects }),
     };
     return this.request<ChatMessage>(`/v1/rooms/${encodeURIComponent(roomId)}/messages`, {
       method: "POST",
@@ -224,6 +228,7 @@ export class SamsarixChatClient {
     messageId: string,
     content: string,
     metadata?: import("./types.js").MessageMetadata,
+    mentionedSubjects?: readonly string[],
   ): Promise<ChatMessage> {
     return this.request<ChatMessage>(
       `/v1/rooms/${encodeURIComponent(roomId)}/messages/${encodeURIComponent(messageId)}`,
@@ -232,6 +237,9 @@ export class SamsarixChatClient {
         body: {
           content,
           ...(metadata === undefined ? {} : { metadata: normalizeMessageMetadata(metadata) }),
+          ...(mentionedSubjects === undefined
+            ? {}
+            : { mentioned_subjects: normalizeMentionedSubjects(mentionedSubjects) }),
         },
       },
     );

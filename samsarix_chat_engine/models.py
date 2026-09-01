@@ -23,6 +23,7 @@ ATTACHMENT_MEDIA_TYPE_PATTERN = r"^[a-z0-9][a-z0-9!#$&^_.+\-]{0,62}/[a-z0-9][a-z
 ATTACHMENT_SHA256_PATTERN = r"^[a-f0-9]{64}$"
 MESSAGE_ATTACHMENTS_MAX_COUNT = 5
 MESSAGE_ATTACHMENTS_MAX_BYTES = 8_192
+MESSAGE_MENTIONS_MAX_COUNT = 10
 READ_STATE_QUERY_MAX_ROOMS = 100
 
 MessageMetadataValue = str | int | float | bool | None
@@ -113,6 +114,31 @@ def validate_attachment_references(value: list[AttachmentReference]) -> list[Att
     return value
 
 
+def validate_mentioned_subjects(value: Any) -> list[str]:
+    """Return an ordered, unique set of stable host-application subjects."""
+
+    if not isinstance(value, list):
+        raise ValueError("mentioned_subjects must be an array")
+    if len(value) > MESSAGE_MENTIONS_MAX_COUNT:
+        raise ValueError(f"mentioned_subjects must contain at most {MESSAGE_MENTIONS_MAX_COUNT} items")
+    if any(not isinstance(subject, str) for subject in value):
+        raise ValueError("mentioned_subjects must contain strings")
+    subjects = list(value)
+    if any(not 1 <= len(subject) <= 64 for subject in subjects):
+        raise ValueError("mentioned subjects must be between 1 and 64 characters")
+    if any(subject != subject.strip() for subject in subjects):
+        raise ValueError("mentioned subjects must not have surrounding whitespace")
+    if len(subjects) != len(set(subjects)):
+        raise ValueError("mentioned_subjects must not contain duplicates")
+    return subjects
+
+
+def validate_optional_mentioned_subjects(value: Any) -> list[str] | None:
+    """Validate an update value while preserving omission/null as no change."""
+
+    return None if value is None else validate_mentioned_subjects(value)
+
+
 def validate_read_state_query_room_ids(value: list[str]) -> list[str]:
     """Return a bounded unique ordered set of canonical room identifiers."""
 
@@ -179,9 +205,11 @@ class MessageCreate(APIModel):
     parent_message_id: str | None = Field(default=None, min_length=1, max_length=128)
     metadata: MessageMetadata = Field(default_factory=dict)
     attachments: list[AttachmentReference] = Field(default_factory=list)
+    mentioned_subjects: list[str] = Field(default_factory=list)
 
     _validate_metadata = field_validator("metadata")(validate_message_metadata)
     _validate_attachments = field_validator("attachments")(validate_attachment_references)
+    _validate_mentions = field_validator("mentioned_subjects", mode="before")(validate_mentioned_subjects)
 
     @model_validator(mode="after")
     def require_content_or_attachment(self) -> MessageCreate:
@@ -212,11 +240,13 @@ class Message(APIModel):
     pinned_by: str | None = Field(default=None, min_length=1, max_length=64)
     metadata: MessageMetadata = Field(default_factory=dict)
     attachments: list[AttachmentReference] = Field(default_factory=list)
+    mentioned_subjects: list[str] = Field(default_factory=list)
     edited_at: datetime | None = None
     deleted_at: datetime | None = None
 
     _validate_metadata = field_validator("metadata")(validate_message_metadata)
     _validate_attachments = field_validator("attachments")(validate_attachment_references)
+    _validate_mentions = field_validator("mentioned_subjects", mode="before")(validate_mentioned_subjects)
 
     @model_validator(mode="after")
     def require_complete_pin_metadata(self) -> Message:
@@ -228,6 +258,8 @@ class Message(APIModel):
             raise ValueError("deleted messages cannot retain application metadata")
         if self.deleted_at is not None and self.attachments:
             raise ValueError("deleted messages cannot retain attachment references")
+        if self.deleted_at is not None and self.mentioned_subjects:
+            raise ValueError("deleted messages cannot retain mentioned subjects")
         return self
 
 
@@ -235,8 +267,10 @@ class MessageUpdate(_MessageContentPayload):
     """Author or administrator message-content update."""
 
     metadata: MessageMetadata | None = None
+    mentioned_subjects: list[str] | None = None
 
     _validate_metadata = field_validator("metadata")(validate_optional_message_metadata)
+    _validate_mentions = field_validator("mentioned_subjects", mode="before")(validate_optional_mentioned_subjects)
 
 
 class ReactionActor(APIModel):
@@ -413,9 +447,11 @@ class WebSocketMessage(APIModel):
     parent_message_id: str | None = Field(default=None, min_length=1, max_length=128)
     metadata: MessageMetadata = Field(default_factory=dict)
     attachments: list[AttachmentReference] = Field(default_factory=list)
+    mentioned_subjects: list[str] = Field(default_factory=list)
 
     _validate_metadata = field_validator("metadata")(validate_message_metadata)
     _validate_attachments = field_validator("attachments")(validate_attachment_references)
+    _validate_mentions = field_validator("mentioned_subjects", mode="before")(validate_mentioned_subjects)
 
     @model_validator(mode="after")
     def require_content_or_attachment(self) -> WebSocketMessage:

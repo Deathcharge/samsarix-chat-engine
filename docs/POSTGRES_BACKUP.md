@@ -8,7 +8,7 @@ Samsarix does not copy PostgreSQL files or hide database recovery behind an appl
 
 The `PostgreSQL logical restore rehearsal` workflow provisions a disposable PostgreSQL 18.6 service and then:
 
-1. initializes current schema 13 through the real Samsarix application;
+1. initializes current schema 14 through the real Samsarix application;
 2. creates rooms, edited and tombstoned messages, searchable current content, a member read cursor, archived/frozen lifecycle history, audit metadata, realtime events, cursors, and identity sequences through HTTP/application behavior;
 3. stops the source application cleanly;
 4. creates a whole-database custom-format archive using `pg_dump --format=custom --no-owner --no-privileges`;
@@ -20,7 +20,7 @@ The probe refuses remote hosts, URL query/fragment overrides, libpq routing envi
 
 The separate `PostgreSQL physical PITR rehearsal` workflow also provisions a disposable PostgreSQL 18.6 cluster and:
 
-1. enables continuous WAL archiving, provisions a separate application role, and initializes current schema 13 through Samsarix;
+1. enables continuous WAL archiving, provisions a separate application role, and initializes current schema 14 through Samsarix;
 2. records baseline application state, takes a plain whole-cluster `pg_basebackup` with streamed WAL and SHA-256 manifest checksums, and requires `pg_verifybackup --exit-on-error` to accept it;
 3. commits another message after the base backup, creates a named restore point, then commits a divergent message after that target;
 4. forces and confirms archival of the WAL segment containing the post-target write;

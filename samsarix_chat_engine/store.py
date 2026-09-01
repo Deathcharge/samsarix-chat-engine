@@ -39,7 +39,7 @@ from .models import (
 )
 
 T = TypeVar("T")
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 logger = logging.getLogger(__name__)
 
 
@@ -353,6 +353,7 @@ class ChatStorage(Protocol):
         content: str,
         metadata: MessageMetadata,
         attachments: list[AttachmentReference],
+        mentioned_subjects: list[str],
         client_message_id: str | None,
         parent_message_id: str | None,
         allow_frozen: bool,
@@ -368,6 +369,7 @@ class ChatStorage(Protocol):
         actor: str,
         content: str,
         metadata: MessageMetadata | None,
+        mentioned_subjects: list[str] | None,
         is_admin: bool,
         member_subject: str | None = None,
     ) -> Message: ...
@@ -602,6 +604,7 @@ class ChatStore:
         content: str,
         metadata: MessageMetadata | None = None,
         attachments: list[AttachmentReference] | None = None,
+        mentioned_subjects: list[str] | None = None,
         client_message_id: str | None,
         parent_message_id: str | None = None,
         allow_frozen: bool,
@@ -616,6 +619,7 @@ class ChatStore:
                 content,
                 metadata or {},
                 attachments or [],
+                mentioned_subjects or [],
                 client_message_id,
                 parent_message_id,
                 allow_frozen,
@@ -631,6 +635,7 @@ class ChatStore:
         actor: str,
         content: str,
         metadata: MessageMetadata | None = None,
+        mentioned_subjects: list[str] | None = None,
         is_admin: bool,
         member_subject: str | None = None,
     ) -> Message:
@@ -642,6 +647,7 @@ class ChatStore:
                 actor,
                 content,
                 metadata,
+                mentioned_subjects,
                 is_admin,
                 member_subject,
             )
@@ -819,7 +825,7 @@ class ChatStore:
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
                        parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json,
-                       attachments_json, edited_at, deleted_at
+                       attachments_json, mentioned_subjects_json, edited_at, deleted_at
                 FROM messages WHERE room_id = ? ORDER BY created_at, id
                 """,
                 (room_id,),
@@ -945,6 +951,9 @@ class ChatStore:
                     attachments_json TEXT NOT NULL DEFAULT '[]' CHECK (
                         length(CAST(attachments_json AS BLOB)) <= 8192
                     ),
+                    mentioned_subjects_json TEXT NOT NULL DEFAULT '[]' CHECK (
+                        length(CAST(mentioned_subjects_json AS BLOB)) <= 4096
+                    ),
                     UNIQUE(room_id, client_message_id)
                 );
 
@@ -980,6 +989,8 @@ class ChatStore:
                 connection.execute("ALTER TABLE messages ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'")
             if "attachments_json" not in message_columns:
                 connection.execute("ALTER TABLE messages ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'")
+            if "mentioned_subjects_json" not in message_columns:
+                connection.execute("ALTER TABLE messages ADD COLUMN mentioned_subjects_json TEXT NOT NULL DEFAULT '[]'")
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS messages_thread_order "
                 "ON messages(room_id, parent_message_id, created_at DESC, id DESC)"
@@ -1163,6 +1174,7 @@ class ChatStore:
         content: str,
         metadata: MessageMetadata,
         attachments: list[AttachmentReference],
+        mentioned_subjects: list[str],
         client_message_id: str | None,
         parent_message_id: str | None,
         allow_frozen: bool,
@@ -1185,7 +1197,7 @@ class ChatStore:
                     """
                     SELECT id, room_id, sender, content, created_at, client_message_id,
                            parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json,
-                           attachments_json, edited_at, deleted_at
+                           attachments_json, mentioned_subjects_json, edited_at, deleted_at
                     FROM messages WHERE room_id = ? AND client_message_id = ?
                     """,
                     (room_id, client_message_id),
@@ -1218,13 +1230,14 @@ class ChatStore:
                 parent_message_id=parent_message_id,
                 metadata=metadata,
                 attachments=attachments,
+                mentioned_subjects=mentioned_subjects,
             )
             connection.execute(
                 """
                 INSERT INTO messages (
                     id, room_id, sender, author_subject, content, created_at, client_message_id,
-                    parent_message_id, metadata_json, attachments_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    parent_message_id, metadata_json, attachments_json, mentioned_subjects_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message.id,
@@ -1249,6 +1262,7 @@ class ChatStore:
                         sort_keys=True,
                         separators=(",", ":"),
                     ),
+                    json.dumps(message.mentioned_subjects, ensure_ascii=False, separators=(",", ":")),
                 ),
             )
             self._trim_messages(connection, room_id, now=message.created_at)
@@ -1256,7 +1270,7 @@ class ChatStore:
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
                        parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json,
-                       attachments_json, edited_at, deleted_at
+                       attachments_json, mentioned_subjects_json, edited_at, deleted_at
                 FROM messages WHERE id = ?
                 """,
                 (message.id,),
@@ -1281,6 +1295,7 @@ class ChatStore:
         actor: str,
         content: str,
         metadata: MessageMetadata | None,
+        mentioned_subjects: list[str] | None,
         is_admin: bool,
         member_subject: str | None,
     ) -> Message:
@@ -1298,7 +1313,7 @@ class ChatStore:
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
                        parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json,
-                       attachments_json, edited_at, deleted_at
+                       attachments_json, mentioned_subjects_json, edited_at, deleted_at
                 FROM messages WHERE room_id = ? AND id = ?
                 """,
                 (room_id, message_id),
@@ -1312,6 +1327,7 @@ class ChatStore:
             edited_at = datetime.now(timezone.utc)
             connection.execute(
                 "UPDATE messages SET content = ?, metadata_json = COALESCE(?, metadata_json), "
+                "mentioned_subjects_json = COALESCE(?, mentioned_subjects_json), "
                 "edited_at = ? WHERE id = ?",
                 (
                     content,
@@ -1323,6 +1339,9 @@ class ChatStore:
                         separators=(",", ":"),
                     )
                     if metadata is not None
+                    else None,
+                    json.dumps(mentioned_subjects, ensure_ascii=False, separators=(",", ":"))
+                    if mentioned_subjects is not None
                     else None,
                     edited_at.isoformat(),
                     message_id,
@@ -1339,7 +1358,7 @@ class ChatStore:
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
                        parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json,
-                       attachments_json, edited_at, deleted_at
+                       attachments_json, mentioned_subjects_json, edited_at, deleted_at
                 FROM messages WHERE id = ?
                 """,
                 (message_id,),
@@ -1377,7 +1396,7 @@ class ChatStore:
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
                        parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json,
-                       attachments_json, edited_at, deleted_at
+                       attachments_json, mentioned_subjects_json, edited_at, deleted_at
                 FROM messages WHERE room_id = ? AND id = ?
                 """,
                 (room_id, message_id),
@@ -1392,7 +1411,7 @@ class ChatStore:
             connection.execute("DELETE FROM message_reactions WHERE message_id = ?", (message_id,))
             connection.execute(
                 "UPDATE messages SET content = '', reactions_json = '[]', pinned_at = NULL, metadata_json = '{}', "
-                "attachments_json = '[]', "
+                "attachments_json = '[]', mentioned_subjects_json = '[]', "
                 "pinned_by = NULL, deleted_at = ? WHERE id = ?",
                 (deleted_at.isoformat(), message_id),
             )
@@ -1407,7 +1426,7 @@ class ChatStore:
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
                        parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json,
-                       attachments_json, edited_at, deleted_at
+                       attachments_json, mentioned_subjects_json, edited_at, deleted_at
                 FROM messages WHERE id = ?
                 """,
                 (message_id,),
@@ -1449,7 +1468,7 @@ class ChatStore:
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
                        parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json,
-                       attachments_json, edited_at, deleted_at
+                       attachments_json, mentioned_subjects_json, edited_at, deleted_at
                 FROM messages WHERE room_id = ? AND id = ?
                 """,
                 (room_id, message_id),
@@ -1511,7 +1530,7 @@ class ChatStore:
                     """
                     SELECT id, room_id, sender, content, created_at, client_message_id,
                            parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json,
-                           attachments_json, edited_at, deleted_at
+                           attachments_json, mentioned_subjects_json, edited_at, deleted_at
                     FROM messages WHERE id = ?
                     """,
                     (message_id,),
@@ -1561,7 +1580,7 @@ class ChatStore:
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
                        parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json,
-                       attachments_json, edited_at, deleted_at
+                       attachments_json, mentioned_subjects_json, edited_at, deleted_at
                 FROM messages WHERE room_id = ? AND id = ?
                 """,
                 (room_id, message_id),
@@ -1588,7 +1607,7 @@ class ChatStore:
                     """
                     SELECT id, room_id, sender, content, created_at, client_message_id,
                            parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json,
-                           attachments_json, edited_at, deleted_at
+                           attachments_json, mentioned_subjects_json, edited_at, deleted_at
                     FROM messages WHERE id = ?
                     """,
                     (message_id,),
@@ -1781,7 +1800,7 @@ class ChatStore:
                     """
                     SELECT id, room_id, sender, content, created_at, client_message_id,
                            parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json,
-                           attachments_json, edited_at, deleted_at
+                           attachments_json, mentioned_subjects_json, edited_at, deleted_at
                     FROM messages
                     WHERE room_id = ? AND (created_at < ? OR (created_at = ? AND id < ?))
                     ORDER BY created_at DESC, id DESC
@@ -1794,7 +1813,7 @@ class ChatStore:
                     """
                     SELECT id, room_id, sender, content, created_at, client_message_id,
                            parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json,
-                           attachments_json, edited_at, deleted_at
+                           attachments_json, mentioned_subjects_json, edited_at, deleted_at
                     FROM messages
                     WHERE room_id = ?
                     ORDER BY created_at DESC, id DESC
@@ -1832,7 +1851,7 @@ class ChatStore:
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
                        parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json,
-                       attachments_json, edited_at, deleted_at
+                       attachments_json, mentioned_subjects_json, edited_at, deleted_at
                 FROM messages
                 WHERE room_id = ? AND pinned_at IS NOT NULL
                   AND (? IS NULL OR pinned_at < ? OR (pinned_at = ? AND id < ?))
@@ -1889,7 +1908,7 @@ class ChatStore:
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
                        parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json,
-                       attachments_json, edited_at, deleted_at
+                       attachments_json, mentioned_subjects_json, edited_at, deleted_at
                 FROM messages
                 WHERE room_id = ? AND parent_message_id = ?
                   AND (? IS NULL OR created_at < ? OR (created_at = ? AND id < ?))
@@ -1937,7 +1956,7 @@ class ChatStore:
                 """
                 SELECT id, room_id, sender, content, created_at, client_message_id,
                        parent_message_id, reactions_json, pinned_at, pinned_by, metadata_json,
-                       attachments_json, edited_at, deleted_at
+                       attachments_json, mentioned_subjects_json, edited_at, deleted_at
                 FROM messages
                 WHERE room_id = ?
                   AND deleted_at IS NULL
@@ -2530,6 +2549,7 @@ class ChatStore:
             pinned_by=row["pinned_by"],
             metadata=json.loads(row["metadata_json"]),
             attachments=[AttachmentReference.model_validate(item) for item in json.loads(row["attachments_json"])],
+            mentioned_subjects=list(json.loads(row["mentioned_subjects_json"])),
             edited_at=datetime.fromisoformat(row["edited_at"]) if row["edited_at"] else None,
             deleted_at=datetime.fromisoformat(row["deleted_at"]) if row["deleted_at"] else None,
         )

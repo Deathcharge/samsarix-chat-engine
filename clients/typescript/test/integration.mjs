@@ -60,6 +60,7 @@ const created = await client.createMessage(
       size_bytes: 512,
       sha256: "a".repeat(64),
     }],
+    mentioned_subjects: ["sdk-oncall", "sdk-lead"],
   },
   "sdk-http-1",
 );
@@ -67,6 +68,7 @@ assert.equal(created.sender, "sdk-user");
 assert.equal(created.parent_message_id, null);
 assert.deepEqual(created.metadata, { priority: 2, "ticket.id": "SDK-1" });
 assert.deepEqual(created.attachments?.map((attachment) => attachment.id), ["sdk-trace-http"]);
+assert.deepEqual(created.mentioned_subjects, ["sdk-oncall", "sdk-lead"]);
 const httpReply = await client.createMessage("sdk-room", {
   content: "TypeScript HTTP reply",
   parent_message_id: created.id,
@@ -98,12 +100,13 @@ session.sendMessage("", "sdk-ws-1", { source: "sdk-smoke" }, [{
   name: "websocket-trace.txt",
   media_type: "text/plain",
   size_bytes: 128,
-}]);
+}], ["sdk-oncall"]);
 const createdEvent = await websocketCreated;
 assert.equal(createdEvent.message.client_message_id, "sdk-ws-1");
 assert.deepEqual(createdEvent.message.metadata, { source: "sdk-smoke" });
 assert.equal(createdEvent.message.content, "");
 assert.deepEqual(createdEvent.message.attachments?.map((attachment) => attachment.id), ["sdk-trace-ws"]);
+assert.deepEqual(createdEvent.message.mentioned_subjects, ["sdk-oncall"]);
 const websocketReply = nextEvent(session, "message.created");
 session.sendReply(created.id, "TypeScript WebSocket reply", "sdk-ws-reply-1");
 assert.equal((await websocketReply).message.parent_message_id, created.id);
@@ -136,10 +139,11 @@ assert.equal(unpinned.message.pinned_at, null);
 assert.equal((await unpinEvent).pinned, false);
 
 const updatedEvent = nextEvent(session, "message.updated");
-const updated = await client.updateMessage("sdk-room", created.id, "TypeScript edited");
+const updated = await client.updateMessage("sdk-room", created.id, "TypeScript edited", undefined, ["sdk-manager"]);
 assert.equal(updated.content, "TypeScript edited");
 assert.deepEqual(updated.metadata, { priority: 2, "ticket.id": "SDK-1" });
 assert.deepEqual(updated.attachments, created.attachments);
+assert.deepEqual(updated.mentioned_subjects, ["sdk-manager"]);
 assert.equal((await updatedEvent).message.id, created.id);
 assert.deepEqual(
   (await client.searchMessages("sdk-room", "typescript http")).items.map((message) => message.id),
@@ -151,12 +155,14 @@ await client.deleteMessage("sdk-room", created.id);
 const deletedMessageEvent = await deletedEvent;
 assert.equal(deletedMessageEvent.message.content, "");
 assert.deepEqual(deletedMessageEvent.message.attachments, []);
+assert.deepEqual(deletedMessageEvent.message.mentioned_subjects, []);
 
 const history = await client.listMessages("sdk-room");
 const tombstone = history.items.find((message) => message.id === created.id);
 assert.equal(tombstone?.content, "");
 assert.deepEqual(tombstone?.metadata, {});
 assert.deepEqual(tombstone?.attachments, []);
+assert.deepEqual(tombstone?.mentioned_subjects, []);
 assert.ok(tombstone?.deleted_at);
 
 // Close the native transport with a retryable application code, then hold the
@@ -191,7 +197,7 @@ session.sendMessage("Live after reconnect", "sdk-resumed-1");
 assert.equal((await resumed).message.client_message_id, "sdk-resumed-1");
 session.close();
 
-console.log("typescript_client_http=ok metadata=ok attachments=ok inbox=ok threads=ok reactions=ok pins=ok search=ok websocket=ok activation=ok reconnect_history=ok resumed_delivery=ok edit_delete=ok");
+console.log("typescript_client_http=ok metadata=ok attachments=ok mentions=ok inbox=ok threads=ok reactions=ok pins=ok search=ok websocket=ok activation=ok reconnect_history=ok resumed_delivery=ok edit_delete=ok");
 
 function nextEvent(roomSession, type) {
   return new Promise((resolve, reject) => {

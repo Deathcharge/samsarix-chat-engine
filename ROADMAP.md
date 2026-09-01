@@ -188,6 +188,16 @@ This milestone serves support evidence, classroom resources and incident artifac
 
 This milestone makes a host-owned support, classroom or incident inbox practical without adding a Samsarix membership/assignment database or copying message content into a second response. The host supplies authorized room IDs from its own domain model, merges returned state with its own labels and assignments, and loads one transcript on demand.
 
+## v0.20 — bounded host-resolved message mentions
+
+- [x] add an ordered, unique `mentioned_subjects` array with a conservative ten-target limit to HTTP and WebSocket creation;
+- [x] let authors/admins preserve, replace, or clear targets during a normal message edit;
+- [x] persist mentions through SQLite, PostgreSQL, history, replies, search, pins, export, realtime and selected message webhooks;
+- [x] clear targets on tombstone deletion and scrub them from retained PostgreSQL message events and prior webhook bodies;
+- [x] expose client-side validation through unpublished TypeScript SDK 0.11.0 and document host-owned membership, preference and delivery responsibilities.
+
+This milestone supports support-case escalation, classroom attention and incident-response routing without parsing `@` display text or adding a membership directory, device registry, push/email provider, notification preferences, or delivery-receipt system. Mention IDs are untrusted host-resolved data and never grant access.
+
 ## Deliberate non-goals
 
 - no built-in password database, social graph, billing, or end-user frontend;

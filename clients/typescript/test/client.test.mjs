@@ -123,6 +123,37 @@ test("attachment references support attachment-only messages and reject unsafe d
   assert.equal(requests.length, 1);
 });
 
+test("message mentions are validated before HTTP creation and updates", async () => {
+  const requests = [];
+  const client = new SamsarixChatClient({
+    baseUrl: "https://chat.example",
+    credential: { token: "room-token" },
+    fetch: async (url, init) => {
+      requests.push({ url: String(url), init });
+      return jsonResponse({});
+    },
+  });
+
+  await client.createMessage("support", { content: "Escalating", mentioned_subjects: ["oncall", "lead"] });
+  await client.updateMessage("support", "message-1", "Manager engaged", undefined, ["manager"]);
+  assert.deepEqual(JSON.parse(requests[0].init.body).mentioned_subjects, ["oncall", "lead"]);
+  assert.deepEqual(JSON.parse(requests[1].init.body).mentioned_subjects, ["manager"]);
+
+  await assert.rejects(
+    client.createMessage("support", { content: "bad", mentioned_subjects: ["oncall", "oncall"] }),
+    TypeError,
+  );
+  await assert.rejects(
+    client.createMessage("support", { content: "bad", mentioned_subjects: [" oncall"] }),
+    TypeError,
+  );
+  await assert.rejects(
+    client.updateMessage("support", "message-1", "bad", undefined, Array.from({ length: 11 }, (_, i) => `u-${i}`)),
+    RangeError,
+  );
+  assert.equal(requests.length, 2);
+});
+
 test("concurrent operations share one in-flight credential refresh", async () => {
   let credentials = 0;
   let releaseCredential;

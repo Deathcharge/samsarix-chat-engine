@@ -4,6 +4,7 @@
 import { isAttachmentReferences, normalizeAttachmentReferences } from "./attachments.js";
 import { SamsarixConnectionError } from "./errors.js";
 import { isMessageMetadata, normalizeMessageMetadata } from "./metadata.js";
+import { isMentionedSubjects, normalizeMentionedSubjects } from "./mentions.js";
 import type { SamsarixChatClient } from "./client.js";
 import type {
   AttachmentReference,
@@ -138,6 +139,7 @@ export class RoomSession {
     clientMessageId?: string,
     metadata?: MessageMetadata,
     attachments?: AttachmentReference[],
+    mentionedSubjects?: readonly string[],
   ): void {
     const normalizedAttachments =
       attachments === undefined ? undefined : normalizeAttachmentReferences(attachments);
@@ -156,6 +158,9 @@ export class RoomSession {
       ...(clientMessageId === undefined ? {} : { client_message_id: clientMessageId }),
       ...(metadata === undefined ? {} : { metadata: normalizeMessageMetadata(metadata) }),
       ...(normalizedAttachments === undefined ? {} : { attachments: normalizedAttachments }),
+      ...(mentionedSubjects === undefined
+        ? {}
+        : { mentioned_subjects: normalizeMentionedSubjects(mentionedSubjects) }),
     });
   }
 
@@ -165,6 +170,7 @@ export class RoomSession {
     clientMessageId?: string,
     metadata?: MessageMetadata,
     attachments?: AttachmentReference[],
+    mentionedSubjects?: readonly string[],
   ): void {
     if (parentMessageId.length === 0 || parentMessageId.length > 128) {
       throw new RangeError("parentMessageId must be between 1 and 128 characters");
@@ -187,6 +193,9 @@ export class RoomSession {
       ...(clientMessageId === undefined ? {} : { client_message_id: clientMessageId }),
       ...(metadata === undefined ? {} : { metadata: normalizeMessageMetadata(metadata) }),
       ...(normalizedAttachments === undefined ? {} : { attachments: normalizedAttachments }),
+      ...(mentionedSubjects === undefined
+        ? {}
+        : { mentioned_subjects: normalizeMentionedSubjects(mentionedSubjects) }),
     });
   }
 
@@ -567,6 +576,7 @@ function isChatMessage(value: unknown): boolean {
     (!("pinned_by" in value) || isNullableStringField(value, "pinned_by")) &&
     (!("metadata" in value) || isMessageMetadata(value.metadata)) &&
     (!("attachments" in value) || isAttachmentReferences(value.attachments)) &&
+    (!("mentioned_subjects" in value) || isMentionedSubjects(value.mentioned_subjects)) &&
     isNullableStringField(value, "edited_at") &&
     isNullableStringField(value, "deleted_at")
   );

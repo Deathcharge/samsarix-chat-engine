@@ -772,7 +772,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         def export_lines() -> Iterator[str]:
             metadata = {
                 "type": "samsarix.room_export",
-                "schema_version": 7,
+                "schema_version": 8,
                 "exported_at": exported_at.isoformat(),
                 "room": room.model_dump(mode="json"),
             }
@@ -999,6 +999,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 content=payload.content,
                 metadata=payload.metadata,
                 attachments=payload.attachments,
+                mentioned_subjects=payload.mentioned_subjects,
                 client_message_id=idempotency_key or payload.client_message_id,
                 parent_message_id=payload.parent_message_id,
                 allow_frozen=principal.is_admin,
@@ -1054,6 +1055,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 actor=_audit_actor(principal),
                 content=payload.content,
                 metadata=payload.metadata,
+                mentioned_subjects=payload.mentioned_subjects,
                 is_admin=principal.is_admin,
                 member_subject=None if principal.is_admin else principal.subject,
             )
@@ -1895,6 +1897,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         content=command.content,
                         metadata=command.metadata,
                         attachments=command.attachments,
+                        mentioned_subjects=command.mentioned_subjects,
                         client_message_id=command.client_message_id,
                         parent_message_id=command.parent_message_id,
                         allow_frozen=principal.is_admin,

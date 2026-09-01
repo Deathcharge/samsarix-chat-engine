@@ -55,6 +55,8 @@ export interface ChatMessage {
   metadata?: MessageMetadata;
   /** Opaque host-owned file descriptors; released 0.12 servers omit them. */
   attachments?: AttachmentReference[];
+  /** Ordered host-resolved subjects to notify; released 0.12 servers omit them. */
+  mentioned_subjects?: string[];
   edited_at: string | null;
   deleted_at: string | null;
 }
@@ -88,6 +90,7 @@ export interface MessageCreate {
   parent_message_id?: string;
   metadata?: MessageMetadata;
   attachments?: AttachmentReference[];
+  mentioned_subjects?: string[];
 }
 
 export interface MessagePage {
