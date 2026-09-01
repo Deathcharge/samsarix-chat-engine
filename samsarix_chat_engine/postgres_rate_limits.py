@@ -76,6 +76,12 @@ class PostgresRateLimiter:
             if decision is not None:
                 return decision
 
+        # The optimistic UPDATE/SELECT above can briefly wait on or acquire a
+        # bucket-row lock even when it ultimately observes no usable row. End
+        # that transaction before taking the capacity lock: maintenance takes
+        # the capacity lock before deleting bucket rows, so retaining a row
+        # lock here would invert the order and permit a boundary-time deadlock.
+        async with self.foundation.transaction() as connection:
             # Only new-cardinality work takes the global capacity lock. Hot
             # identities contend on their own bucket row rather than a global
             # request-path mutex.
