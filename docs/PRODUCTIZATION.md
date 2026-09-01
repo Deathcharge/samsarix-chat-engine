@@ -2,7 +2,19 @@
 
 Last updated: 2026-09-01
 
-## Current v0.13 engineering status
+## Current v0.14 engineering status
+
+The host-owned attachment-reference slice starts from clean synchronized `main` at merged PR #61 (`22fa265`) and its successful 19-job exact-main run: **708 Python tests, two skips, 90.06% coverage**, 121 live PostgreSQL tests, 61 SDK tests, package/wheel, container, restore/PITR, load and Kubernetes gates. Current Sendbird and Stream contracts accept externally hosted file URLs, while OWASP recommends isolating upload storage and applying authorization, size, type and scanning controls; Google Cloud and Azure explicitly treat signed object URLs/tokens as bearer credentials. Samsarix therefore stores neither blobs nor URLs: it accepts at most five ordered opaque descriptors, rejects unknown fields and duplicate IDs, and caps their canonical JSON at 8192 bytes.
+
+HTTP and WebSocket creation accept attachment-only messages and return descriptors through history, replies, search, pins, export schema 7, realtime events, and selected signed webhooks. Content/metadata edits preserve immutable references. SQLite schema 10 and PostgreSQL schema 13 persist default-empty arrays; tombstones clear them, retained PostgreSQL message events scrub them, and the existing webhook deletion boundary removes prior payload bodies. Unpublished TypeScript SDK 0.9.0 validates outbound descriptors and keeps inbound attachment fields optional for released-0.12 compatibility.
+
+The host application remains responsible for authenticated upload initiation, extension/signature/type validation, malware or content scanning, quotas, isolated object storage, fresh room/user authorization on every download, short-lived signed URL issuance, orphan cleanup, retention, and storage/egress cost. Descriptor IDs are references, never authority. The engine does not fetch or delete objects and deliberately provides no multipart upload endpoint, proxy download, media transformation, signed URL, storage SDK, or false content-safety claim.
+
+Final local verification passes Ruff lint/format, mypy, compileall, **599 non-PostgreSQL tests with two expected skips and 123 live PostgreSQL tests deselected**, and all **62 TypeScript SDK tests**. The 31-file TypeScript package passes inspection and its real HTTP/WebSocket/reconnect journey reports `attachments=ok`. A clean sdist/wheel passes Twine; a fresh Python 3.14 wheel-only environment passes `pip check`, reports no known third-party vulnerabilities, and completes the installed HTTP/WebSocket/webhook/export/lifecycle/backup smoke with attachment creation, preservation, and scrubbing. Live PostgreSQL migration/storage/privacy, container/Kubernetes acceptance, exact-PR CI, protected merge, and exact-main CI remain gates. No registry publication, hosted object, production deployment, customer data, telemetry, paid service, or owner infrastructure is introduced.
+
+Primary references checked on 2026-09-01: [Sendbird external file-message URL](https://sendbird.com/docs/chat/platform-api/v3/message/messaging-basics/send-a-message), [Stream file uploads and signed access](https://getstream.io/chat/docs/node/file-uploads/), [OWASP File Upload Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html), [Google Cloud signed URLs](https://docs.cloud.google.com/storage/docs/access-control/signed-urls), and [Azure shared access signatures](https://learn.microsoft.com/en-us/azure/storage/common/storage-sas-overview). These references establish a conservative security boundary, not demand or product-market fit.
+
+## Previous v0.13 engineering status
 
 The application-metadata slice starts from clean synchronized `main` at merged PR #60 (`7dfc43a`) and its successful 19-job exact-main run: **694 Python tests, two skips, 90.01% coverage**, 119 live PostgreSQL tests, 60 SDK tests, package/wheel, container, restore/PITR, load and Kubernetes gates. Official Sendbird, Stream, and Ably contracts expose custom per-message data/metadata, supporting the familiar need to attach application context to chat. Samsarix deliberately narrows that shape to a flat 20-key, 4096-byte JSON-scalar object for named support ticket, classroom assignment, incident severity/runbook, and safe action-reference uses. It is untrusted display/integration data, not authorization, server routing, markup, or executable UI.
 
@@ -630,7 +642,7 @@ This v0.3 verification was local on Windows with CPython 3.11.9. The configured 
 
 ## Deferred and blocked work
 
-Multi-instance storage plus fan-out, attachment storage policy, reactions only against named journeys, and sustained load testing are genuine next-stage engineering, ordered in the roadmap. The current single-process workflow, separated token-signing trust, reliable committed-event integration, and hardened container profile are complete enough for controlled application evaluation; horizontal scale and capacity claims remain intentionally deferred until measured.
+Binary upload/download hosting, object-store integration, media transformation, and end-user attachment lifecycle UI remain host-application concerns. Multi-instance capacity evidence on controlled infrastructure, longer sustained soak, and broader real-client failure injection remain genuine next-stage engineering, ordered in the roadmap. The current PostgreSQL fan-out, separated token-signing trust, reliable committed-event integration, and hardened container profile are complete enough for controlled application evaluation; capacity and availability claims remain intentionally bounded by the recorded measurements.
 
 Public package publication, hosted deployment, domains, credentials, signing, and pricing remain owner-controlled. No external accounts, infrastructure, releases, or spending were created as part of the local productization work.
 

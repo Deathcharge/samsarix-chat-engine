@@ -13,6 +13,7 @@ from .auth import (
 )
 from .config import ConfigurationError, Settings
 from .models import (
+    AttachmentReference,
     AuditEvent,
     AuditEventPage,
     Message,
@@ -36,6 +37,7 @@ __all__ = [
     "AccessTokenService",
     "AccessTokenVerifier",
     "AuthenticationError",
+    "AttachmentReference",
     "AuditEvent",
     "AuditEventPage",
     "ChatStore",

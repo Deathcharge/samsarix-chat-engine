@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Samsarix LLC
 // SPDX-License-Identifier: MPL-2.0
 
+import { normalizeAttachmentReferences } from "./attachments.js";
 import { SamsarixApiError } from "./errors.js";
 import { normalizeMessageMetadata } from "./metadata.js";
 import { RoomSession } from "./room-session.js";
@@ -166,10 +167,16 @@ export class SamsarixChatClient {
   }
 
   async createMessage(roomId: string, payload: MessageCreate, idempotencyKey?: string): Promise<ChatMessage> {
-    const body =
-      payload.metadata === undefined
-        ? payload
-        : { ...payload, metadata: normalizeMessageMetadata(payload.metadata) };
+    const attachments =
+      payload.attachments === undefined ? undefined : normalizeAttachmentReferences(payload.attachments);
+    if ((payload.content ?? "").trim().length === 0 && (attachments?.length ?? 0) === 0) {
+      throw new TypeError("content or at least one attachment is required");
+    }
+    const body = {
+      ...payload,
+      ...(payload.metadata === undefined ? {} : { metadata: normalizeMessageMetadata(payload.metadata) }),
+      ...(attachments === undefined ? {} : { attachments }),
+    };
     return this.request<ChatMessage>(`/v1/rooms/${encodeURIComponent(roomId)}/messages`, {
       method: "POST",
       body,

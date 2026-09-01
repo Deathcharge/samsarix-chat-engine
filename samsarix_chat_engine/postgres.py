@@ -25,7 +25,7 @@ from psycopg.conninfo import conninfo_to_dict
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
-POSTGRES_SCHEMA_VERSION = 12
+POSTGRES_SCHEMA_VERSION = 13
 POSTGRES_MIGRATION_LOCK_ID = 7_495_346_927_831_819_041
 POSTGRES_EVENT_SEQUENCE_LOCK_ID = 7_495_346_927_831_819_042
 POSTGRES_EVENT_RETENTION_LOCK_ID = 7_495_346_927_831_819_043
@@ -1169,6 +1169,11 @@ class PostgresFoundation:
                             jsonb_typeof(application_metadata) = 'object'
                             AND octet_length(application_metadata::text) <= 8192
                         ),
+                        attachment_references JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (
+                            jsonb_typeof(attachment_references) = 'array'
+                            AND jsonb_array_length(attachment_references) <= 5
+                            AND octet_length(attachment_references::text) <= 16384
+                        ),
                         edited_at TIMESTAMPTZ,
                         deleted_at TIMESTAMPTZ,
                         UNIQUE (room_id, client_message_id)
@@ -1192,6 +1197,16 @@ class PostgresFoundation:
                     ALTER TABLE public.samsarix_messages
                     ADD COLUMN IF NOT EXISTS parent_message_id TEXT
                         REFERENCES public.samsarix_messages(id) ON DELETE SET NULL
+                    """
+                )
+                await connection.execute(
+                    """
+                    ALTER TABLE public.samsarix_messages
+                    ADD COLUMN IF NOT EXISTS attachment_references JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (
+                        jsonb_typeof(attachment_references) = 'array'
+                        AND jsonb_array_length(attachment_references) <= 5
+                        AND octet_length(attachment_references::text) <= 16384
+                    )
                     """
                 )
                 await connection.execute(

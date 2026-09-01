@@ -19,6 +19,12 @@ await chat.createMessage("support-case-42", {
   content: "Payment failed after the upgrade",
   client_message_id: crypto.randomUUID(),
   metadata: { "ticket.id": "SUP-42", "ticket.channel": "in_product" },
+  attachments: [{
+    id: "support-upload-SUP-42-trace",
+    name: "payment-trace.txt",
+    media_type: "text/plain",
+    size_bytes: 1842,
+  }],
 });
 const messages = await chat.listMessages("support-case-42");
 const paymentContext = await chat.searchMessages("support-case-42", "payment failed");
@@ -64,6 +70,8 @@ Reactions are low-noise state signals, not replacement messages or workflow auth
 Pins are shared room curation, not private bookmarks or workflow authority. Give `room:pin` only to agents, teachers, moderators, or incident leads that may elevate an accepted answer, runbook, decision, guideline, or announcement for everyone with room read access. Pin mutations also require `room:read`, are metadata-audited, and emit `message.pin.updated`; refresh the newest-first pin list after reconnect or concurrent changes. Tombstoning clears the pin. The host application still decides whether a pinned resolution should close a case or trigger another side effect.
 
 Application message metadata connects the room transcript to host-owned records without making chat storage the workflow database. Use bounded scalar references such as `ticket.id`, `assignment.id`, `incident.severity`, `runbook`, or `action`; keep customer records, access decisions, arbitrary nested data, and executable UI configuration in the host application. Every participant with room read access and every selected message webhook receiver can see the metadata. Treat values as untrusted display/integration data, and use the signed token—not metadata—for authorization. Tombstoning clears the object along with message content.
+
+Attachment references connect a message to host-owned evidence or resources without turning Samsarix into a blob store. Authenticate and scan the upload before creating the message, store only a stable opaque object ID plus bounded display facts, and resolve that ID through a fresh room/user authorization check whenever a client downloads it. Never put a signed URL, storage credential, local path, or authorization decision in the descriptor. Tombstoning clears references from the chat record but does not delete host-owned bytes; the host must handle orphan cleanup, retention, and storage/egress cost. See [Host-owned attachment references](ATTACHMENTS.md) for the complete contract.
 
 The runnable [support workflow example](../examples/03_support_workflow.py) demonstrates the complete HTTP path with separate customer and agent identities. With a server running and an operator key plus signing secret configured, issue two tokens:
 

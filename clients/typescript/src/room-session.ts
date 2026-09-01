@@ -1,10 +1,12 @@
 // Copyright (c) 2026 Samsarix LLC
 // SPDX-License-Identifier: MPL-2.0
 
+import { isAttachmentReferences, normalizeAttachmentReferences } from "./attachments.js";
 import { SamsarixConnectionError } from "./errors.js";
 import { isMessageMetadata, normalizeMessageMetadata } from "./metadata.js";
 import type { SamsarixChatClient } from "./client.js";
 import type {
+  AttachmentReference,
   ConnectionState,
   Credential,
   RoomEvent,
@@ -131,9 +133,16 @@ export class RoomSession {
     closeTransport(socket, code, reason);
   }
 
-  sendMessage(content: string, clientMessageId?: string, metadata?: MessageMetadata): void {
-    if (content.trim().length === 0) {
-      throw new TypeError("content must not be blank");
+  sendMessage(
+    content: string,
+    clientMessageId?: string,
+    metadata?: MessageMetadata,
+    attachments?: AttachmentReference[],
+  ): void {
+    const normalizedAttachments =
+      attachments === undefined ? undefined : normalizeAttachmentReferences(attachments);
+    if (content.trim().length === 0 && (normalizedAttachments?.length ?? 0) === 0) {
+      throw new TypeError("content or at least one attachment is required");
     }
     if (this.maxMessageChars !== undefined && content.length > this.maxMessageChars) {
       throw new RangeError(`content exceeds the ${this.maxMessageChars}-character room limit`);
@@ -146,6 +155,7 @@ export class RoomSession {
       content,
       ...(clientMessageId === undefined ? {} : { client_message_id: clientMessageId }),
       ...(metadata === undefined ? {} : { metadata: normalizeMessageMetadata(metadata) }),
+      ...(normalizedAttachments === undefined ? {} : { attachments: normalizedAttachments }),
     });
   }
 
@@ -154,12 +164,15 @@ export class RoomSession {
     content: string,
     clientMessageId?: string,
     metadata?: MessageMetadata,
+    attachments?: AttachmentReference[],
   ): void {
     if (parentMessageId.length === 0 || parentMessageId.length > 128) {
       throw new RangeError("parentMessageId must be between 1 and 128 characters");
     }
-    if (content.trim().length === 0) {
-      throw new TypeError("content must not be blank");
+    const normalizedAttachments =
+      attachments === undefined ? undefined : normalizeAttachmentReferences(attachments);
+    if (content.trim().length === 0 && (normalizedAttachments?.length ?? 0) === 0) {
+      throw new TypeError("content or at least one attachment is required");
     }
     if (this.maxMessageChars !== undefined && content.length > this.maxMessageChars) {
       throw new RangeError(`content exceeds the ${this.maxMessageChars}-character room limit`);
@@ -173,6 +186,7 @@ export class RoomSession {
       parent_message_id: parentMessageId,
       ...(clientMessageId === undefined ? {} : { client_message_id: clientMessageId }),
       ...(metadata === undefined ? {} : { metadata: normalizeMessageMetadata(metadata) }),
+      ...(normalizedAttachments === undefined ? {} : { attachments: normalizedAttachments }),
     });
   }
 
@@ -552,6 +566,7 @@ function isChatMessage(value: unknown): boolean {
     (!("pinned_at" in value) || isNullableStringField(value, "pinned_at")) &&
     (!("pinned_by" in value) || isNullableStringField(value, "pinned_by")) &&
     (!("metadata" in value) || isMessageMetadata(value.metadata)) &&
+    (!("attachments" in value) || isAttachmentReferences(value.attachments)) &&
     isNullableStringField(value, "edited_at") &&
     isNullableStringField(value, "deleted_at")
   );

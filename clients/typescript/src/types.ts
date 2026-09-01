@@ -8,6 +8,14 @@ export type CredentialProvider = Credential | (() => Credential | Promise<Creden
 export type MessageMetadataValue = string | number | boolean | null;
 export type MessageMetadata = Record<string, MessageMetadataValue>;
 
+export interface AttachmentReference {
+  id: string;
+  name: string;
+  media_type: string;
+  size_bytes: number;
+  sha256?: string | null;
+}
+
 export interface Room {
   id: string;
   name: string;
@@ -45,6 +53,8 @@ export interface ChatMessage {
   pinned_by?: string | null;
   /** Bounded application context; released 0.12 servers omit it. */
   metadata?: MessageMetadata;
+  /** Opaque host-owned file descriptors; released 0.12 servers omit them. */
+  attachments?: AttachmentReference[];
   edited_at: string | null;
   deleted_at: string | null;
 }
@@ -73,10 +83,11 @@ export interface PinMutation {
 
 export interface MessageCreate {
   sender?: string;
-  content: string;
+  content?: string;
   client_message_id?: string;
   parent_message_id?: string;
   metadata?: MessageMetadata;
+  attachments?: AttachmentReference[];
 }
 
 export interface MessagePage {

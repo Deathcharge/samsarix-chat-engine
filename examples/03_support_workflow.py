@@ -65,6 +65,16 @@ status, customer_message = request(
     payload={
         "content": "My deployment cannot reconnect.",
         "metadata": {"ticket.id": "SUP-DEMO-1", "ticket.channel": "in_product"},
+        # The host application has already authenticated, scanned, stored, and
+        # authorized this object. Samsarix stores only its opaque descriptor.
+        "attachments": [
+            {
+                "id": "support-upload-SUP-DEMO-1-trace",
+                "name": "reconnect-trace.txt",
+                "media_type": "text/plain",
+                "size_bytes": 1842,
+            }
+        ],
     },
 )
 if status != 201 or not isinstance(customer_message, dict):
@@ -107,6 +117,7 @@ print(
             "agent_after": agent_read,
             "customer_before": customer_unread,
             "customer_after": customer_read,
+            "customer_attachment_ids": [attachment["id"] for attachment in customer_message.get("attachments", [])],
         },
         indent=2,
     )

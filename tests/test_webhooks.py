@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 
 from samsarix_chat_engine import Settings, create_app
 from samsarix_chat_engine.config import ConfigurationError
-from samsarix_chat_engine.models import MemberModerationUpdate, RoomCreate
+from samsarix_chat_engine.models import AttachmentReference, MemberModerationUpdate, RoomCreate
 from samsarix_chat_engine.store import ChatStore, WebhookCapacityError, WebhookPayloadUnavailableError
 from samsarix_chat_engine.webhooks import (
     WebhookAttemptResult,
@@ -63,6 +63,15 @@ async def test_outbox_is_transactional_idempotent_and_covers_committed_events(tm
         sender="alice",
         content="hello",
         metadata={"ticket.id": "SUP-42"},
+        attachments=[
+            AttachmentReference(
+                id="trace-42",
+                name="request-trace.json",
+                media_type="application/json",
+                size_bytes=512,
+                sha256="a" * 64,
+            )
+        ],
         client_message_id="client-1",
         allow_frozen=False,
         author_subject="alice",
@@ -80,7 +89,9 @@ async def test_outbox_is_transactional_idempotent_and_covers_committed_events(tm
     assert replay == created
     first_delivery = await store.next_webhook_delivery(datetime.now(timezone.utc) + timedelta(seconds=1))
     assert first_delivery is not None
-    assert json.loads(first_delivery.payload)["data"]["message"]["metadata"] == {"ticket.id": "SUP-42"}
+    created_payload = json.loads(first_delivery.payload)["data"]["message"]
+    assert created_payload["metadata"] == {"ticket.id": "SUP-42"}
+    assert [attachment["id"] for attachment in created_payload["attachments"]] == ["trace-42"]
     await store.record_webhook_attempt(
         first_delivery.delivery.id,
         attempted_at=datetime.now(timezone.utc),
@@ -102,7 +113,9 @@ async def test_outbox_is_transactional_idempotent_and_covers_committed_events(tm
     )
     update_delivery = await store.next_webhook_delivery(datetime.now(timezone.utc) + timedelta(seconds=1))
     assert update_delivery is not None
-    assert json.loads(update_delivery.payload)["data"]["message"]["metadata"] == {"ticket.status": "resolved"}
+    updated_payload = json.loads(update_delivery.payload)["data"]["message"]
+    assert updated_payload["metadata"] == {"ticket.status": "resolved"}
+    assert updated_payload["attachments"] == created_payload["attachments"]
     await store.record_webhook_attempt(
         update_delivery.delivery.id,
         attempted_at=datetime.now(timezone.utc),
@@ -143,6 +156,7 @@ async def test_outbox_is_transactional_idempotent_and_covers_committed_events(tm
     assert envelope["type"] == "message.deleted"
     assert envelope["data"]["message"]["content"] == ""
     assert envelope["data"]["message"]["metadata"] == {}
+    assert envelope["data"]["message"]["attachments"] == []
     assert envelope["data"]["room_id"] == "support"
     assert updated.content == "updated"
     assert deleted.content == ""

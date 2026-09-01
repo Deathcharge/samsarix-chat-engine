@@ -87,6 +87,42 @@ test("message metadata is canonicalized, updated, cleared, and bounded before tr
   assert.equal(requests.length, 3);
 });
 
+test("attachment references support attachment-only messages and reject unsafe descriptors before transport", async () => {
+  const requests = [];
+  const client = new SamsarixChatClient({
+    baseUrl: "https://chat.example",
+    credential: { token: "room-token" },
+    fetch: async (url, init) => {
+      requests.push({ url: String(url), init });
+      return jsonResponse({});
+    },
+  });
+  const attachment = {
+    id: "upload:SUP-42:trace",
+    name: "trace.json",
+    media_type: "application/json",
+    size_bytes: 256,
+    sha256: "b".repeat(64),
+  };
+
+  await client.createMessage("support", { attachments: [attachment] });
+  assert.deepEqual(JSON.parse(requests[0].init.body), { attachments: [attachment] });
+  await assert.rejects(client.createMessage("support", {}), TypeError);
+  await assert.rejects(
+    client.createMessage("support", { attachments: [{ ...attachment, id: "bad id" }] }),
+    RangeError,
+  );
+  await assert.rejects(
+    client.createMessage("support", { attachments: [{ ...attachment, url: "https://example.test/file" }] }),
+    TypeError,
+  );
+  await assert.rejects(
+    client.createMessage("support", { attachments: [attachment, attachment] }),
+    RangeError,
+  );
+  assert.equal(requests.length, 1);
+});
+
 test("concurrent operations share one in-flight credential refresh", async () => {
   let credentials = 0;
   let releaseCredential;

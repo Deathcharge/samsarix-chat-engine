@@ -51,7 +51,7 @@ Admin-only. Send `{"archived":true}` to make a room read-only and close active c
 
 ### `GET /v1/rooms/{room_id}/export`
 
-Admin-only. Streams `application/x-ndjson`: a `samsarix.room_export` metadata record with `schema_version: 6`, followed by one current `message` record or tombstone per line in chronological order. Schema 6 retains nullable `parent_message_id`, grouped `reactions`, and nullable `pinned_at`/`pinned_by`, then adds bounded message `metadata`. The response is an attachment and the operation records `room.export_requested`.
+Admin-only. Streams `application/x-ndjson`: a `samsarix.room_export` metadata record with `schema_version: 7`, followed by one current `message` record or tombstone per line in chronological order. Schema 7 retains nullable `parent_message_id`, grouped `reactions`, nullable `pinned_at`/`pinned_by`, and bounded message `metadata`, then adds ordered host-owned `attachments`. The response is an attachment and the operation records `room.export_requested`.
 
 ### `DELETE /v1/rooms/{room_id}`
 
@@ -67,15 +67,18 @@ Persists a message, broadcasts it to the room, and returns 201:
   "content": "Hello",
   "client_message_id": "client-generated-id",
   "parent_message_id": null,
-  "metadata": {"ticket.id":"SUP-42","priority":2}
+  "metadata": {"ticket.id":"SUP-42","priority":2},
+  "attachments": [{"id":"upload:SUP-42:trace","name":"trace.json","media_type":"application/json","size_bytes":256}]
 }
 ```
 
-`sender` is 1–64 characters for operator or local access. Token clients may omit it; the signed subject is persisted. A conflicting value returns `403 identity_mismatch`. `content` is nonblank and subject to `SAMSARIX_CHAT_MAX_MESSAGE_CHARS`. `client_message_id` is optional and at most 128 characters. `Idempotency-Key` can be used instead; if both are present, they must match. Replaying an ID returns the first persisted message with HTTP 200 and does not broadcast it again.
+`sender` is 1–64 characters for operator or local access. Token clients may omit it; the signed subject is persisted. A conflicting value returns `403 identity_mismatch`. `content` is subject to `SAMSARIX_CHAT_MAX_MESSAGE_CHARS` and must be nonblank unless at least one attachment is supplied. `client_message_id` is optional and at most 128 characters. `Idempotency-Key` can be used instead; if both are present, they must match. Replaying an ID returns the first persisted message with HTTP 200 and does not broadcast it again.
 
 Set `parent_message_id` to a non-deleted top-level message in the same room to create a reply. Threads are exactly one level deep: replying to a reply returns `409 thread_depth_exceeded`; a deleted parent returns `409 parent_message_deleted`; an unknown or cross-room parent returns `404 parent_message_not_found`. Archived rooms reject new messages with `409 room_archived`; frozen rooms reject member writes with `409 room_frozen`; active controls return `403 room_muted` or `403 room_banned`.
 
 Optional `metadata` is a flat JSON object for host-application display and integration context. It accepts at most 20 unique lowercase ASCII keys matching `^[a-z][a-z0-9_.-]{0,63}$`; values are strings, booleans, null, or finite numbers, with integers restricted to the JavaScript-safe range. Canonical UTF-8 JSON is capped at 4096 bytes. Arrays and nested objects are rejected. Treat every value as untrusted data: it is not authorization, server routing, HTML, or executable UI. Idempotent create replay returns the first persisted metadata and ignores a different retry body.
+
+Optional `attachments` contains at most five ordered opaque descriptors totaling at most 8192 canonical UTF-8 JSON bytes. Each requires a unique portable `id` (1–128 characters), untrusted display `name` (1–255, no controls), lowercase `media_type`, and non-negative JavaScript-safe `size_bytes`; `sha256` is an optional lowercase 64-hex digest. Unknown fields and URLs are rejected. The engine does not upload, fetch, scan, authorize, or delete the file. The host resolves IDs and issues a fresh authorized download after checking current room access; never persist an expiring signed URL. See [Host-owned attachment references](ATTACHMENTS.md).
 
 ### `PATCH /v1/rooms/{room_id}/messages/{message_id}`
 
@@ -87,7 +90,7 @@ Replaces a non-deleted message's content and sets `edited_at`. The signed author
 
 ### `DELETE /v1/rooms/{room_id}/messages/{message_id}`
 
-The signed author or an administrator may delete. Success returns 204, replaces content with an empty string, clears application metadata, reaction actors/counts, and pin metadata, sets `deleted_at`, and broadcasts `message.deleted` once. Repeating the delete is idempotent. The tombstone stays in chronological history so clients do not reorder surrounding messages; deleted content, application context, reaction identity, and pin identity are not retained by this feature. Administrators may remove content while a room is frozen or archived.
+The signed author or an administrator may delete. Success returns 204, replaces content with an empty string, clears application metadata, attachment references, reaction actors/counts, and pin metadata, sets `deleted_at`, and broadcasts `message.deleted` once. Repeating the delete is idempotent. The tombstone stays in chronological history so clients do not reorder surrounding messages; deleted content, application context, attachment identifiers, reaction identity, and pin identity are not retained by this feature. Administrators may remove content while a room is frozen or archived.
 
 ### `PUT|DELETE /v1/rooms/{room_id}/messages/{message_id}/reactions/{reaction_key}`
 
@@ -116,7 +119,7 @@ Returns messages in chronological order:
 }
 ```
 
-Pages contain the newest matching messages. Message objects include nullable `parent_message_id`, sorted `reactions: [{"key":"ack","count":2}]`, nullable `pinned_at`/`pinned_by`, application `metadata`, `edited_at`, and `deleted_at`; a deleted message has empty `content`, empty metadata, no reactions, and no pin. Top-level history intentionally includes replies in the same flat chronological stream for backward compatibility. When `next_before` is non-null, pass it as `before` to fetch the next older page. An unknown or cross-room cursor returns `400 invalid_cursor`.
+Pages contain the newest matching messages. Message objects include nullable `parent_message_id`, sorted `reactions: [{"key":"ack","count":2}]`, nullable `pinned_at`/`pinned_by`, application `metadata`, ordered `attachments`, `edited_at`, and `deleted_at`; a deleted message has empty `content`, metadata and attachments, no reactions, and no pin. Top-level history intentionally includes replies in the same flat chronological stream for backward compatibility. When `next_before` is non-null, pass it as `before` to fetch the next older page. An unknown or cross-room cursor returns `400 invalid_cursor`.
 
 ### `GET /v1/rooms/{room_id}/messages/{parent_message_id}/replies?limit=50&before={message_id}`
 
@@ -284,7 +287,7 @@ Live events are:
 ### Client commands
 
 ```json
-{"type":"message","content":"Hello","client_message_id":"optional-id","metadata":{"ticket.id":"SUP-42"}}
+{"type":"message","content":"Hello","client_message_id":"optional-id","metadata":{"ticket.id":"SUP-42"},"attachments":[]}
 ```
 
 ```json
