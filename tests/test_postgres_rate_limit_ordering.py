@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+pytest.importorskip("psycopg")
+
 from samsarix_chat_engine.postgres_rate_limits import PostgresRateLimiter, RateLimitDecision
 
 
