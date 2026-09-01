@@ -347,6 +347,7 @@ async def test_schema_v12_adds_empty_attachment_references(clean_postgres_databa
 @pytest.mark.asyncio
 async def test_attachment_references_have_postgres_parity_and_are_scrubbed(store: PostgresChatStore) -> None:
     await store.create_room(RoomCreate(id="general", name="General"))
+    await store.foundation.register_instance("attachment-observer", lease_seconds=30)
     attachment = AttachmentReference(
         id="upload:SUP-42:trace",
         name="trace.json",
